@@ -3,6 +3,64 @@
 Each track's brief goes through up to 3 review rounds. Every round is a two-step:
 `agent-review-panel` scores → `plan-review-integrator` applies findings.
 
+## ⚠️ NON-NEGOTIABLE — do not skip this phase
+
+Added in **v1.2.0** after the v1.0.1 production run skipped Phase B entirely
+and shipped findings that a retroactive panel immediately flagged (P0
+contradiction in consolidation, overstated lead number by ~30%, novelty-gate
+fails on all initial track candidates).
+
+**The review panel is the orchestrator's first-class step, not an optional
+quality gate.** If Phase A produces briefs, Phase B MUST run on each of them
+before any consolidation. The only acceptable reasons to skip:
+
+- All tracks BLOCKED and produced no briefs → no panel needed (nothing to
+  review). Log this explicitly in `morning_summary.md §1`.
+- Running into MAX_ROUNDS=3 with unresolved P1s → ship with the "capped"
+  marker per the locked-file protocol. **Capping is a valid exit, but
+  skipping entirely is not.**
+
+Anti-patterns caught in v1.0.1 that the panel would have caught in-flight:
+
+1. **Top/bottom internal contradictions** — each self-review writes one
+   framing in good faith; only a cross-doc cross-persona read surfaces the
+   clash. `data-analyst` + `client-trust-evaluator` catching both lines of
+   the same section is how this gets caught.
+2. **Overstated effect sizes** (e.g. "4.4×" shipping as headline when a
+   proper cross-cohort significance test yields "3.17× with wide CI") —
+   `data-scientist` catches the missing test; `qa-expert` catches the
+   missing reproducibility artefact.
+3. **Un-cited numbers** — the brief cites `n=3,668 In-Process` but that
+   total never appeared in `canonical_numbers.md`. `data-analyst` catches
+   this on traceability pass.
+4. **Scratch-table TTL** — brief depends on `ml_scratch.overnight_*` view
+   that may expire within 30 days of a client rerun. `compliance-auditor`
+   catches this on provenance check.
+
+**Orchestrator implementation:** after Phase A completes for each track,
+the orchestrator MUST invoke `Skill(agent-review-panel)` with the
+6-persona seeded list (see §Panel composition below). Do not let a
+subagent decide whether the panel is worth running. Do not defer the
+panel to "after consolidation" — by that point the contradictions and
+overstatements have already been baked into the client-facing output.
+
+### Iterate until approved or capped
+
+Round 1 panel verdict ≠ ship signal. If panel returns "Needs revisions":
+
+1. `plan-review-integrator` applies must-fix P0s and P1s surgically.
+2. Re-dispatch panel for round 2.
+3. Repeat up to MAX_ROUNDS=3.
+4. If still not approved at round 3, ship with prominent "capped — awaiting
+   human signoff" banner at the top of the client-facing brief AND
+   `morning_summary.md §1`.
+
+The review-and-iterate loop is where the workflow earns its keep. Track C's
+self-review alone caught some issues in v1.0.1; Track B's self-review caught
+others. Neither caught the cross-doc contradiction. A panel would have. An
+iterated panel would have also caught the overstated 4.4×. **v2 and beyond
+must not skip this loop.**
+
 ## Panel composition
 
 6 seeded personas + Supreme Judge (Opus). Seed explicitly rather than letting
@@ -62,12 +120,91 @@ Round N for track_X:
         brief still goes to consolidation, caveat prominent
 ```
 
+## Stats-verification sub-phase (v1.3.0 — added S92 P0-2)
+
+Added after the S91 retroactive panel caught the **overstated 4.4× headline**
+that a post-hoc cross-band bootstrap test revised to 3.17× with wide CI. The
+`data-scientist` persona had flagged the missing cross-band significance
+test in Round 1 of the retroactive panel, but the test itself wasn't run
+until the orchestrator did it manually. Had the test run in-flight, Round 2
+would have received the corrected number and the client-facing brief would
+never have shipped with 4.4×.
+
+**Trigger.** The `data-scientist` persona's Round N report **may emit one or
+more stats-verification requests**, one per claim whose methodology is
+under-specified. A request is a JSON object in `review/round_N/stats_requests.jsonl`:
+
+```json
+{
+  "claim_id": "F1_intl_ug_cliff_sharpness",
+  "question": "Is the Intl 4.4× ratio significantly different from the 2.2× domestic average?",
+  "snippet_path": "review/round_N/stats/F1_cross_band_test.py",
+  "bq_queries": ["SELECT ... FROM ml_scratch.overnight_stitched_score_v1 WHERE ..."],
+  "expected_output_shape": "{ratios: {band: point, ci_low, ci_high}, diff_ci: [low, high], p_greater: float}",
+  "required_for": "P1 resolution — without this, the headline number is unverified"
+}
+```
+
+The snippet is a short, self-contained `.py` (or `.sql`) the panel would run
+if it could. It must:
+- Pin `scoring_date` / `TARGET_DATE` explicitly (no `CURRENT_DATE()`)
+- Print structured output to stdout (JSON-able or the expected shape)
+- Complete in < 2 min of BQ time (cap: 10 GB scanned per request)
+- Never write to a table — read-only verification only
+
+**Orchestrator action (between Round N and Round N+1).** The orchestrator
+inspects `stats_requests.jsonl`. For each request:
+
+1. Reads `snippet_path`; runs it (`python3 <snippet>` or `bq query < <snippet>`).
+2. Captures stdout + exit code to `review/round_N/stats/<claim_id>.txt`.
+3. If exit code ≠ 0 or runtime > 2 min, marks the request `ERRORED` and
+   escalates to the Supreme Judge (don't silently drop — a failed
+   verification is itself a signal).
+4. Appends a `stats_verification_result` block to the integrator's input
+   bundle.
+
+**Integrator action (Round N integration).** The integrator reads the
+verification result alongside the panel report:
+
+- If verification **contradicts the brief's headline**, this is auto-promoted
+  to a **P0 must-fix** — the brief's number gets overwritten with the
+  verified value before the brief is passed to Round N+1.
+- If verification **confirms the brief's headline**, the panel's P1 finding
+  is marked `[VERIFIED]` in round-N integration log — satisfying exit
+  criterion 3 one P1 at a time.
+- If verification **refines the claim** (e.g., confidence interval is wider
+  than the brief implies), the integrator inserts CI language + the
+  verified number; no rollback.
+
+**Round N+1 panel input.** The verified results are loaded into the round
+N+1 panel's input bundle (`review/round_(N+1)/verified_stats.json`) so the
+panel can see what was reconciled without re-deriving it.
+
+**Budget guard.** Max 3 stats-verification requests per track per round
+(prevents the panel from demanding an ad-hoc re-analysis of every claim).
+If more are warranted, trigger a Stage-1 retune (Track C) or successor
+handoff (Track B).
+
+**Contract summary:**
+
+```
+data-scientist → stats_requests.jsonl (≤ 3 entries)
+  ↓
+orchestrator → runs each snippet → stats/<claim_id>.txt
+  ↓
+integrator → verified_stats.json → applies to brief
+  ↓
+round N+1 panel ← verified_stats.json as input
+```
+
 ## Exit criteria (composite — ALL must hold)
 
 1. Supreme Judge verdict ∈ {`Approve`, `Approve with minor revisions`}
 2. Zero unresolved P0 findings
 3. ≥ 2 P1 findings flagged `[VERIFIED]` or `[CONSENSUS]` are resolved (tolerate
-   up to 2 remaining P1s if tagged `[SINGLE-SOURCE]`)
+   up to 2 remaining P1s if tagged `[SINGLE-SOURCE]`). A P1 that the
+   stats-verification sub-phase returned as `[VERIFIED]` counts the same as
+   one resolved via panel consensus.
 4. `client-trust-evaluator` verdict ≥ 6/10 — the ah-ha gate, independent of
    methodological soundness
 

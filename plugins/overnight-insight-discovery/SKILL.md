@@ -16,8 +16,60 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.0.1
+version: 1.3.0
 date: 2026-04-17
+
+# Changelog
+# 1.3.0 (2026-04-17, S92 P0-2 + P1-3 — stats verification + chart divergence)
+#   - Added stats-verification sub-phase to Phase B review loop. The
+#     `data-scientist` persona now emits structured `stats_requests.jsonl`
+#     entries (≤3/track/round) with `{claim_id, question, snippet_path,
+#     bq_queries, expected_output_shape}`. Orchestrator runs each snippet
+#     between Round N and Round N+1, captures stdout to `stats/<claim_id>.txt`,
+#     and feeds results back to the integrator and round-N+1 panel via
+#     `verified_stats.json`.
+#   - Auto-promotes contradicting verification results to **P0 must-fix**
+#     (brief's headline number gets overwritten before round N+1).
+#   - Exit criterion 3 updated: a P1 marked `[VERIFIED]` via stats-verification
+#     counts the same as one resolved via panel consensus.
+#   - Added in direct response to the v1.0.1 retroactive-panel miss where
+#     `data-scientist` flagged the missing cross-band significance test in
+#     round 1, but the test itself only ran post-hoc — revealing the 4.4× →
+#     3.17× overstatement only after the client-brief shipped.
+#     See references/phase_b_review_loop.md §"Stats-verification sub-phase".
+#   - Added chart-divergence check in Phase A. After each chart is saved,
+#     compute `visual_prominence = |claim - mean(others)| / y_range` at the
+#     claim's x-locus. If `< 0.15` AND `stats_significant`, flag and emit a
+#     redesign alongside (log y-axis / delta-from-baseline / small multiples /
+#     difference plot / forest plot of ratios+CIs). `chart_meta.json` records
+#     flag + redesign path. Panel's `qa-expert` checks both images are cited
+#     in the brief; `client-trust-evaluator` asks "obvious in 10 seconds?".
+#     Added in response to Finding 1's linear-scale chart obscuring the
+#     3.17× cliff — user's eye caught what no automated check did.
+#     See references/chart_divergence_check.md.
+#
+# 1.2.0 (2026-04-17, post-v1.0.1 production run — second claudeception pass)
+#   - PROMOTED: Phase B review panel from "recommended" to NON-NEGOTIABLE.
+#     v1.0.1 skipped Phase B entirely; retroactive panel then flagged a P0
+#     consolidation contradiction both self-reviews missed, plus an overstated
+#     4.4× → 3.17× effect size. Without review-and-iterate loop,
+#     self-reviews alone do not catch cross-doc / cross-persona issues.
+#     See references/phase_b_review_loop.md §NON-NEGOTIABLE.
+#   - Added mandatory iterate-until-approved-or-capped protocol. MAX_ROUNDS=3;
+#     cap ships with "awaiting human signoff" banner if unresolved P1s remain.
+#   - Orchestrator contract: no longer may a subagent decide whether the
+#     panel runs. Phase A → Phase B is a workflow invariant.
+#
+# 1.1.0 (2026-04-17, post-v1.0.1 run)
+#   - Added Phase 0.-1 credential-liveness pre-flight (ADC token + BQ + dataset +
+#     tool + Python libs). Prevents the "Track B blocked on expired ADC" failure
+#     mode that wasted a full 6.5-hour background-agent dispatch.
+#     See references/phase_0_preparation.md §0.-1.
+#   - Added SHAP-interaction normalization (rho_shap = mean_product /
+#     (mean_abs_a * mean_abs_b)) as the required ranking statistic for
+#     scan_shap_interaction. Raw mean_product confounds interaction with
+#     marginal product; rho_shap isolates genuine co-movement beyond marginals.
+#     See references/shap_interaction_scoring.md.
 ---
 
 # Overnight Insight Discovery
