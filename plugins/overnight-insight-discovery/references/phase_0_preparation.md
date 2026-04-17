@@ -1,7 +1,84 @@
 # Phase 0 — Preparation
 
 Goal: produce every input both tracks will need, so the tracks themselves don't have to
-re-derive shared context. Roughly 60–90 min of work. Six sub-tasks.
+re-derive shared context. Roughly 60–90 min of work. **Seven** sub-tasks — do 0.0 first.
+
+## 0.0 Schema reality check (do FIRST — cheap insurance, catches ~1 session of rework)
+
+Before writing ANY SQL that downstream tasks depend on, query `INFORMATION_SCHEMA.COLUMNS`
+for every canonical table this run will touch. Commit the output as
+`scoping/schemas.md`. This catches the single most expensive class of plan-vs-reality
+mismatch: **wide-vs-long schema**.
+
+### Why this step exists
+
+Phase 0 originally only verified row counts ("data window available: N days, M rows").
+That's necessary but not sufficient. A table can have the expected row volume while
+having a completely different column shape than the plan assumed. The classic failure:
+
+- Plan's SQL: `SELECT score, term, bucket FROM predictions` (assumes long-format)
+- Actual schema: `enrolled_term_fall_score`, `enrolled_term_spring_winter_score`,
+  `enrolled_term_summer_score`, `propensity_bucket_fall`, ... (wide)
+- Row counts match the plan, but every downstream query written against long-format
+  breaks. This cascades through Tasks 3–N and is typically caught mid-Task-3 after 2+
+  hours of Phase 0 work.
+
+The v1.0.0 run caught this the hard way: the stitched-score-view SQL materialized
+"successfully" on wide source data, producing 0 usable rows because the SELECT
+referenced non-existent columns (`term`, `score`, `bucket`). The downstream plan
+assumed the view was long-format; it wasn't. Cost: one retry cycle + a blocker escalation.
+**Adding 0.0 prevents this.**
+
+### What to query
+
+For every table the plan will hit (predictions, enriched, SHAP, training features,
+identity maps, stitched view sources):
+
+```sql
+SELECT column_name, data_type, ordinal_position
+FROM `<project>.<dataset>.INFORMATION_SCHEMA.COLUMNS`
+WHERE table_name = '<table>'
+ORDER BY ordinal_position
+```
+
+Capture the full column list for each. Takes ~5 seconds per table.
+
+### What to document in `scoping/schemas.md`
+
+One section per table, covering:
+
+| Field | Contents |
+|---|---|
+| **Shape** | "Wide (per-term columns)" / "Long (has `term` row dimension)" / "Hybrid" |
+| **Per-term pattern** | If wide: list the per-term column prefixes/suffixes (e.g., `enrolled_term_*_score`). If long: name the term column (e.g., `term_category`). |
+| **Primary key** | The minimal tuple that uniquely identifies a row (e.g., `(scoring_date, visitor_id)` for wide-per-term; `(scoring_date, visitor_id, term_category)` for long). |
+| **Term-independent columns** | Columns the plan can safely join on without term filtering (e.g., `application_status`, `funnel_stage` in enriched tables). |
+| **Term-dependent columns** | Columns that need UNPIVOT or term-filtering to use downstream. |
+| **Null behavior** | When is a per-term column NULL? (e.g., "Spring/Winter scores NULL mid-season because that term isn't being scored right now.") |
+
+### Pattern decisions that flow from 0.0
+
+Once schemas are documented, decide the query-shape policy up front:
+
+- **If any canonical table is wide**: build a stitched view that UNPIVOTs via UNION ALL,
+  and mandate that every downstream query go through the view. Never let downstream
+  queries touch the raw wide table directly — they'll miss the term dimension and
+  break silently.
+- **If enrichment tables are wide but term-independent cols are all that's needed**:
+  join enriched on `(scoring_date, visitor_id)` AFTER filtering the stitched view by
+  term. This is cleaner than UNPIVOTing enrichment twice.
+- **If a canonical table is already long**: check it has the expected term row-dimension
+  name (different projects use `term`, `term_category`, `term_code`, `cohort_term`,
+  etc.). Downstream queries need to know which.
+
+Document these decisions in `scoping/schemas.md` under "Canonical query patterns" so
+every downstream task references one place for the right join/filter shape.
+
+### Rule of thumb
+
+If 0.0 takes more than 30 min, either the scope has too many tables (narrow the
+canonical set) or the schemas are genuinely complex (in which case 0.0 paid for itself
+5× — commit the notes and move on).
 
 ## 0.1 Scoping config
 
@@ -112,6 +189,12 @@ read from disk going forward — no context pass-through needed.
 
 ## Common pitfalls
 
+- **Skipping 0.0 (schema reality check)** because "we know the schema." The v1.0.0 run
+  learned this the hard way: plan assumed long-format `term_enrollment_daily`; actual
+  was wide (per-term score columns). Row counts matched, so the mismatch wasn't
+  caught until Task 3 materialized the stitched view against the wrong schema. Cost:
+  one retry + blocker escalation. 0.0 adds ~15 min up front to save ~2 hours of
+  mid-Phase-0 rework. Always run it.
 - **Using `CURRENT_DATE()` somewhere in Phase 0**. Pin everything to `target_date`
   from the config. Grep for it before committing.
 - **Listing every feature in known-knowns**. Top-20 per cohort is enough. More
@@ -122,3 +205,6 @@ read from disk going forward — no context pass-through needed.
   paste the result, commit together.
 - **Fancy stitched-score algorithms**. Simpler is better. Bucket / percentile /
   outcome are enough; don't derive a new continuous scalar across versions.
+- **Writing the stitched-view SQL before 0.0 is done**. The view's shape depends on
+  whether the source is wide or long. Writing it first locks in an assumption that
+  may need a rewrite.

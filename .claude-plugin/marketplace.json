@@ -1,14 +1,16 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "wan-huiyan-overnight-workflows",
-  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery — multi-agent review panels baked in.",
-  "owner": { "name": "wan-huiyan" },
+  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery \u2014 multi-agent review panels baked in.",
+  "owner": {
+    "name": "wan-huiyan"
+  },
   "plugins": [
     {
       "name": "overnight-insight-discovery",
       "source": "./plugins/overnight-insight-discovery",
       "description": "Overnight autonomous B-vs-C parallel insight discovery that surfaces genuinely ah-ha findings from data, with cohort-conditional novelty gate, adaptive tuning, and agent-review-panel loop.",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "name": "overnight-review-client-delivery",

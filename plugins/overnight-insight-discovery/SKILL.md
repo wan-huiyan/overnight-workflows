@@ -16,7 +16,7 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.0.0
+version: 1.0.1
 date: 2026-04-17
 ---
 
@@ -106,7 +106,7 @@ executing that phase — don't load all of them upfront.
 
 | Phase | Duration | Purpose | Reference |
 |---|---|---|---|
-| 0 | ~90 min | Scoping, stitched data views, cohort-conditional known-knowns | `references/phase_0_preparation.md` |
+| 0 | ~90 min | **Schema reality check first** (0.0), then scoping, stitched data views, cohort-conditional known-knowns | `references/phase_0_preparation.md` |
 | A | ~5–6 hr | Tracks B and C run in parallel, each produces a brief | `references/phase_a_tracks.md` |
 | B | ~2 hr (parallel) | Per-track review loop, up to 3 rounds | `references/phase_b_review_loop.md` |
 | D | ~45 min | Consolidation subagent + one stricter review pass | `references/phase_c_consolidation.md` |
@@ -322,6 +322,11 @@ Phase G — claudeception
 - **Executing without a scoping `known_knowns_by_cohort.jsonl`.** The novelty gate is
   the single biggest defense against "LLM narrates known facts as surprising." Skip
   it and you'll end up with a brief full of SHAP top-20 restatements.
+- **Writing SQL before Phase 0.0 (schema reality check).** Production tables have a
+  habit of being wide where plans assumed long (or vice versa). Row counts match; the
+  first `CREATE VIEW` materializes against a non-existent column list; Task 3 blocks
+  mid-run. `INFORMATION_SCHEMA.COLUMNS` queries take 5 seconds each and prevent ~2 hr
+  of cascading rework across downstream tasks. Always run 0.0 before 0.3.
 
 ## Verification
 
@@ -404,6 +409,16 @@ matplotlib vs plotly, etc.).
 
 ## Origin
 
-Extracted from the a university-admissions propensity project, 2026-04-17 overnight run.
-See the project's `docs/plans/2026-04-17-overnight-ahha-insight-design.md` for the
-original design. Patterns that survived the first production run are canonical here.
+Extracted from a university-admissions propensity project overnight run on 2026-04-17.
+Patterns that survived the first production run are canonical here.
+
+## Version history
+
+- **v1.0.1** (2026-04-17) — Added Phase 0.0 (schema reality check) based on a real blocker
+  from the first production run: predictions table was wide-format (per-term score columns),
+  plan assumed long-format. Row counts matched so the mismatch wasn't caught in Phase 0
+  until Task 3 materialized a stitched view against non-existent columns. Phase 0.0 now
+  mandates `INFORMATION_SCHEMA.COLUMNS` verification of every canonical table before any
+  downstream SQL is written, with a `scoping/schemas.md` artefact documenting wide-vs-long
+  shape, per-term pattern, primary keys, and term-independent columns.
+- **v1.0.0** (2026-04-17) — Initial release.

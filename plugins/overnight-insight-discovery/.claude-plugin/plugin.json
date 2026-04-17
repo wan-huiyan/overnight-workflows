@@ -1,8 +1,10 @@
 {
   "name": "overnight-insight-discovery",
   "description": "Overnight autonomous B-vs-C parallel insight discovery that surfaces genuinely ah-ha findings from data, with cohort-conditional novelty gate, adaptive tuning, and agent-review-panel loop.",
-  "version": "1.0.0",
-  "author": { "name": "wan-huiyan" },
+  "version": "1.0.1",
+  "author": {
+    "name": "wan-huiyan"
+  },
   "repository": "https://github.com/wan-huiyan/overnight-workflows",
   "license": "MIT",
   "keywords": [
