@@ -254,6 +254,49 @@ Values below are starting points the scoping doc should confirm or override:
 - **HTML deliverable**: 5 files — consolidation.html (client-facing) + brief_b /
   brief_c / review_panel_final / workflow_learnings as traceability + index.html
 
+## Model policy (IMPORTANT — overrides `subagent-driven-development` default)
+
+This workflow mandates **Opus (largest-context variant, e.g. Opus 4.7 1M)** for every
+implementer subagent, every reviewer subagent, every consolidator subagent, and every
+fix-dispatch subagent inside the review loop.
+
+**Why the override matters.** The `superpowers:subagent-driven-development` skill has a
+built-in model-selection heuristic that picks cheaper models (Sonnet) for tasks it
+classifies as "mechanical implementation." Most tasks in this workflow look mechanical
+in isolation (write a Python script, run SHAP, compute surprise scores, render HTML) but
+depend on deep judgment that compounds across subagents: novelty-gate enforcement,
+compound-cohort decomposition decisions, narrative quality that survives the
+`client-trust-evaluator` persona's ah-ha gate. A single Sonnet-on-an-implementer-task
+dispatch usually works in isolation but degrades downstream review signals in ways that
+are hard to debug — the integrator rolls back edits that "were almost right" instead of
+caught-wrong, review rounds spin, Stage-1 retune budget exhausts.
+
+Explicit rule: **every `Agent` dispatch from the orchestrator must include
+`model: "opus"` (or equivalent 1M-context variant).** If a subagent is dispatched
+without this override and comes back using Sonnet, stop and re-dispatch the same task
+with Opus. Sonnet output is acceptable for pre-Phase-0 exploratory scoping only.
+
+The only exception: the `agent-review-panel` Supreme Judge already defaults to Opus per
+that skill's own policy — no override needed. Every other dispatch needs the explicit
+`model: "opus"`.
+
+**When you're writing the orchestrator** (Task 26 of the typical implementation plan),
+bake this into the dispatch helper so it's not a per-call decision. Example shape:
+
+```python
+def dispatch_implementer(task_text, context):
+    return Agent(
+        subagent_type="general-purpose",
+        model="opus",  # REQUIRED for this workflow — override sub-skill default
+        run_in_background=task_text.needs_background,
+        description=task_text.name,
+        prompt=build_prompt(task_text, context),
+    )
+```
+
+Document the override prominently in the plan's header so fresh sessions don't
+accidentally slip back to the sub-skill default.
+
 ## Workflow outline
 
 Execute roughly in this order. Each phase's detailed instructions live in
@@ -414,6 +457,14 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.0.2** (2026-04-17) — Added "Model policy" section making the Opus-throughout
+  override explicit. The first production run had an implementer subagent dispatched
+  with Sonnet because `subagent-driven-development`'s default heuristic classified the
+  task as mechanical. Design intent was Opus throughout; the override was implicit in
+  design-doc prose but not in the plan doc, so the fresh session correctly followed the
+  sub-skill's default. Fix: document the override in the plan's header and in this
+  skill's SKILL.md; bake `model="opus"` into the orchestrator's dispatch helper so
+  it's not a per-call decision.
 - **v1.0.1** (2026-04-17) — Added Phase 0.0 (schema reality check) based on a real blocker
   from the first production run: predictions table was wide-format (per-term score columns),
   plan assumed long-format. Row counts matched so the mismatch wasn't caught in Phase 0

@@ -10,7 +10,7 @@
       "name": "overnight-insight-discovery",
       "source": "./plugins/overnight-insight-discovery",
       "description": "Overnight autonomous B-vs-C parallel insight discovery that surfaces genuinely ah-ha findings from data, with cohort-conditional novelty gate, adaptive tuning, and agent-review-panel loop.",
-      "version": "1.0.1"
+      "version": "1.0.2"
     },
     {
       "name": "overnight-review-client-delivery",
