@@ -1,0 +1,85 @@
+# scoping/config.yaml — overnight insight run configuration
+# Copy this to docs/overnight/YYYY-MM-DD/scoping/config.yaml and customize.
+
+run_id: YYYY-MM-DD-ahha-v1           # dated identifier for the overnight run
+
+# --- Time pinning (critical: NEVER use CURRENT_DATE() downstream) -------------
+target_date: "YYYY-MM-DD"            # last full-day production data partition
+target_term: fall                    # or spring_winter / summer / etc.
+target_term_label: "Fall 2026"       # human-readable label for copy
+
+# --- Lookback windows ---------------------------------------------------------
+lookback_days_default: 30            # used by most scans
+lookback_days_shap: 7                # often much smaller; set from actual SHAP coverage
+
+# --- Budgets ------------------------------------------------------------------
+budget:
+  bq_total_tb: 5.0                   # total cap across both tracks
+  bq_track_b_tb: 4.0                 # B (LLM-autonomous) gets ~80%
+  bq_track_c_tb: 1.0                 # C (hybrid) cheaper by design
+  wall_clock_total_hr: 8             # ~5–6.5 hr target, 8 hr hard cap
+  wall_clock_track_b_hr: 6.5
+  wall_clock_track_c_hr: 5.0
+
+# --- Lint patterns (qa-expert review persona fails any query matching these) --
+ban_patterns:
+  - 'CURRENT_DATE\(\)'
+  - 'CURRENT_TIMESTAMP\(\)'
+
+# --- BQ paths -----------------------------------------------------------------
+project: <your-gcp-project>                    # GCP project id (adjust per project)
+stitched_score_view: "ml_scratch.overnight_stitched_score_v1"
+scratch_dataset: "ml_scratch"
+shap_snapshot_table: "ml_scratch.v_training_shap_snapshot_YYYY_MM_DD"
+
+# --- Panel composition (6 seeded personas + Supreme Judge Opus) --------------
+review_panel:
+  seeded_personas:
+    - data-scientist
+    - data-analyst
+    - scientific-critical-thinker
+    - client-trust-evaluator
+    - compliance-auditor
+    - qa-expert
+  judge_model: opus
+  deep_mode: true                    # web research for domain-literature novelty
+  max_rounds_per_track: 3
+  consolidation_strict_exit: true    # Supreme Judge "Approve" only, not "Approve with revisions"
+
+# --- Adaptive tuning (Track C stage_config.yaml initial values) --------------
+stage_config_initial:
+  lift_min: 3.0
+  cohort_min: 50
+  at_risk_min: 100
+  p_max: 0.01
+  stat_support_min: 0.8
+  novelty_similarity_max: 0.7
+  require_off_axis_cohort: false
+  jaccard_max: 0.6
+  cohort_dim_diversity: false
+  require_both_flavors: true
+  max_tuning_passes: 3
+  retune_budget_per_review_loop: 1
+
+# --- Successor handoff thresholds --------------------------------------------
+successor_handoff:
+  track_b_tool_events: 200           # parent dispatches fresh Track B successor past this
+  track_c_tool_events: 80            # Track C runs less LLM, lower threshold
+  max_hops_per_track: 3
+
+# --- Cohort dimensions for known-knowns table --------------------------------
+cohort_dims:
+  - name: funnel_stage
+    source: application_stage
+  - name: propensity_bucket
+    source: bucket
+  - name: acceptance_variant          # remove if not applicable to the project
+    source: acceptance_variant
+  - name: student_type
+    source: app_student_type
+  - name: distance_band
+    source: distance_band
+  - name: fafsa_filed
+    source: has_fafsa_submitted
+  - name: school
+    source: app_division

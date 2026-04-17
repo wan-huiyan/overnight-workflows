@@ -1,0 +1,124 @@
+# Phase 0 — Preparation
+
+Goal: produce every input both tracks will need, so the tracks themselves don't have to
+re-derive shared context. Roughly 60–90 min of work. Six sub-tasks.
+
+## 0.1 Scoping config
+
+Write `scoping/config.yaml` with:
+- `run_id` (dated, e.g. `2026-04-17-ahha-v1`)
+- `target_date` — pin a fixed date string. Never let downstream queries use `CURRENT_DATE()` — the run may cross midnight UTC + mid-run data writes will cause silent drift.
+- `target_term` and `target_term_label` — which term are we analysing
+- `lookback_days_default` (30) and `lookback_days_shap` (often much smaller — check actual SHAP coverage)
+- `budget`: `bq_total_tb`, per-track split, `wall_clock_total_hr`, per-track split
+- `ban_patterns`: regex list for things the qa-expert persona will fail on (e.g. `CURRENT_DATE\(\)`)
+- Paths to the stitched view + scratch dataset
+
+See `assets/config_yaml_template.yaml` for a starter.
+
+## 0.2 Canonical numbers
+
+Write `scoping/canonical_numbers.md`. This is the data-analyst review persona's
+ground truth — every claim in both briefs will be cross-checked against this file.
+Verify the numbers LIVE with a `bq query` before committing; do NOT paste memorized values.
+
+Include:
+- Model version(s) active on target_date
+- Total rows on target_date (count)
+- Data window available with `MIN(date)`, `MAX(date)`, `COUNT(DISTINCT date)`
+- Distribution of every cohort key the novelty gate uses (e.g. distinct values of `application_status`, `bucket`, `acceptance_variant`)
+- Source-of-truth definitions for derived labels, especially outcome labels. If the project has a "deposit status vs enrollment" confusion, call it out explicitly.
+
+See `assets/canonical_numbers_template.md` for structure.
+
+## 0.3 Stitched score / outcome view
+
+If the project has had multiple model versions, raw probabilities cannot be
+stitched across versions. Stable units:
+- **Bucket membership** (if buckets are percentile-based, the cuts are stable but
+  individual membership can flip at version boundaries — flag this for reviewers)
+- **Per-day percentile rank**
+- **Enrollment / conversion outcome** — completely model-independent; preferred for
+  longitudinal analyses
+- Raw probability — NOT stable; use only within a single model_version window
+
+Build one BQ view (or equivalent) that exposes all three stable units alongside
+`model_version` so every downstream query can annotate or filter by version
+without re-deriving. Rename the raw probability column something like
+`raw_score_DO_NOT_STITCH` as a lint flag the qa-expert persona will catch if
+misused.
+
+Also normalise any historical label renames in this view (e.g. legacy
+`Hot/Warm/Cool/Cold` → current `High/Developed/Emerging/Low`) so downstream queries
+don't have to.
+
+## 0.4 Compute SHAP for cohort known-knowns
+
+If the primary model isn't yet scoring today's serving data (freshly-promoted
+model, Dataform serving-features not yet rematerialised, etc.), you may not have
+SHAP on current data at all. Fall back to **training-features SHAP**:
+
+1. Load the model's joblib from GCS/equivalent.
+2. Read a stratified sample (~50K rows per term sub-model) from the training
+   features table.
+3. Run `shap.TreeExplainer(model).shap_values(X)`.
+4. Aggregate per `(cohort_dim, cohort_value, feature)` → `mean_abs_shap` + sign.
+5. Take top-N (typically 20) within each cohort cell. Write to
+   `scoping/known_knowns_by_cohort_<model_version>_training.jsonl`.
+
+Also write full per-row SHAP to a scratch table (`<scratch>.<model>_training_shap_snapshot_<date>`) so it can be re-queried later without re-computing.
+
+This takes ~5–30 min depending on sample size and model complexity. Budget
+<100 GB read for a ~50K sample.
+
+## 0.5 Build consolidated known-knowns JSONL
+
+Merge sources into `scoping/known_knowns_by_cohort.jsonl`:
+
+Priority order:
+1. Current-model training SHAP (if available) — primary for new features
+2. Prior-model serving SHAP (if available, e.g. 7-day window) — reinforcement for shared features
+3. Current-model training-time feature importance from the joblib — global-only fallback
+4. Hard-coded traps: percentile-bucket identity, tautologies, definitional orderings. Include one row per trap with `cohort_dim: "_trap"` so the reviewer can filter them distinctly.
+
+Row schema: `{cohort_dim, cohort_value, feature, family, rank_within_cohort, mean_abs_shap, direction, source}`.
+
+Also write `scoping/feature_families.jsonl` — ~20–40 families grouping raw features
+with their band/level variants (e.g. `accepted_nd_tenure` family includes the raw
+feature + its band-0-30d / 31-90d / 91-180d / 180plus encodings). Prevents the
+novelty gate from being fooled by near-duplicate features.
+
+See `references/cohort_novelty_gate.md` for the novelty-matching logic itself.
+
+## 0.6 Extract new-feature CTE snippets
+
+If the project's production serving-features table is missing some features the
+tracks will want (e.g. very recently added), extract the derivation CTEs from the
+training-features SQLX/DBT/etc. into `scoping/new_feature_cte_snippets.sql`.
+
+Tracks can then inline these CTEs into ad-hoc queries to access features from raw
+sources (Salesforce tables, campaign tables, etc.) without waiting for a new
+materialisation.
+
+Include a header comment in the snippets file noting what's attenuated by
+snapshot-vs-SCD limitations (e.g. Salesforce status fields reflect "current"
+state, not historical; campaigns are upsert-mode). Reviewers will use this to
+flag attenuation-risk claims.
+
+## 0.7 Commit & push, then launch tracks
+
+One commit with everything from Phase 0. Push to the overnight branch. Tracks
+read from disk going forward — no context pass-through needed.
+
+## Common pitfalls
+
+- **Using `CURRENT_DATE()` somewhere in Phase 0**. Pin everything to `target_date`
+  from the config. Grep for it before committing.
+- **Listing every feature in known-knowns**. Top-20 per cohort is enough. More
+  creates noise + slow novelty lookups.
+- **Skipping `canonical_numbers.md`**. Without it, the data-analyst review persona
+  has nothing to verify against. Every subsequent review becomes less useful.
+- **Hardcoding a numeric value you didn't verify live**. Run the `bq query` first,
+  paste the result, commit together.
+- **Fancy stitched-score algorithms**. Simpler is better. Bucket / percentile /
+  outcome are enough; don't derive a new continuous scalar across versions.
