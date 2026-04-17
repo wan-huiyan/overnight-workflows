@@ -39,6 +39,25 @@ The prompt should include, in order:
 Parent polls `state/status.json` periodically (e.g. every 15 min). Track B's run
 is long (hours), so don't wait synchronously — do other work between polls.
 
+### Meltdown circuit breaker (v1.4.0)
+
+In addition to status polling, the parent runs a meltdown check every 5 min
+against `state/<track>/heartbeat.jsonl`. Full contract in
+`references/meltdown_circuit_breaker.md`. Summary:
+
+- **Tool calls without new finding > 50** → `MELTDOWN_ABORT`, respawn with
+  fresh context (1 respawn budget per track by default).
+- **Wallclock minutes without new finding > 90** → same.
+- **Cumulative tool calls > 400** or **wallclock > 7 hr** → hard abort, no
+  respawn, ship partial brief with `[MELTDOWN_PARTIAL]` banner.
+
+Long-running BQ queries are excluded from idle calculation via the
+`state/<track>/in_flight_query.json` marker.
+
+Track B's heartbeat writer wraps every tool call; Track C's wraps both Python
+subprocesses and BQ job submissions. Configure thresholds per track in
+`scoping/config.yaml:circuit_breaker`.
+
 ### Successor handoff
 
 Triggers:

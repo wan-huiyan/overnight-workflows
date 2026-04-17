@@ -16,10 +16,70 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.3.0
+version: 1.4.0
 date: 2026-04-17
 
 # Changelog
+# 1.4.0 (2026-04-17, external-research-synthesis pass)
+#   Informed by a 3-tier research sweep (GitHub prior art, 2024-2026 arXiv
+#   literature, industry practitioner writeups). See `docs/plans/
+#   overnight_insight_discovery_v1_4_research.md` in the source project for
+#   the evidence synthesis. Seven additions; each cites source tier(s).
+#
+#   1. SQL re-execution gate pre-panel (new references/sql_reexecution_gate.md).
+#      Every finding must carry a structured `claim` block + supporting_sql;
+#      orchestrator re-runs SQL between Phase A and Phase B round 1, compares
+#      claimed vs returned (tolerance 5% for n-counts, 15% for effect sizes,
+#      sign-change-rejects for CI endpoints). Mismatches auto-retract before
+#      the panel sees them. Evidence: CRITIC (arXiv 2305.11738), FIRE
+#      (NAACL 2025), Applied LLMs. Closes S91's 351-vs-62 n-count miss.
+#   2. Multiple-hypothesis correction (Bonferroni / Benjamini-Hochberg) over
+#      the surviving finding set. FDR α=0.10 for novelty_discovery run mode,
+#      Bonferroni for prior_validation. Tagged `[MHT_NONSIGNIFICANT]`, not
+#      auto-retracted. Evidence: LLM Hacking (arXiv 2509.08825 — 31% of
+#      LLM-generated hypotheses reach incorrect conclusions).
+#   3. Cross-model tie-breaker judge (new references/cross_model_tiebreaker.md).
+#      Findings that pass ≥4/6 personas route to an external-model judge
+#      (codex → OpenAI → Gemini). Graceful degradation: `[SAME_MODEL_PANEL_
+#      ONLY]` caveat banner if no judge available; run never blocks on
+#      unavailability. High-confidence reject forces extra round. Evidence:
+#      Talk Isn't Always Cheap (arXiv 2509.05396), Stop Overvaluing MAD
+#      (arXiv 2502.08788), ZenML-Digits pattern. Addresses v1.2.0's
+#      retroactive-panel sycophancy miss.
+#   4. Meltdown circuit breaker per-track (new references/
+#      meltdown_circuit_breaker.md). 50 calls or 90 min without a new finding
+#      artifact → `MELTDOWN_ABORT` + fresh-context respawn. Hard caps: 400
+#      total calls, 7h wallclock. Evidence: Beyond pass@1 (arXiv 2603.29231
+#      — up to 19% meltdown rate on long-horizon), ZenML-GetOnStack $47K
+#      loss, DoorDash step-budget enforcement, SwarmClaw joint budgets.
+#   5. Mid-run auth liveness probe (updated references/phase_0_preparation.md
+#      §0.-1.1). Re-probes at T+2h and T+5h plus any in-flight RefreshError.
+#      `AUTH_ROT_ABORT` on failure, no auto-respawn (fresh subagents hit
+#      same dead cred). Foreground-only recovery. Evidence: "Why AI Agents
+#      Keep Failing in Production" (Medium) — authentication rot is #1
+#      silent failure. v1.1.0's Phase 0.-1 caught start-of-run only.
+#   6. Contradiction-hunter persona mandate (updated phase_b_review_loop.md).
+#      `scientific-critical-thinker` persona now explicitly tasked with
+#      cross-finding + cross-track contradiction hunting, required
+#      `contradiction_scan` section per round. Evidence: same-model
+#      sycophancy papers + Nightwire data-only-input pattern. Complements
+#      item 3 when tie-breaker is unavailable.
+#   7. Fresh subagent per review round (updated phase_b_review_loop.md).
+#      Round N+1 panel runs in fresh subagent reading only structured
+#      artifacts (report.md + integration_log.jsonl + verified_stats.json +
+#      retracted findings register), NOT round-N transcript/process.md.
+#      Breaks cross-round anchoring bias. Evidence: Nightwire verifier
+#      pattern, superpowers subagent-driven-development philosophy.
+#
+#   Deferred to v1.5 roadmap (see SKILL.md § Roadmap):
+#    - #5R full artifact-based handoff (formalize current partial impl)
+#    - #6R hypothesis pre-registration in Phase 0 (domain-registry design)
+#    - #8R Simpson's-paradox audit (generalizes percentile-bucket trap)
+#    - #10R blind per-persona scoring before cross-track reveal
+#    - #11R joint USD/token/turn/wallclock budget (overlaps with #4)
+#    - Pre-emptive credential refresh (needs Workload Identity / short-lived
+#      token pattern validated first)
+#
 # 1.3.0 (2026-04-17, S92 P0-2 + P1-3 — stats verification + chart divergence)
 #   - Added stats-verification sub-phase to Phase B review loop. The
 #     `data-scientist` persona now emits structured `stats_requests.jsonl`
@@ -390,9 +450,52 @@ Phase F — Morning handoff
   - write_morning_summary.py (7-section template from overnight-review-client-delivery)
   - open_pr.py with DO NOT MERGE banner
 
-Phase G — claudeception
+Phase G — claudeception (AUTONOMOUS-SAFE mode)
   Skill(claudeception) to capture any new learnings back into this skill or siblings
+  IMPORTANT: during an autonomous overnight run, Phase G MUST NOT directly edit
+  files under `~/.claude/skills/` — those are sensitive-file permission prompts
+  that will BLOCK the run waiting for user approval that can't come until
+  morning. See § "Autonomous-safe skill edits" below.
 ```
+
+## Autonomous-safe skill edits (Phase G contract)
+
+Files under `~/.claude/skills/` and `~/.claude/settings.json` fire sensitive-file
+permission prompts in Claude Code. During an autonomous overnight run nobody is
+awake to approve them, so the run blocks mid-Phase-G waiting for a dialog that
+can't resolve until morning. The v2 run hit this exactly when the claudeception
+step tried to patch `phase_b_review_loop.md` with the binarisation-agreement
+lesson.
+
+**Contract for Phase G during autonomous runs:**
+
+1. **Do NOT edit user-level skill files mid-run.** No `Edit` or `Write` against
+   `~/.claude/skills/**` or `~/.claude/settings.json` or `~/.claude/hooks/**`.
+2. **Write skill-update proposals as project-local diffs instead.** For each
+   skill file that Phase G would have edited, write a proposed diff to
+   `docs/overnight/<date>/skill_updates/<skill>/<file>.diff.md` with:
+   - Target path (`~/.claude/skills/<skill>/…`)
+   - Proposed new content (or unified diff)
+   - Rationale + version-bump recommendation (patch / minor / major)
+   - One-line summary for the morning_summary
+3. **Morning_summary §4 (unblocks) lists the proposed skill updates** with
+   project-local paths so the user can review + apply post-run in a single
+   interactive approval batch.
+4. **If the run is foreground + user is awake**, Phase G MAY edit directly —
+   detect via `run_mode: foreground` in `scoping/config.yaml` or its default-
+   absent equivalent (`autonomous: true` disables direct edits).
+
+This also applies to Phase 0 if any Phase-0 step would otherwise touch user-
+level config — prefer project-local `.claude/settings.json` + explicit
+documentation in morning_summary over mid-run `~/.claude` writes.
+
+**Why a post-run batch is better than individual mid-run prompts.** The user
+wakes up, reads morning_summary §4, and approves (or cherry-picks) all
+proposed skill updates in one focused review. The alternative — approving
+prompts one-at-a-time as they fire overnight — is worst-of-both: no progress
+overnight AND no batched review morning-of.
+
+
 
 ## Anti-patterns
 
@@ -486,6 +589,30 @@ when you're executing that specific phase; don't load all of them upfront.
 - `references/phase_c_consolidation.md` — consolidation + HTML + morning handoff
 - `references/cohort_novelty_gate.md` — deep dive on the novelty mechanism
 - `references/adaptive_tuning.md` — yield classes + parameter tuning table
+- `references/sql_reexecution_gate.md` — **v1.4.0** pre-panel SQL re-execution + MHT correction
+- `references/cross_model_tiebreaker.md` — **v1.4.0** external-judge tie-breaker with graceful degradation
+- `references/meltdown_circuit_breaker.md` — **v1.4.0** per-track tool-call/wallclock circuit breaker
+- `references/shap_interaction_scoring.md` — v1.1.0 rho_shap normalization for interaction ranking
+- `references/chart_divergence_check.md` — v1.3.0 visual-vs-statistical divergence auto-redesign
+
+## Roadmap — deferred candidates (v1.5 and beyond)
+
+Each item below was evaluated in the v1.4 research sweep and explicitly
+deferred. Include only when real-run evidence or design clarity lands.
+
+| # | Item | Why deferred | Unblocks when |
+|---|------|-------------|---------------|
+| 5R | Full artifact-based track→panel handoff | Partial impl exists (`state/findings/` already persists). Full formalization is its own session. | Next run produces a crash-resume need — then do it. |
+| 6R | Hypothesis pre-registration in Phase 0 | Needs domain-specific registry schema (interaction families, allowed subgroup dims). Medium-effort design conversation. | Creative track surfaces another label-window-artifact-class false positive. |
+| 8R | Simpson's-paradox audit on subgroup claims | Generalizes the percentile-bucket trap. Medium-effort, needs a working definition of "reversal at population level" for this data shape. | Next time a finding claims a subgroup effect contradicting population. |
+| 10R | Blind per-persona scoring before cross-track reveal | Restructures panel workflow; lower ROI than items 1-4 because contradiction-hunter + fresh-subagent-per-round already cover most of the anchoring-bias surface. | Evidence of anchoring bias surviving the v1.4 safeguards. |
+| 11R | Joint USD + token + turn + wallclock budget | Overlaps with #4 meltdown breaker. Wait for real USD/token data from first v1.4 run before adding a second ceiling system. | After v1.4 shakedown — if BQ cost isn't the dominant spend line, add. |
+| AR | Pre-emptive credential refresh mid-run | Force-refresh still requires a valid refresh token. Production fix is Workload Identity Federation, not a skill change. | Project infra moves to WIF or short-lived STS tokens. |
+
+Evidence traces for each item live in
+`docs/plans/overnight_insight_discovery_v1_4_research.md` (in the source
+project) — the three parallel research agents' output and the 12-item
+ranked table.
 
 ## Assets
 
@@ -509,6 +636,35 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.3.2** (2026-04-17, post-v2 sensitive-file-prompt block) — Added
+  **"Autonomous-safe skill edits" contract** for Phase G. Second production
+  run hit a sensitive-file permission prompt when claudeception tried to
+  directly edit `~/.claude/skills/overnight-insight-discovery/references/
+  phase_b_review_loop.md` mid-run — a dialog the autonomous overnight
+  session couldn't resolve until morning. New contract: during autonomous
+  runs, Phase G writes proposed skill-update diffs to
+  `docs/overnight/<date>/skill_updates/` (project-local, no prompts) and
+  lists them in morning_summary §4 for batched post-run review and apply.
+  Foreground runs may still edit directly. Applies transitively to any
+  Phase that would otherwise touch `~/.claude/skills/**`, `~/.claude/
+  settings.json`, or `~/.claude/hooks/**`.
+- **v1.3.1** (2026-04-17, post-v2 production run) — Added the **binarisation-agreement
+  check** to `references/phase_b_review_loop.md` § Stats-verification sub-phase.
+  Second production run (overnight ah-ha v2, Fall 2025 mature-label holdout) surfaced
+  a real failure mode: data-scientist persona's Round-1 verification snippet used
+  `df["col"].fillna(0).astype(int)` on a raw integer count column, then filtered
+  `df["col"] == 1` — this selected applicants with EXACTLY one event, not ANY event,
+  shrinking the claim's joint cell 4× and inflating the bootstrap CI to straddle
+  zero. The brief used `(x > 0).astype(int)` for binarisation; the snippet did not.
+  First-pass verify would have wrongly downgraded a [VERIFIED] finding to
+  [SINGLE-SOURCE]. Integrator caught on manual cell-count diff. New contract: the
+  integrator MUST compare the snippet's printed cell-count signature to the brief's
+  cell-count signature before accepting [VERIFIED]; mismatches get tagged
+  `BIN_MISMATCH` and surfaced to Round N+1 panel, not buried. Also noted v1.4.0+
+  deferred: `run_mode ∈ {novelty_discovery, prior_validation}` config knob (novelty
+  gate over-penalises legitimate v1→v2 re-validation runs), feature-materialisation
+  prerequisite in Phase 0.0 (catch absent model features early instead of mid-Phase-0.5),
+  formal `degradation_modes` config stanza.
 - **v1.0.2** (2026-04-17) — Added "Model policy" section making the Opus-throughout
   override explicit. The first production run had an implementer subagent dispatched
   with Sonnet because `subagent-driven-development`'s default heuristic classified the
