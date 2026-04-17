@@ -1,9 +1,37 @@
 # Phase 0 — Preparation
 
 Goal: produce every input both tracks will need, so the tracks themselves don't have to
-re-derive shared context. Roughly 60–90 min of work. **Seven** sub-tasks — do 0.0 first.
+re-derive shared context. Roughly 60–90 min of work. **Eight** sub-tasks — do 0.-1 first, then 0.0.
 
-## 0.0 Schema reality check (do FIRST — cheap insurance, catches ~1 session of rework)
+## 0.-1 Credential & environment liveness pre-flight (do ABSOLUTELY FIRST)
+
+**Why this exists (learned the hard way in v1.0.1):** Track B of a production run burned
+its entire background-agent dispatch on an expired Google ADC refresh token. The agent
+hit `google.auth.exceptions.RefreshError: Reauthentication is needed. Please run 'gcloud
+auth application-default login'` on its first BigQuery call and could not resolve it —
+that command requires an interactive browser flow a background subagent cannot complete.
+Cost: one full 6.5-hour Track B budget reduced to 0 findings. **2 minutes of pre-flight
+would have caught this.**
+
+Before launching ANY autonomous Phase A subagent, verify in the foreground session:
+
+| Check | Command | Pass criteria |
+|---|---|---|
+| ADC token works | `gcloud auth application-default print-access-token` | Prints a token, no `RefreshError` |
+| BigQuery reachable | `bq ls -p <project>` | Returns dataset list, not auth error |
+| Scratch dataset exists | `bq ls -d <project>:<scratch_dataset>` | No "Dataset not found" |
+| Required tool in PATH | `which python3 && which bq && which gh` | All three resolve |
+| Python libs importable | `python3 -c "import google.cloud.bigquery, shap, xgboost, pandas, pyarrow"` | No ImportError |
+| LLM API key reachable | `[[ -n "$ANTHROPIC_API_KEY" ]] && echo ok` (or project-specific) | Prints `ok` |
+
+If any fail, fix in the foreground session. Background agents cannot recover interactive
+auth flows. A failed agent dispatch on an expired token wastes the wall-clock budget slot
+AND leaves a misleading commit trail that looks like the agent tried to work.
+
+Commit `scoping/preflight_results.md` with the output of each check. Acts as audit
+evidence that Phase A launches were legitimately blocked-or-not.
+
+## 0.0 Schema reality check (do FIRST after 0.-1 — cheap insurance, catches ~1 session of rework)
 
 Before writing ANY SQL that downstream tasks depend on, query `INFORMATION_SCHEMA.COLUMNS`
 for every canonical table this run will touch. Commit the output as

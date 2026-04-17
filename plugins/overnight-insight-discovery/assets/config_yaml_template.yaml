@@ -27,7 +27,7 @@ ban_patterns:
   - 'CURRENT_TIMESTAMP\(\)'
 
 # --- BQ paths -----------------------------------------------------------------
-project: <your-gcp-project>                    # GCP project id (adjust per project)
+project: barry-cdp                    # GCP project id (adjust per project)
 stitched_score_view: "ml_scratch.overnight_stitched_score_v1"
 scratch_dataset: "ml_scratch"
 shap_snapshot_table: "ml_scratch.v_training_shap_snapshot_YYYY_MM_DD"
