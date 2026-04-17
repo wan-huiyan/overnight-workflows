@@ -61,6 +61,21 @@ others. Neither caught the cross-doc contradiction. A panel would have. An
 iterated panel would have also caught the overstated 4.4×. **v2 and beyond
 must not skip this loop.**
 
+## SQL re-execution gate (pre-panel, v1.4.0)
+
+**NEW CONTRACT:** Before the panel sees any finding, every finding must pass
+the SQL re-execution gate (see `sql_reexecution_gate.md`). The gate re-runs
+each finding's supporting SQL and compares claimed vs returned values;
+mismatches auto-retract the finding. This runs **once per track** between
+Phase A completion and Round 1 of the review loop. Also applies
+Benjamini-Hochberg multiple-hypothesis correction over the full surviving
+finding set.
+
+Motivation: S91's Finding 1 shipped with n=351 in the brief but a
+verification query returned n=62 — the panel never caught it because the
+panel doesn't re-run SQL, it reads claims as data. Gate fixes this
+systemically rather than relying on the panel to catch every number.
+
 ## Panel composition
 
 6 seeded personas + Supreme Judge (Opus). Seed explicitly rather than letting
@@ -72,10 +87,34 @@ hand-picking matters.
 |---|---|---|
 | data-scientist | Methodology, stat calibration, causal-vs-correlational overreach | CI width / sample size mismatches |
 | data-analyst | Every number traces to a BQ query; cross-refs `canonical_numbers.md` | Any unverifiable number |
-| scientific-critical-thinker | Novelty gate enforcement | Claim whose (feature family, cohort, direction) is in the known-knowns top-20 |
+| scientific-critical-thinker | Novelty gate enforcement **+ cross-finding contradiction hunting (v1.4.0)** | Claim whose (feature family, cohort, direction) is in the known-knowns top-20 **OR** two surviving findings that cannot both be true |
 | client-trust-evaluator | Would the client stop on this or say "we already knew"? | Domain-obvious, non-actionable, or vacuous |
 | compliance-auditor | Data provenance, PII exposure in charts, canonical sources cited | Visitor-level PII, un-cited claims |
 | qa-expert | BQ query reproducibility, chart script determinism, `CURRENT_DATE()` lint | Missing query files, non-deterministic chart scripts |
+
+### Contradiction-hunter mandate (v1.4.0, assigned to `scientific-critical-thinker`)
+
+Beyond the novelty gate, this persona now carries an **explicit
+contradiction-hunting** mandate: compare claims *across* surviving findings
+and *across* tracks before voting. Examples of contradictions worth flagging:
+
+- Finding A claims Intl × UG has 3.17× tenure drop; Finding C claims Intl
+  cohort is homogeneous across UG / PG. Both cannot be true without
+  reconciliation.
+- Track B says feature X is the top driver; Track C's mechanical scan shows
+  feature X ranked 8th by surprise. Panel must ask which one holds.
+- A surviving finding claims the opposite direction from a retracted
+  finding's claim in `state/findings/retracted/` — why did one survive?
+
+Motivation: v1.2.0's retroactive panel caught a cross-document contradiction
+both self-reviews missed. Same-model sycophancy (see
+`cross_model_tiebreaker.md`) makes this failure mode systematic — one
+persona explicitly tasked with hunting contradictions mitigates it even when
+the cross-model judge is unavailable.
+
+The `scientific-critical-thinker`'s Round N report MUST include a
+`contradiction_scan` section — empty section with "no contradictions found"
+is acceptable; missing section is a P0.
 
 One-off post-consolidation: `architect-reviewer` reviewing the workflow itself,
 producing `workflow_learnings.md`. Not in the per-track loop.
@@ -197,6 +236,46 @@ integrator → verified_stats.json → applies to brief
 round N+1 panel ← verified_stats.json as input
 ```
 
+**Binarisation-agreement check (v1.3.1 — added post-v2 run).** Before
+marking a stats-verification request `[VERIFIED]`, the integrator MUST
+compare the verification snippet's cell-count signature against the
+brief's (or probe's) cell-count signature for the same claim. Mismatch
+means the snippet is measuring something different than the brief
+asserts.
+
+Concrete failure mode from the v2 run: F2 verification snippet used
+`df["lo91"] = df["login_91_180d"].fillna(0).astype(int)` on a raw count
+column (values 0, 1, 2, …). The subsequent filter `df["lo91"] == 1`
+selected ONLY applicants with exactly one login in the 91-180d window,
+not all applicants with any login activity. Cell (1,1) contained n=358
+instead of the brief's n=1,437. The interaction CI came back
+[−5.21, +2.15]pp straddling zero — would have wrongly downgraded F2 to
+SINGLE-SOURCE if not caught.
+
+Fix: the snippet's author (data-scientist persona) must binarise count
+columns explicitly with `(x > 0).astype(int)` when the brief's cells
+are boolean-thresholded, and the integrator must verify the snippet's
+printed cell counts match the brief's cell counts (or verdict.json's
+numbers) before accepting the verdict.
+
+Minimum check the integrator runs:
+
+```python
+# In integrator's verify loop
+brief_cells = load_brief_cell_signature()  # {(factor_tuple): n}
+snippet_cells = parse_snippet_stdout_for_cells()
+for key in brief_cells:
+    if abs(brief_cells[key] - snippet_cells.get(key, 0)) > max(5, brief_cells[key] * 0.05):
+        mark_request_BIN_MISMATCH(request_id, expected=brief_cells, got=snippet_cells)
+        # Does NOT block — the snippet still runs; but the verified_stats.json
+        # tags this as needing binarisation-fix, and the round N+1 panel sees the
+        # discrepancy, not a false [VERIFIED].
+```
+
+The panel, not the integrator, has final authority on whether the
+snippet measures the same claim — but the integrator's mechanical
+check surfaces the mismatch instead of burying it.
+
 ## Exit criteria (composite — ALL must hold)
 
 1. Supreme Judge verdict ∈ {`Approve`, `Approve with minor revisions`}
@@ -239,6 +318,59 @@ Mechanics:
 
 Not available for Track B (no deterministic regeneration step; escalate to
 prose edits or successor handoff instead).
+
+## Cross-model tie-breaker sub-phase (v1.4.0)
+
+After the 6-persona panel returns a verdict in a given round, any finding
+that passes with `pass_count ≥ 4` is routed through a cross-model tie-breaker
+judge (see `cross_model_tiebreaker.md`). The tie-breaker:
+
+- Runs after panel verdict, not as a 7th panelist (keeps it independent).
+- Uses a non-Claude model family (codex / OpenAI / Gemini), probed for
+  availability at Phase 0.-1.
+- Degrades gracefully: if no external judge is available, findings ship with
+  a `[SAME_MODEL_PANEL_ONLY]` caveat banner rather than blocking the run.
+- A high-confidence `reject` from the tie-breaker forces an extra round with
+  the rejection reasons promoted to P1 must-fix.
+
+This addresses the v1.2.0 claudeception-pass finding that same-model
+homogeneous panels miss cross-doc contradictions their training shares.
+
+## Fresh subagent per review round (v1.4.0)
+
+**CHANGED FROM v1.3:** Round N+1's panel runs in a **fresh subagent context**,
+not the orchestrator's continuing context. The fresh subagent reads only:
+
+- The round-N structured findings artifact (`review/round_N/report.md`)
+- The round-N integrator log (`integration_log.jsonl`)
+- The edited brief (`brief_X_v(N+1).md`)
+- The stats-verification results (`verified_stats.json`)
+- The retracted-findings register (`state/findings/retracted/gate_report.jsonl`)
+
+It does NOT read round-N's persona reasoning chains / transcript. This
+enforces Nightwire-style data-only input: the reviewer sees WHAT was
+decided, not HOW the prior round reasoned, preventing anchoring-bias
+cross-contamination between rounds.
+
+Dispatch shape for round N+1:
+
+```
+Agent(
+  subagent_type="general-purpose",
+  model="opus",
+  description=f"Review round {N+1} for track {track}",
+  prompt=f"""
+    Invoke Skill(agent-review-panel) with these inputs:
+      brief: {brief_vN1_path}
+      retracted_findings: state/findings/retracted/gate_report.jsonl
+      verified_stats: review/round_{N}/verified_stats.json
+      prior_round_report: review/round_{N}/report.md  # data, not transcript
+    Do NOT read review/round_{N}/process.md (the transcript).
+    Seed personas: [6 above].
+    Report back verdict + path to review_panel_report.md.
+  """
+)
+```
 
 ## Built-in anti-sycophancy safeguards (DO NOT OVERRIDE)
 

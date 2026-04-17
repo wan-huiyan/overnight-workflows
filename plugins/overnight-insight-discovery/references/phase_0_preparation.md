@@ -31,6 +31,52 @@ AND leaves a misleading commit trail that looks like the agent tried to work.
 Commit `scoping/preflight_results.md` with the output of each check. Acts as audit
 evidence that Phase A launches were legitimately blocked-or-not.
 
+## 0.-1.1 Mid-run auth liveness probe (v1.4.0)
+
+**Why this exists:** Phase 0.-1 (v1.1.0) catches auth expiry at *start of run*, but
+not mid-run. GCP ADC access tokens last ~1 hour; refresh tokens can be revoked or
+rotated by the IdP at any time. A tiered failure mode — "probe OK at T=0, token
+dies at T=3h, Track B burns 3h more on silent auth errors" — is documented in
+[Why AI Agents Keep Failing in Production](https://medium.com/data-science-collective/why-ai-agents-keep-failing-in-production-cdd335b22219)
+as "authentication rot," the #1 silent production failure.
+
+**Contract:** the orchestrator schedules two re-probes during the run:
+
+| Probe | Trigger | Action on failure |
+|---|---|---|
+| T+2h | Wallclock from run start | `AUTH_ROT_ABORT` artifact + SIGTERM both tracks |
+| T+5h | Wallclock from run start | `AUTH_ROT_ABORT` artifact + SIGTERM both tracks |
+| Any in-flight BQ `RefreshError` | Reactive | Same — don't wait for next scheduled probe |
+
+Each probe runs the same 6-check battery as §0.-1 (ADC, BQ, dataset, PATH, libs,
+LLM key) and appends to `state/auth_probes.jsonl`:
+
+```json
+{"ts":"2026-04-17T03:00:00Z","probe":"T+2h","checks":[{"adc":"PASS"},{"bq":"PASS"},...]}
+```
+
+**On abort** (`AUTH_ROT_ABORT`):
+
+1. Write `state/AUTH_ROT_ABORT.json` with `{triggered_at, probe, failed_checks[]}`.
+2. Flush in-flight work: both tracks get SIGTERM (30s grace) — findings already
+   committed to `state/findings/` are preserved.
+3. **Do NOT auto-respawn.** Unlike meltdown, auth rot means fresh subagents will
+   hit the same dead credential. Run goes into `PAUSED_AUTH_ROT` state.
+4. morning_summary.md §1 Headline flags this with: "Run paused at T+Xh due to
+   credential expiry. Findings collected before abort: N. Re-run after `gcloud
+   auth application-default login` in foreground."
+
+**If `ANTHROPIC_API_KEY` is set via short-lived token (e.g. Vertex/Bedrock),**
+also include an LLM-API smoke call in each probe — not just key-present check.
+One-token completion suffices; failure = rotation happened mid-run.
+
+**Graceful refresh (future — v1.5):** pre-emptive `gcloud auth application-default
+print-access-token --force-auth-refresh` at T+2h could refresh the ADC without
+aborting. Deferred because (a) force-refresh still requires a valid refresh
+token, which is what expires in the common failure mode, and (b) runs in
+Workload-Identity-Federation environments don't need it (auto-rotation). Revisit
+after the first v1.4 run.
+
 ## 0.0 Schema reality check (do FIRST after 0.-1 — cheap insurance, catches ~1 session of rework)
 
 Before writing ANY SQL that downstream tasks depend on, query `INFORMATION_SCHEMA.COLUMNS`
