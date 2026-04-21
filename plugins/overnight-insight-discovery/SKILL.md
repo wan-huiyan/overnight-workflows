@@ -16,10 +16,25 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.6.0
+version: 1.7.1
 date: 2026-04-21
 
 # Changelog
+# 1.7.1 (2026-04-21, S100 post-CCR-env-mismatch — 1 addition)
+#   Patch release. Adds Phase 0.Y Remote-env toolchain pre-flight gate for any
+#   CCR-dispatched overnight run. Origin: S100 v5 dispatch fired 4 track triggers
+#   into `env_01MBkzjVoKrUNooaYpQq9vvz` ("claude-code-default"), a bare container
+#   with no bq/gcloud/Python-stack/skill-tree and `RemoteTrigger` not surfaced in
+#   session registry even when listed in `allowed_tools`. All 4 tracks tapped out
+#   within ~10 min; user killed the run and re-dispatched locally via
+#   `Agent(run_in_background=true)`. See new references/ccr_env_toolchain_
+#   preflight.md for the 4-step gate (env verification, toolchain manifest,
+#   allowed_tools completeness check, auth model confirmation). Gate applies to
+#   CCR dispatches ONLY — local-subagent dispatch skips it (toolchain is inherited
+#   from the verifying main session). Larger v1.8.0 CCR-env-provisioning spec
+#   (image manifest + SA setup + preflight script) is authored under the Option B
+#   task concurrent with this release.
+#
 # 1.6.0 (2026-04-21, S98 pre-v5-dispatch — 7 additions)
 #   Seven proposals from v4 post-run + S95b–S97 SF-temporal-gating audit.
 #   Source: docs/overnight/2026-04-19/skill_updates/v1_6_proposals.md.
@@ -277,6 +292,8 @@ executing that phase — don't load all of them upfront.
 | Phase | Duration | Purpose | Reference |
 |---|---|---|---|
 | 0 | ~90 min | **Schema reality check first** (0.0), then scoping, stitched data views, cohort-conditional known-knowns | `references/phase_0_preparation.md` |
+| 0.X | ~5 min | **Pre-dispatch confirmation gate** (v1.7.0) — one batched ask before firing | `references/phase_0_predispatch_gate.md` |
+| 0.Y | ~2 min | **Remote-env toolchain pre-flight** (v1.7.1) — CCR dispatches only; verify env has bq/gcloud/Python/skill-tree + `allowed_tools` includes RemoteTrigger | `references/ccr_env_toolchain_preflight.md` |
 | A | ~5–6 hr | Tracks B and C run in parallel, each produces a brief | `references/phase_a_tracks.md` |
 | B | ~2 hr (parallel) | Per-track review loop, up to 3 rounds | `references/phase_b_review_loop.md` |
 | D | ~45 min | Consolidation subagent + one stricter review pass | `references/phase_c_consolidation.md` |
@@ -669,6 +686,8 @@ The `references/` directory contains the detailed phase instructions. Read them
 when you're executing that specific phase; don't load all of them upfront.
 
 - `references/phase_0_preparation.md` — scoping, stitched views, known-knowns build
+- `references/phase_0_predispatch_gate.md` — **v1.7.0** batched user-confirmation gate before firing
+- `references/ccr_env_toolchain_preflight.md` — **v1.7.1** CCR-dispatch toolchain verification gate (Phase 0.Y)
 - `references/phase_a_tracks.md` — Track B prompt + Track C pipeline
 - `references/phase_b_review_loop.md` — panel orchestration + exit criteria
 - `references/phase_c_consolidation.md` — consolidation + HTML + morning handoff
@@ -722,6 +741,7 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.7.0** (2026-04-21, post-S99 pre-dispatch stall) — Added **Phase 0.X pre-dispatch confirmation gate** (`references/phase_0_predispatch_gate.md`). S99 dispatch prep hit two mid-run stalls: (1) the `schedule` skill's 1-hour cron minimum conflicted with an inherited 30-min polling spec; (2) branch-checkout question for remote agents surfaced ad-hoc. Both required user intervention at the worst possible moment (mid-dispatch). New gate runs at Phase 0 closeout, surfaces all confirmation-requiring items in ONE batched `AskUserQuestion` call, and either proceeds silently (if zero deltas) or applies user redirects before firing. Covers 5 canonical item types: dispatch-mechanism deviations · blast-radius confirmation · branch-checkout question · probe-result surprises that changed planned behaviour · skill/remote-sync status reminder. Config knob `predispatch_gate.mode: ask|skip_and_log` — skip mode records items to morning_summary §0 for CI-style unattended runs. User feedback driving v1.7: "update the overnight workflow skill so next time we don't need user intervention mid run, if we have something to confirm, ask at the beginning of the session."
 - **v1.4.1** (2026-04-17, post-v2 phone-readability ask) — Added **"Phone-readable bundle"** section (Phase F addendum). Deliverables ship as client-facing HTMLs + markdown docs that are awkward to read on mobile via GitHub or Drive separately (Drive's HTML preview can't resolve relative asset paths across files). New build step emits a **single self-contained HTML** with all deliverables inline + chart PNGs base64-embedded + mobile-optimised CSS with sticky top nav. Drag-to-Drive workflow → user reads on phone. Template in project repo at `scripts/build_drive_bundle.py`. Triggered by S92 user ask "how can I easily read them on my phone". Private-repo Vercel/Netlify/Pages considered but rejected (public by default); Google Drive upload is simplest-private-path. v1.5 roadmap candidate: auto-upload bundle to IAP-protected Cloud Run for team-shared review.
 - **v1.3.2** (2026-04-17, post-v2 sensitive-file-prompt block) — Added
   **"Autonomous-safe skill edits" contract** for Phase G. Second production
