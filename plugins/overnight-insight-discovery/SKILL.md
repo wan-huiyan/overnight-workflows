@@ -16,10 +16,68 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.4.0
-date: 2026-04-17
+version: 1.6.0
+date: 2026-04-21
 
 # Changelog
+# 1.6.0 (2026-04-21, S98 pre-v5-dispatch — 7 additions)
+#   Seven proposals from v4 post-run + S95b–S97 SF-temporal-gating audit.
+#   Source: docs/overnight/2026-04-19/skill_updates/v1_6_proposals.md.
+#   Load-bearing for v5 dispatch (five of seven are blockers per v5 plan §2 P1).
+#
+#   1. Phase 0.6 historical re-scoring Path A recipe (new references/
+#      phase_0_6_historical_scoring.md). Codifies the 4-inline-feature rebuild
+#      workflow so v2/v4-style blockers don't recur. Path B (cross-temporal
+#      substitution) explicitly banned; Option C is the sanctioned fallback.
+#   2. SF `profile` per-cycle gotcha (new references/sf_profile_per_cycle.md).
+#      S92 C10 empirical: zero cross-year profile overlap. Mandatory Phase 0.0
+#      cross-year identity probe before any re-applicant candidate dispatches.
+#   3. Option C reframe codified as canonical fallback (append to references/
+#      phase_c_consolidation.md). "High-Yield Cohorts Your Current Process May
+#      Under-Prioritize" replaces "Where Your Scoring Model Gets It Wrong"
+#      when Phase 0.6 escalates. Mandatory caveat paragraph + amber highlight.
+#   4. BQ shell-quoting stdin pattern (new references/bq_shell_quoting.md).
+#      v3 Track B silent-SQL-mutation failure drives file-first discipline;
+#      `bq query ... < queries/NNN.sql` is the only sanctioned form.
+#   5. Country-bucket decomposition CTE (new references/
+#      country_bucket_decomposition.sql). v4 C9 / F09c pattern bottled for
+#      reuse: normalisation → 5 named buckets + Unknown + Other_International.
+#   6. BH-FDR empirical expectations (append to references/phase_c_consolidation.md
+#      D.0). v4 cleared all k=8 at α=0.05 — success case, not concern. Gate
+#      primarily catches p≈0.03 low-novelty findings alongside p<0.001; 3+
+#      demotions is a Phase A signal, not a gate to loosen.
+#   7. SF endpoint-defined-cohort hazard + Bloomreach-event Tier 1b proxy
+#      recipe (two new files: sf_endpoint_defined_cohort_hazard.md +
+#      bloomreach_event_temporal_proxy.md). Biggest structural finding from
+#      S95b–S97. Detection probe for SF-gated features; 6-step workflow for
+#      BR-event proxies; Tier matrix pointer; `file_upload` worked example.
+#
+# 1.5.0 (2026-04-19, v3 post-run proposals — 5 additions)
+#   1. Data-depth pre-flight sub-step in Phase 0.0 (references/phase_0_preparation.md).
+#      After schema check, query row counts per panel per source table; block plan
+#      launch if any plan-committed panel returns 0 rows. Catches the v3 cross-year
+#      panel empty-window blocker before tracks are dispatched.
+#   2. Cohort-completeness probe in Phase 0.3 (references/phase_0_preparation.md).
+#      After stitching the view, query for ELSE fallthrough per panel; flag any
+#      bucket > 1% of panel as a blocking condition. Catches the v3 F02 silent
+#      fallthrough where NULL status + P/W dep_status mapped to 'Other' instead of
+#      'Deposited', understating the Deposited cohort in both panels.
+#   3. BH-FDR gate promoted to consolidation-level mandatory step (Phase D.0 in
+#      references/phase_c_consolidation.md). Per-track BH-FDR (Phase B) is not
+#      sufficient — merging two tracks doubles the effective family size. New D.0 step
+#      runs BH over merged finding set before consolidator dispatch; demotes any
+#      adjusted p > 0.10 to [BH_FDR_NONSIGNIFICANT] caveat (not auto-retracted).
+#      Logs to consolidation_review/bh_fdr_gate.json.
+#   4. Standardised brief_v{n}.md artefact discipline (references/phase_b_review_loop.md).
+#      plan-review-integrator MUST write brief_X_v(N+1).md rather than overwriting
+#      brief_X_vN.md. Rollback on coherence break requires the pre-integration version
+#      to exist. Naming convention: brief_b_v1 → v2 → v3 → brief_b_final.
+#   5. Sub-skill: stitched-view-case-completeness (new references/
+#      stitched_view_case_completeness.md). 5-step diagnostic: enumerate CASE branches
+#      from SQL source → query for fallthrough rows → apply 1%/5% flag rule →
+#      diagnose unmatched codes → re-materialise and re-probe. Anti-patterns section
+#      includes the "fix the view but not the upstream SQLX" trap.
+#
 # 1.4.0 (2026-04-17, external-research-synthesis pass)
 #   Informed by a 3-tier research sweep (GitHub prior art, 2024-2026 arXiv
 #   literature, industry practitioner writeups). See `docs/plans/
@@ -449,6 +507,14 @@ Phase F — Morning handoff
   read: references/phase_c_consolidation.md
   - write_morning_summary.py (7-section template from overnight-review-client-delivery)
   - open_pr.py with DO NOT MERGE banner
+  - build_drive_bundle.py (v1.4.1) — single self-contained HTML bundle for
+    phone-readable review via Google Drive / Dropbox / any file share.
+    Markdown + HTML deliverables combined, chart PNGs base64-inlined,
+    mobile-optimised CSS with sticky top nav. User drags the one file
+    to Drive, opens on phone from the Drive iOS/Android app.
+    Template at scripts/build_drive_bundle.py in the project repo;
+    adapt to the specific deliverable set. See § "Phone-readable bundle"
+    below.
 
 Phase G — claudeception (AUTONOMOUS-SAFE mode)
   Skill(claudeception) to capture any new learnings back into this skill or siblings
@@ -457,6 +523,25 @@ Phase G — claudeception (AUTONOMOUS-SAFE mode)
   that will BLOCK the run waiting for user approval that can't come until
   morning. See § "Autonomous-safe skill edits" below.
 ```
+
+## Phone-readable bundle (Phase F addendum, v1.4.1)
+
+Added after the S92 run's client brief needed phone-readable review but Google Drive's HTML preview can't resolve relative asset paths across separate files — each file in Drive has its own URL, so an index.html linking to sibling files breaks. Single self-contained HTML works around this.
+
+**What to emit.** One HTML file combining all deliverables with:
+- Markdown content converted to HTML (use `markdown` Python package with `tables` + `fenced_code` + `toc` extensions — commonly installed; `pip install markdown` if not)
+- Inner content of standalone HTML deliverables (strip `<head>`/`<style>`, keep `<main>` content)
+- Chart PNGs base64-inlined as `data:image/png;base64,...` URIs (no external image fetch needed)
+- Sticky top nav with anchor links between sections for in-page mobile navigation
+- Mobile-optimised CSS: 14px body, condensed tables, 640px breakpoint, scroll-margin-top for sticky nav offset
+
+**Typical size.** 250–400 KB for 5–8 findings with 2–4 embedded chart PNGs. Well under any mail/Drive upload limit.
+
+**Template.** See `scripts/build_drive_bundle.py` in the S92 run output for a working reference: reads 2 HTML briefs + 4 markdown docs + 2 chart PNGs, emits one 267-KB HTML. Adapt the `sections` list to match the current run's deliverables.
+
+**Phase F step.** Run `python3 scripts/build_drive_bundle.py` after `write_morning_summary.py` and `open_pr.py`. Output path: `docs/delivery/<run_date>_bundle_for_drive.html`. List the bundle path prominently in `morning_summary.md §1` so the user can drag-drop to Drive on waking.
+
+**Why not GitHub Pages / Vercel / Netlify?** Public by default; client data even at cohort-aggregate level should not be on a public CDN. For private mobile review, Google Drive (already logged in on user's phone, already private, single-file upload) is the simplest robust path. For team-shared review, consider IAP-protected Cloud Run (reuses the project's existing access control; documented as a v1.5 roadmap candidate).
 
 ## Autonomous-safe skill edits (Phase G contract)
 
@@ -594,6 +679,7 @@ when you're executing that specific phase; don't load all of them upfront.
 - `references/meltdown_circuit_breaker.md` — **v1.4.0** per-track tool-call/wallclock circuit breaker
 - `references/shap_interaction_scoring.md` — v1.1.0 rho_shap normalization for interaction ranking
 - `references/chart_divergence_check.md` — v1.3.0 visual-vs-statistical divergence auto-redesign
+- `references/stitched_view_case_completeness.md` — **v1.5.0** CASE-exhaustiveness diagnostic sub-skill
 
 ## Roadmap — deferred candidates (v1.5 and beyond)
 
@@ -636,6 +722,7 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.4.1** (2026-04-17, post-v2 phone-readability ask) — Added **"Phone-readable bundle"** section (Phase F addendum). Deliverables ship as client-facing HTMLs + markdown docs that are awkward to read on mobile via GitHub or Drive separately (Drive's HTML preview can't resolve relative asset paths across files). New build step emits a **single self-contained HTML** with all deliverables inline + chart PNGs base64-embedded + mobile-optimised CSS with sticky top nav. Drag-to-Drive workflow → user reads on phone. Template in project repo at `scripts/build_drive_bundle.py`. Triggered by S92 user ask "how can I easily read them on my phone". Private-repo Vercel/Netlify/Pages considered but rejected (public by default); Google Drive upload is simplest-private-path. v1.5 roadmap candidate: auto-upload bundle to IAP-protected Cloud Run for team-shared review.
 - **v1.3.2** (2026-04-17, post-v2 sensitive-file-prompt block) — Added
   **"Autonomous-safe skill edits" contract** for Phase G. Second production
   run hit a sensitive-file permission prompt when claudeception tried to
