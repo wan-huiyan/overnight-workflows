@@ -159,6 +159,31 @@ Round N for track_X:
         brief still goes to consolidation, caveat prominent
 ```
 
+## Standardised brief versioning (v1.5.0)
+
+Every track must produce a versioned intermediate brief artefact at each round
+boundary. The naming convention is mandatory:
+
+```
+track_b/brief_b_v1.md   ← brief entering Round 1 (= brief.md before any review)
+track_b/brief_b_v2.md   ← brief after Round 1 integration (entering Round 2)
+track_b/brief_b_v3.md   ← brief after Round 2 integration (entering Round 3)
+track_b/brief_b_final.md ← brief approved by panel (or capped at MAX_ROUNDS)
+```
+
+**Rule:** `plan-review-integrator` MUST write the post-integration brief as
+`brief_X_v(N+1).md` (not overwrite the previous version). The pre-integration
+brief at Round N is the review panel's input; the post-integration brief at Round N
+is the next round's input. Never let them collide.
+
+**Why this exists:** without versioned copies, a mid-run rollback after a coherence
+break has no checkpoint to restore to. The integrator's "rollback on coherence break"
+guarantee only works if the previous version still exists on disk. Overwriting
+destroys the rollback target.
+
+The consolidator reads `brief_b_final.md` + `brief_c_final.md`. It must not read
+intermediate versions — pass only the final paths in the consolidator prompt.
+
 ## Stats-verification sub-phase (v1.3.0 — added S92 P0-2)
 
 Added after the S91 retroactive panel caught the **overstated 4.4× headline**
