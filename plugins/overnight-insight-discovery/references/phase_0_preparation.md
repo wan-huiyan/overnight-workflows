@@ -154,6 +154,30 @@ If 0.0 takes more than 30 min, either the scope has too many tables (narrow the
 canonical set) or the schemas are genuinely complex (in which case 0.0 paid for itself
 5× — commit the notes and move on).
 
+### Data-depth pre-flight (v1.5.0)
+
+After documenting schemas, run a row-count check per panel and source table before
+writing any downstream SQL:
+
+```sql
+SELECT target_date, COUNT(*) n_rows
+FROM `<project>.<dataset>.<table>`
+WHERE target_date IN (<panel_dates>)
+GROUP BY target_date
+ORDER BY target_date;
+```
+
+**Block rule:** if any plan-committed panel returns 0 rows from any referenced source
+table, STOP. Do not draft the stitched view, do not launch tracks. Resolve the
+data-window gap first — consult `canonical_numbers.md §Data-window blocker` or
+escalate to user. Committing a plan that runs against empty panels wastes the entire
+overnight budget.
+
+This takes ~5s per table per panel date. It catches the pattern where cross-year
+panels (e.g. `2024-03-16`) are assumed available but the source table's
+`MIN(target_date)` is 2025-02-23 — a mismatch discovered only after the stitched
+view is half-drafted in a prior run.
+
 ## 0.1 Scoping config
 
 Write `scoping/config.yaml` with:
@@ -202,6 +226,35 @@ misused.
 Also normalise any historical label renames in this view (e.g. legacy
 `Hot/Warm/Cool/Cold` → current `High/Developed/Emerging/Low`) so downstream queries
 don't have to.
+
+### Cohort-completeness probe (v1.5.0)
+
+After materialising the stitched view, run a CASE-exhaustiveness check before any
+track queries it. For each derived categorical column (e.g. `funnel_stage_derived`),
+query for rows landing in the fallthrough (`ELSE`) bucket:
+
+```sql
+SELECT panel,
+       funnel_stage_derived,
+       COUNT(*) n_rows,
+       ROUND(COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY panel), 4) AS share
+FROM `<project>.ml_scratch.<stitched_view>`
+GROUP BY panel, funnel_stage_derived
+ORDER BY panel, n_rows DESC;
+```
+
+**Flag rule:** if any panel has > 1% of rows in the fallthrough bucket
+(`funnel_stage_derived = 'Other'` or equivalent `ELSE` label), STOP. Do not launch
+tracks. Diagnose the unmatched input codes, add CASE branches, re-materialise, and
+re-probe. Log the root-cause fix in `scoping/orchestrator_decisions.md`.
+
+**Why this exists:** the v3 run's `stitched_view.sql` had a silent fallthrough —
+`application_status_code IS NULL AND enr_dep_status IN ('P','W')` (deposited students
+without a formal application status code) mapped to `'Other'` instead of
+`'Deposited'`. The Deposited cohort was therefore understated in both panels. The
+probe would have surfaced this at Phase 0 instead of at PR review.
+
+See `references/stitched_view_case_completeness.md` for the full diagnostic sub-skill.
 
 ## 0.4 Compute SHAP for cohort known-knowns
 

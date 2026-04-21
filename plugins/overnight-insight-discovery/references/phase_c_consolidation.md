@@ -5,6 +5,56 @@ produce the final deliverables.
 
 ## Phase D — Consolidation (~45 min)
 
+### D.0 — BH-FDR gate (mandatory, v1.5.0)
+
+Before dispatching the consolidation subagent, apply a final Benjamini-Hochberg FDR
+pass over the **merged** surviving finding set (all findings from both tracks that
+passed their track-level review loops).
+
+**Why at consolidation level:** the per-track BH-FDR pass in Phase B corrects each
+track's finding set independently. When the two tracks are merged, the effective
+family size doubles. The consolidated brief acts as a single published entity to the
+client; the family is the brief, not the track.
+
+**Inputs:** p-values from both tracks' `verified_stats.json`. Missing p-values →
+use the track-level significance flag as a binary proxy (present = PASS at α=0.10;
+absent = no correction applied, flag `[MHT_MISSING_PVAL]`).
+
+**Gate:** any finding whose BH-adjusted p-value > 0.10 is tagged
+`[BH_FDR_NONSIGNIFICANT]` and demoted to a caveat. Not auto-retracted — the
+consolidator may still cite it as "directional, pending replication" but it may
+not be a headline finding.
+
+Log to `consolidation_review/bh_fdr_gate.json`:
+
+```json
+{
+  "n_findings_merged": 9,
+  "findings": [
+    {"id": "F1_intl_ug_tenure", "p_raw": 0.004, "p_adj_bh": 0.036, "decision": "PASS"},
+    {"id": "F3_fafsa_interaction", "p_raw": 0.08,  "p_adj_bh": 0.18,  "decision": "DEMOTED"}
+  ],
+  "alpha": 0.10,
+  "method": "BH"
+}
+```
+
+#### D.0.1 — BH-FDR empirical expectations (v1.6.0)
+
+v4 (Session 95) ran k=8 candidates through the union gate at α=0.05. All 8
+cleared (highest p ≈ 0.04, at threshold 0.05). This is the **success case**,
+not a concern.
+
+For k candidates, the highest rank-k threshold is always α itself. The gate
+primarily catches scenarios where a low-novelty descriptive finding with
+p ≈ 0.03 slips into the Monday-action 8 alongside 2–3 p < 0.001 findings;
+in that case rank-4 threshold of 0.025 demotes it. This is expected behaviour
+— **do not override**.
+
+If the gate demotes **3+ findings**, that is a signal the candidate
+generation upstream is too permissive. Revisit Phase A brief's novelty gate
+and Phase B review panel's stringency, rather than loosening this gate.
+
 ### D.1 Dispatch the consolidator
 
 A fresh Opus 4.7 1M subagent. NOT the orchestrator — fresh context. Reads both
@@ -186,3 +236,49 @@ Commit any skill changes under the user's `~/.claude/skills/` directory.
 - **Skipping the sanity-check queries in § 6**. These are what catch "looks
   right but actually wrong" bugs. 5 minutes of verification beats a bad client
   delivery.
+
+## Option C fallback — when the model-residual axis is unavailable (v1.6.0)
+
+If `phase_0_6_historical_scoring.md` Path A escalates (any of the 4 inline
+features cannot be materialised at the historical target_date), the planned
+**"Where Your Scoring Model Gets It Wrong"** section must NOT be shipped as-is.
+Substitute it with the Option C reframe:
+
+### Section title
+
+> **High-Yield Cohorts Your Current Process May Under-Prioritize**
+
+Amber-highlighted (`--amber #F5C97B`) to preserve visual distinction from the
+main Monday-action section.
+
+### Structure
+
+A 3-row table (top yielding cohorts from stitched-view aggregates):
+
+| Cohort | n | Realized yield | Why under-prioritized | Owner |
+|---|---:|---:|---|---|
+| e.g. Intl UG Africa + AsiaSC | … | …% | not visible in current dashboard filter | … |
+
+### Mandatory caveat paragraph
+
+Before the table, include a caveat paragraph with this structure:
+
+> We cannot claim v6.1 misses these — that requires historical model scores
+> we could not produce for this run. We can only say these cohorts convert
+> materially above stage baselines and are not obvious in current workflow
+> surfaces. Treat as recruiter worklist, not model-audit evidence.
+
+### Source constraint
+
+Numbers must come from the stitched view aggregates only (never re-scored v6.1
+outputs). If BH-FDR demoted a Monday-action finding, that finding may still
+appear here as a descriptive cell — the gate was about headline claim strength,
+not cohort size.
+
+### Why this pattern exists
+
+v4 (Session 95) shipped the first Option C reframe as an improvisation when
+Path A escalated. It was well-received. Codifying it as canonical prevents
+future runs from either shipping a broken model-audit section or skipping
+this content entirely. The client gets value; the audit integrity is
+preserved.
