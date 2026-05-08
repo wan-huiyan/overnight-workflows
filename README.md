@@ -119,6 +119,10 @@ overnight-review-client-delivery  →  polishes a known-good brief into client-s
 
 For new insight work, start with `overnight-insight-discovery`. For existing deliverables that just need polish + QA, go straight to `overnight-review-client-delivery`. For the full pipeline, chain them.
 
+## Related repos
+
+For **synchronous** end-to-end audit of a live data dashboard (one ~30–45 min round of parallel cluster agents — different shape from the autonomous overnight runs in this repo), see [`wan-huiyan/dashboard-audit-toolkit`](https://github.com/wan-huiyan/dashboard-audit-toolkit). It bundles four sister skills: a parallel-cluster-agents methodology spine, the most common fix-shape produced by the audit, single-metric depth audit, and the GitHub squash-merge gotcha when shipping the fixes.
+
 ## Origin
 
 Both plugins encode patterns from real client-delivery overnight runs. `overnight-review-client-delivery` was validated on a causal-impact project; `overnight-insight-discovery` was extracted from a university-admissions propensity project. The patterns are generalized for any project that needs autonomous overnight work with quality gates.
