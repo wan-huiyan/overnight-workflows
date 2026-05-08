@@ -1,19 +1,20 @@
 # Overnight Workflows
 
-Two sister [Claude Code](https://claude.com/claude-code) plugins for running **autonomous overnight work sessions** that land a polished deliverable on your desk by morning, with multi-agent review panels baked in to catch factual errors before they reach the client.
+Three sister [Claude Code](https://claude.com/claude-code) plugins for running **autonomous overnight work sessions** that land a polished deliverable, an insight brief, or a stack of reviewed PRs on your desk by morning, with multi-agent review panels baked in to catch factual errors before they reach the client.
 
 [![license](https://img.shields.io/github/license/wan-huiyan/overnight-workflows)](LICENSE)
 [![last commit](https://img.shields.io/github/last-commit/wan-huiyan/overnight-workflows)](https://github.com/wan-huiyan/overnight-workflows/commits)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-orange)](https://claude.com/claude-code)
 
-## The two plugins
+## The three plugins
 
 | Plugin | When to use |
 |---|---|
 | [**overnight-review-client-delivery**](plugins/overnight-review-client-delivery/) | You already have a client deliverable (slide deck, report, HTML, memo) that needs polishing + quality-gating before a morning hand-off. Runs Phase A (content work) + Phase B (8-agent review panel in parallel) + Phase C (morning synthesis). |
 | [**overnight-insight-discovery**](plugins/overnight-insight-discovery/) | You want to *generate* a client-facing insight brief from scratch — surfacing funnel leaks and surprise patterns from data. Runs two parallel tracks (B = LLM-autonomous creative exploration + C = hybrid deterministic-with-narration), consolidates, and reviews. |
+| [**overnight-multi-issue-implementation**](plugins/overnight-multi-issue-implementation/) | You have a cluster of 6–15 related GitHub issues (typically a P1 review-panel finding set) and want them implemented + reviewed + opened as stacked PRs by morning. Runs Phase A (PR1 tasks via subagent-driven-development) + Phase B (PR2 tasks stacked on PR1) + Phase C (PR-level code review + morning hand-off). |
 
-They share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a pair, or individually.
+They share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually.
 
 ## Why use these
 
@@ -59,9 +60,10 @@ When refreshing stale content, never add an archive banner + update headlines in
 # Add the marketplace
 /plugin marketplace add wan-huiyan/overnight-workflows
 
-# Install one or both plugins
+# Install one or more plugins
 /plugin install overnight-review-client-delivery@wan-huiyan-overnight-workflows
 /plugin install overnight-insight-discovery@wan-huiyan-overnight-workflows
+/plugin install overnight-multi-issue-implementation@wan-huiyan-overnight-workflows
 ```
 
 Or clone directly:
@@ -70,6 +72,7 @@ Or clone directly:
 git clone https://github.com/wan-huiyan/overnight-workflows.git
 cp -R overnight-workflows/plugins/overnight-insight-discovery ~/.claude/skills/
 cp -R overnight-workflows/plugins/overnight-review-client-delivery ~/.claude/skills/
+cp -R overnight-workflows/plugins/overnight-multi-issue-implementation ~/.claude/skills/
 ```
 
 ## Dependencies
@@ -91,7 +94,11 @@ Both plugins integrate tightly with:
 
 > "Run overnight-insight-discovery on Q4 e-commerce data. Target: 2 funnel leaks + 2 surprise patterns for the exec brief on Monday. Fall campaign scope. Cap: 5 TB BQ, 8 hr wall-clock. Client = retail ops team."
 
-Both plugins will ask for scoping details (target date, known-knowns table, canonical numbers, panel personas) before kicking off. Morning output: a PR with the deliverable, a morning summary flagging anything that needs your attention first, and a review-panel HTML dashboard.
+**Implement an issue cluster overnight** (issues → stacked PRs):
+
+> "Run overnight-multi-issue-implementation on issues #437–#442 in the-project-repo. Two-PR shape: hardening (#438–#441) + knowledge-gap (#437, #442). Brainstorm + plan first, then subagent-driven execution, code-review subagent before merge. I'm asleep — wake up to merged PRs and follow-up issues filed."
+
+All three plugins will ask for scoping details (target date, known-knowns table, canonical numbers, panel personas, issue cluster, PR shape) before kicking off. Morning output: a PR with the deliverable, a morning summary flagging anything that needs your attention first, and a review-panel HTML dashboard.
 
 ## What you get by morning
 
@@ -112,12 +119,15 @@ Both plugins will ask for scoping details (target date, known-knowns table, cano
 ## How they compose
 
 ```
-overnight-insight-discovery   →  generates the brief from scratch
-                              ↓
-overnight-review-client-delivery  →  polishes a known-good brief into client-shape
+overnight-insight-discovery        →  generates the brief from scratch
+                                   ↓
+overnight-review-client-delivery   →  polishes a known-good brief into client-shape
+
+overnight-multi-issue-implementation  →  ships a cluster of issues to stacked PRs
+                                       (independent track — engineering, not deliverables)
 ```
 
-For new insight work, start with `overnight-insight-discovery`. For existing deliverables that just need polish + QA, go straight to `overnight-review-client-delivery`. For the full pipeline, chain them.
+For new insight work, start with `overnight-insight-discovery`. For existing deliverables that just need polish + QA, go straight to `overnight-review-client-delivery`. For an engineering issue cluster (typically a P1 review-panel finding set), use `overnight-multi-issue-implementation`. The first two chain naturally; the third runs as an independent track.
 
 ## Related repos
 
@@ -125,11 +135,12 @@ For **synchronous** end-to-end audit of a live data dashboard (one ~30–45 min 
 
 ## Origin
 
-Both plugins encode patterns from real client-delivery overnight runs. `overnight-review-client-delivery` was validated on a causal-impact project; `overnight-insight-discovery` was extracted from a university-admissions propensity project. The patterns are generalized for any project that needs autonomous overnight work with quality gates.
+All three plugins encode patterns from real overnight runs. `overnight-review-client-delivery` was validated on a causal-impact project; `overnight-insight-discovery` was extracted from a university-admissions propensity project; `overnight-multi-issue-implementation` was extracted from a 12-task chatbox-hardening + knowledge-gap session on the same admissions propensity project (2026-05-08, issues #437–#442 → 2 stacked PRs merged by morning + 5 follow-ups filed). The patterns are generalized for any project that needs autonomous overnight work with quality gates.
 
 ## Version history
 
-- **v1.0.0** (2026-04-17) — Initial release bundling both plugins. `overnight-review-client-delivery` was previously a standalone skill; this bundle adds the insight-discovery sibling and unifies the shared patterns (locked-file escape hatch, branch hygiene, file-first successor handoff, archive-and-regenerate).
+- **v1.1.0** (2026-05-08) — Adds `overnight-multi-issue-implementation` for the engineering-side overnight pattern (issues → stacked PRs). README updated to reflect three plugins; install + compose sections expanded.
+- **v1.0.0** (2026-04-17) — Initial release bundling two plugins. `overnight-review-client-delivery` was previously a standalone skill; this bundle adds the insight-discovery sibling and unifies the shared patterns (locked-file escape hatch, branch hygiene, file-first successor handoff, archive-and-regenerate).
 
 ## License
 
