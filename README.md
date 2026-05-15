@@ -133,6 +133,8 @@ For new insight work, start with `overnight-insight-discovery`. For existing del
 
 For **synchronous** end-to-end audit of a live data dashboard (one ~30–45 min round of parallel cluster agents — different shape from the autonomous overnight runs in this repo), see [`wan-huiyan/dashboard-audit-toolkit`](https://github.com/wan-huiyan/dashboard-audit-toolkit). It bundles four sister skills: a parallel-cluster-agents methodology spine, the most common fix-shape produced by the audit, single-metric depth audit, and the GitHub squash-merge gotcha when shipping the fixes.
 
+For a **per-instance ML explainability** fix-shape — SHAP waterfall charts in production dashboards where a post-hoc calibrator (isotonic regression, Platt scaling) sits between the raw model and the displayed score — see [`wan-huiyan/shap-waterfall-calibrator-skill`](https://github.com/wan-huiyan/shap-waterfall-calibrator-skill). The "rescale to fit the chip" anti-pattern, the negative-scale-guard workaround that trades one bug for another, and the correct fix (apply the calibrator point-by-point to the cumulative-probability path so every bar lives in calibrated space).
+
 ## Origin
 
 All three plugins encode patterns from real overnight runs. `overnight-review-client-delivery` was validated on a causal-impact project; `overnight-insight-discovery` was extracted from a university-admissions propensity project; `overnight-multi-issue-implementation` was extracted from a 12-task chatbox-hardening + knowledge-gap session on the same admissions propensity project (2026-05-08, issues #437–#442 → 2 stacked PRs merged by morning + 5 follow-ups filed). The patterns are generalized for any project that needs autonomous overnight work with quality gates.
