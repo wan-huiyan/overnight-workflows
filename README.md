@@ -1,20 +1,29 @@
 # Overnight Workflows
 
-Three sister [Claude Code](https://claude.com/claude-code) plugins for running **autonomous overnight work sessions** that land a polished deliverable, an insight brief, or a stack of reviewed PRs on your desk by morning, with multi-agent review panels baked in to catch factual errors before they reach the client.
+Sister [Claude Code](https://claude.com/claude-code) plugins for running **autonomous overnight work sessions** that land a polished deliverable, an insight brief, or a stack of reviewed PRs on your desk by morning, with multi-agent review panels baked in to catch factual errors before they reach the client.
 
 [![license](https://img.shields.io/github/license/wan-huiyan/overnight-workflows)](LICENSE)
 [![last commit](https://img.shields.io/github/last-commit/wan-huiyan/overnight-workflows)](https://github.com/wan-huiyan/overnight-workflows/commits)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-plugin-orange)](https://claude.com/claude-code)
 
-## The three plugins
+## Workflow plugins
 
 | Plugin | When to use |
 |---|---|
 | [**overnight-review-client-delivery**](plugins/overnight-review-client-delivery/) | You already have a client deliverable (slide deck, report, HTML, memo) that needs polishing + quality-gating before a morning hand-off. Runs Phase A (content work) + Phase B (8-agent review panel in parallel) + Phase C (morning synthesis). |
 | [**overnight-insight-discovery**](plugins/overnight-insight-discovery/) | You want to *generate* a client-facing insight brief from scratch — surfacing funnel leaks and surprise patterns from data. Runs two parallel tracks (B = LLM-autonomous creative exploration + C = hybrid deterministic-with-narration), consolidates, and reviews. |
-| [**overnight-multi-issue-implementation**](plugins/overnight-multi-issue-implementation/) | You have a cluster of 6–15 related GitHub issues (typically a P1 review-panel finding set) and want them implemented + reviewed + opened as stacked PRs by morning. Runs Phase A (PR1 tasks via subagent-driven-development) + Phase B (PR2 tasks stacked on PR1) + Phase C (PR-level code review + morning hand-off). |
+| [**overnight-multi-issue-implementation**](plugins/overnight-multi-issue-implementation/) | You have a cluster of 6–15 related GitHub issues (typically a P1 review-panel finding set) and want them implemented + reviewed + opened as stacked PRs by morning. Runs Phase A (PR1 tasks via subagent-driven-development) + Phase B (PR2 tasks stacked on PR1) + Phase C (PR-level code review + morning hand-off). Also covers the **plan-driven variant** (independent PRs from a written plan rather than stacked PRs from issues). |
 
-They share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually.
+## Companion safety patterns
+
+Cross-cutting skills that strengthen any overnight workflow. Installable independently or as part of the bundle.
+
+| Plugin | When to use |
+|---|---|
+| [**large-redesign-parallel-branch-collision-audit**](plugins/large-redesign-parallel-branch-collision-audit/) | Pre-flight audit BEFORE starting a multi-PR redesign that rewrites shared files. Catches the failure mode where a long-running parallel feature branch (client-variant, staging, whitelabel) has unmerged commits touching the same files the redesign is about to rewrite — so they end up stranded with head-on conflicts that can't be cleanly cherry-picked. Adjacent to but distinct from the tracker-id audit in `overnight-multi-issue-implementation`. |
+| [**subagent-review-tier-calibration-for-overnight-pr-chains**](plugins/subagent-review-tier-calibration-for-overnight-pr-chains/) | Calibrate review intensity per-PR (Tier 1 two-stage / Tier 2 combined single-agent / Tier 3 bash-only verification) in long overnight chains (10+ PRs). Specializes `superpowers:subagent-driven-development`'s review step with a decision rubric + concrete bash-verification recipe for low-risk visual-restyle PRs. |
+
+The workflow plugins share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually. The companion safety patterns layer on top of any of the workflow plugins (or on standalone `subagent-driven-development` runs).
 
 ## Why use these
 
