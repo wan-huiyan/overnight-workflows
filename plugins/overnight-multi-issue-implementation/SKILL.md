@@ -63,6 +63,24 @@ NOT for:
 - Generating insights from data → use `overnight-insight-discovery`
 - One-shot experiments without merge intent → just iterate
 
+## Variant: Plan-driven (independent PRs)
+
+The default shape above is **issues → stacked PRs**. A related but distinct shape is **plan → many independent PRs**, where:
+
+- The input is an implementation plan (typically from `superpowers:writing-plans`) with N independent tasks, not an issue cluster
+- Each task produces its own PR that is **squash-merged before the next task starts** (not stacked)
+- Auto-merge is authorized on green review — no PR sits open between tasks
+
+When to use this variant instead:
+- You have a written plan with ≥10 well-scoped tasks (e.g., page-by-page redesign, route-by-route migration, file-by-file refactor)
+- Tasks are file-disjoint enough that sequential merge to main doesn't cause mid-chain conflicts
+- Risk varies by task (some touch handlers, others are pure restyles) — you want per-PR review-tier calibration (see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains`)
+
+The Phase A/B/C structure below still applies, but:
+- "PR1 / PR2" become "PR-of-task-N" — every task gets its own PR + auto-merge cycle
+- The pre-flight tracker-ID audit is supplemented by a **parallel-branch file-collision audit** (see next section) — for plans that rewrite shared files, the file-level audit catches stranded-commit risk that the ID audit doesn't
+- The final code-review step becomes a per-PR review-tier choice (see "Per-PR review-tier calibration" below)
+
 ## Phases
 
 ```dot
@@ -99,24 +117,80 @@ digraph overnight {
 Per task: **implementer subagent → spec-compliance reviewer → code-quality
 reviewer → mark complete**. Standard `subagent-driven-development` protocol.
 
-**Two pragmatic deviations** for overnight throughput:
+For overnight throughput, calibrate review intensity **per-task** using the 3-tier rubric below (this generalizes the previous "two pragmatic deviations" version into a formal framework — see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains` for the standalone skill).
 
-1. **Combined spec+code review for low-risk tasks**: tasks that are pure
-   plumbing (e.g., a 5-LOC slice fix, a tracker entry, a regen-and-push
-   finalization) can use a single combined-review subagent instead of two
-   sequential ones. The full 2-stage protocol stays for code-bearing tasks
-   that change behavior.
+### Tier 1 — Full two-stage (strict `subagent-driven-development`)
 
-2. **Light-touch reviews on finalization tasks**: Tasks "open PR1" and
-   "open PR2" are themselves checkpoints that include tracker + site regen
-   + push. These don't need a fresh reviewer subagent — the controller
-   verifies inline (read git log, confirm PR is open, confirm tracker
-   visible). The merge-time PR-level review (Phase C) is the real gate.
+Spec-compliance reviewer → fix loop → code-quality reviewer → fix loop → merge.
 
-These deviations cost ~30% review-token budget and ~40% wall time vs strict
-protocol. Costs accept-or-reject before starting; document the choice in
-the implementation plan. If the cluster is high-stakes (security,
-production data path), don't deviate — keep strict 2-stage on every task.
+Use when:
+- Task touches a view handler / request-form consumer / session-state shape
+- Task deletes a route or decommissions a feature
+- Task introduces a new data contract (POST endpoint, schema, BQ field)
+- Task is the **FIRST** of the chain (catches plan-level misunderstanding) or **LAST** (final E2E verification)
+
+### Tier 2 — Combined single-agent review
+
+ONE reviewer subagent with combined spec + code-quality prompt → fix loop → merge.
+
+Use when:
+- Task is a new template + matching view + tests (e.g., a new sub-page route)
+- Task is a visual transplant with a small amount of view-side logic (e.g., bumping `step=N`)
+- Implementer self-report explicitly cites: tests green + baseline clean + smoke check passed
+- The risk profile is moderate — not a hot path but not a one-line CSS swap
+- Tasks that are pure plumbing (5-LOC slice fix, tracker entry, regen-and-push finalization)
+
+The combined prompt pattern:
+```
+You are the combined spec + code-quality reviewer for [Task X]. Verify
+BOTH: (1) spec compliance per plan acceptance criteria, (2) code quality
+with P0/P1/P2 categorization. Return VERDICT: APPROVE | REQUEST_CHANGES |
+REJECT with categorized findings.
+```
+
+### Tier 3 — Bash-only verification (no reviewer subagent)
+
+Controller verifies inline via bash/grep on the PR diff, no subagent dispatch.
+
+Use when:
+- Task is a pure visual restyle (existing template, swap CSS classes, no markup restructure)
+- Implementer self-report shows all tests pass + baseline clean + smoke check
+- No `request.form` changes, no new routes, no template deletions
+- Finalization tasks like "open PR1" / "open PR2" where the action is tracker + site regen + push
+
+Verification recipe:
+```bash
+git fetch origin <branch-name> --quiet
+git diff origin/main origin/<branch-name> --stat | tail -10
+# project-specific markers — adapt per-codebase:
+git show origin/<branch-name>:path/to/template | grep -c "<existing-field-marker>"
+git show origin/<branch-name>:path/to/template | grep -c 'onclick="history.back()"'  # expect 0
+gh pr view <N> --json body -q .body | head -30  # confirm intentional drops documented
+```
+
+If anything red, drop to Tier 2 and dispatch a combined reviewer.
+
+### Decision rubric
+
+| Signal | Tier |
+|---|---|
+| Touches view handler logic beyond a `step=N` value | 1 |
+| Touches POST handler bodies, data contracts, session-state shape | 1 |
+| Deletes a route or template | 1 |
+| Adds a new route + new template + view + tests | 2 |
+| Renames a route with 308 redirect | 2 |
+| Replaces existing template body, new tests, no view changes | 2 |
+| Pure CSS swap on existing template, no markup restructure | 3 |
+| Implementer self-reports DONE_WITH_CONCERNS | 2 (never 3) |
+| Finalization task (open PR, regen + push) | 3 (controller verifies inline) |
+| **First** PR of the chain | 1 (always) |
+| **Last** PR of the chain | 1 (always — final E2E) |
+
+### Tier distribution sanity-check
+
+Healthy distribution for a 12-15 PR overnight chain: ~20% Tier 1, ~60% Tier 2, ~20% Tier 3. If 90%+ are Tier 3, you under-reviewed (a hot-path PR likely got missed). If 90%+ are Tier 1, you over-reviewed (calibration failed; throughput suffers without quality gain).
+
+Cost: these deviations from strict 2-stage cost ~30% review-token budget and ~40% wall time. Costs accept-or-reject before starting; document the per-task tier choice in the implementation plan or merge-commit footer (`Review-tier: 2`). If the cluster is high-stakes (security, production data path), keep most tasks at Tier 1.
 
 ## Pre-flight: tracker-id audit
 
@@ -137,6 +211,43 @@ panel), the concurrent session WILL take your reserved IDs by the time you
 reach Phase B's finalization. Resolve via the project's standard
 PR-conflict skill (e.g., `barryu-pr-conflict-site-regen` for the
 barryU project) — hand-union the generator + regenerate site.
+
+## Pre-flight: parallel-branch file-collision audit
+
+The tracker-id audit above catches **ID-level** concurrent-session collisions in a shared roadmap document. There's a sibling failure mode the ID audit doesn't catch: **file-level collisions with long-running parallel feature branches**.
+
+Symptom: you branch from `main` cleanly, ship N PRs overnight, all merge fine. The next day someone asks "what about the unmerged work on `staging-customer-X` / `whitelabel-Y` / `feature/client-rebrand`?" — and that branch has commits modifying files your overnight run just **rewrote wholesale**. Those commits are now stranded with head-on conflicts that can't be cherry-picked cleanly; they have to be hand-merged into the new markup.
+
+Run this audit BEFORE locking the plan:
+
+```bash
+# 1. List all non-stale parallel branches with commits ahead of main
+for branch in $(git branch -r --no-merged origin/main 2>/dev/null | grep -v HEAD); do
+  count=$(git log --oneline origin/main..$branch 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$count" -gt 0 ]; then
+    echo "$count commits ahead — $branch (last: $(git log -1 --format=%ar $branch))"
+  fi
+done
+
+# 2. For each non-stale branch, check collisions with planned-rewrite files
+PLANNED_FILES="path/to/file1.html path/to/file2.py path/to/_base.html"
+for branch in $(git branch -r --no-merged origin/main | grep -v HEAD); do
+  hits=$(git log --oneline origin/main..$branch -- $PLANNED_FILES 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$hits" -gt 0 ]; then
+    echo "COLLISION RISK: $branch has $hits commits touching planned files:"
+    git log --oneline origin/main..$branch -- $PLANNED_FILES
+  fi
+done
+```
+
+For each collision-risk branch, surface a 3-way decision to the user BEFORE planning:
+1. **Promote first** — cherry-pick / merge the parallel branch's collision-risk commits into main before starting the overnight run. The redesign then naturally absorbs them.
+2. **Stake out scope** — carve the plan to NOT touch the colliding files (defer them to a later session).
+3. **Accept the cost** — proceed knowing that the parallel branch needs a careful hand-merge after the overnight run. Document the planned conflict resolution upfront.
+
+The user owns this decision. Don't decide unilaterally — the cost asymmetry is large (10 min of audit pre-flight vs. hours of careful manual conflict resolution post-redesign).
+
+For the full pattern, decision rubric, and worked example, see the companion skill `large-redesign-parallel-branch-collision-audit` (plugin in this bundle).
 
 ## Stacked-PR strategy (load-bearing for overnight)
 
