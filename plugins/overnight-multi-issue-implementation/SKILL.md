@@ -177,7 +177,7 @@ If anything red, drop to Tier 2 and dispatch a combined reviewer.
 | Touches view handler logic beyond a `step=N` value | 1 |
 | Touches POST handler bodies, data contracts, session-state shape | 1 |
 | Deletes a route or template | 1 |
-| Adds a new route + new template + view + tests | 2 |
+| Adds a new route + new template + new view + tests | 2 |
 | Renames a route with 308 redirect | 2 |
 | Replaces existing template body, new tests, no view changes | 2 |
 | Pure CSS swap on existing template, no markup restructure | 3 |

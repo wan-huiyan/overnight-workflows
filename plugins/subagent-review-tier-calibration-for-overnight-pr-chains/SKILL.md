@@ -105,7 +105,9 @@ git fetch origin <branch-name> --quiet
 git diff origin/main origin/<branch-name> --stat | tail -10
 
 # 3. Key safety markers (template restyle PRs)
-git show origin/<branch-name>:webapp/templates/<file> | grep -c "url_for\|<existing-form-field>"
+#    NOTE: use -cE for portable alternation. BSD grep (default on macOS) does
+#    NOT honor `\|` as BRE alternation — it matches the literal string.
+git show origin/<branch-name>:webapp/templates/<file> | grep -cE "url_for|<existing-form-field>"
 git show origin/<branch-name>:webapp/templates/<file> | grep -c 'onclick="history.back()"'
 # Expected: form-field count preserved (or higher); onclick count = 0
 
@@ -161,14 +163,16 @@ After the chain completes:
 
 | Tier | Tasks | Total |
 |---|---|---|
-| 1 (two-stage full) | None — combined review used for all | 0 |
+| 1 (two-stage full) | None — combined review used for all (in retrospect, a calibration miss — see below) | 0 |
 | 2 (combined single-agent) | A, B, C (P1 fix loop), L | 4 |
 | 3 (bash-only) | D, E, G, H, I, J, K1, K2, K3+K4, F | 10 |
 | Final (E2E sweep) | M | 1 (Tier 1-equivalent — full E2E coverage) |
 
-Catch rate: 1 of 14 PRs returned REQUEST_CHANGES (Task B, two P1s — pre-consent semantics + missing calendar section). Tier-3 PRs that *should* have been Tier 2 in retrospect: Task J (dropped significant UX controls) — its size and structural change merited a combined reviewer. Lesson: when implementer self-reports "significant content drops", upgrade tier even if the markup change feels mechanical.
+Distribution: 0% / 29% / 71% (counting M as Tier 1) — well above the prescribed Tier-3 share (~20%) and missing the "first PR is always Tier 1" rule (Task A was Tier 2). This skill codifies the corrected target distribution and the absolute first/last rule; the S75 run is the negative example that prompted both.
 
-This skill was authored partly as a result of that misclassification.
+Catch rate: 1 of 14 PRs returned REQUEST_CHANGES (Task B, two P1s — pre-consent semantics + missing calendar section). Tier-3 PRs that *should* have been Tier 2 in retrospect: Task J (dropped significant UX controls) — its size and structural change merited a combined reviewer. Tier-2 PRs that *should* have been Tier 1 in retrospect: Task A (first PR of the chain — the rule "first PR is always Tier 1" came out of this miss). Lesson: when implementer self-reports "significant content drops", upgrade tier even if the markup change feels mechanical.
+
+This skill was authored partly as a result of those misclassifications.
 
 ## Notes
 

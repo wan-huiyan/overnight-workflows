@@ -23,7 +23,7 @@ Cross-cutting skills that strengthen any overnight workflow. Installable indepen
 | [**large-redesign-parallel-branch-collision-audit**](plugins/large-redesign-parallel-branch-collision-audit/) | Pre-flight audit BEFORE starting a multi-PR redesign that rewrites shared files. Catches the failure mode where a long-running parallel feature branch (client-variant, staging, whitelabel) has unmerged commits touching the same files the redesign is about to rewrite — so they end up stranded with head-on conflicts that can't be cleanly cherry-picked. Adjacent to but distinct from the tracker-id audit in `overnight-multi-issue-implementation`. |
 | [**subagent-review-tier-calibration-for-overnight-pr-chains**](plugins/subagent-review-tier-calibration-for-overnight-pr-chains/) | Calibrate review intensity per-PR (Tier 1 two-stage / Tier 2 combined single-agent / Tier 3 bash-only verification) in long overnight chains (10+ PRs). Specializes `superpowers:subagent-driven-development`'s review step with a decision rubric + concrete bash-verification recipe for low-risk visual-restyle PRs. |
 
-They share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually.
+The workflow plugins share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually. The companion safety patterns layer on top of any of the workflow plugins (or on standalone `subagent-driven-development` runs).
 
 ## Why use these
 
