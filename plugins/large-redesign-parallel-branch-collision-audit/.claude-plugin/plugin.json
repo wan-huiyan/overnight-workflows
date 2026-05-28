@@ -1,0 +1,19 @@
+{
+  "name": "large-redesign-parallel-branch-collision-audit",
+  "description": "Pre-flight audit before starting a large multi-PR redesign that rewrites shared files. Catches the failure mode where a long-running parallel feature branch (e.g. client-variant, staging, whitelabel) has unmerged commits touching the same files the redesign is about to rewrite — so they end up stranded with head-on conflicts that can't be cleanly cherry-picked. Sister to pre-merge-client-variant-regression-audit (audits a variant branch BEING merged into main; this audits BEFORE main diverges from a variant) and parallel-pr-scope-overlap-tiebreaker-delta-check (two simultaneous PRs vs. one redesign on main + WIP elsewhere). Companion to overnight-multi-issue-implementation for the file-collision dimension that the existing tracker-id audit doesn't cover.",
+  "version": "1.0.0",
+  "author": { "name": "wan-huiyan" },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "pre-flight-audit",
+    "parallel-branch",
+    "collision",
+    "redesign",
+    "subagent-driven",
+    "overnight",
+    "branch-hygiene"
+  ]
+}

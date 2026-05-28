@@ -1,0 +1,19 @@
+{
+  "name": "subagent-review-tier-calibration-for-overnight-pr-chains",
+  "description": "Calibrate review intensity per-PR (Tier 1 two-stage / Tier 2 combined single-agent / Tier 3 bash-only verification) when orchestrating a long chain (10+ PRs) of independent tasks overnight from a single implementation plan. Specializes subagent-driven-development's review step for throughput-tuned chains: prescribes three tiers, a decision rubric, and a concrete bash-verification recipe for low-risk visual-restyle PRs. Sister to subagent-driven-development (master pattern; this specializes the review step) and overnight-multi-issue-implementation (different shape: stacked PRs from issues vs. independent PRs from plan). Companion to large-redesign-parallel-branch-collision-audit (pre-flight before STARTING a chain).",
+  "version": "1.0.0",
+  "author": { "name": "wan-huiyan" },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "subagent-driven",
+    "code-review",
+    "overnight",
+    "multi-pr",
+    "tier-calibration",
+    "throughput",
+    "auto-merge"
+  ]
+}
