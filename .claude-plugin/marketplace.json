@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "wan-huiyan-overnight-workflows",
-  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery \u2014 multi-agent review panels baked in.",
+  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery — multi-agent review panels baked in.",
   "owner": {
     "name": "wan-huiyan"
   },
@@ -40,6 +40,12 @@
       "name": "subagent-review-tier-calibration-for-overnight-pr-chains",
       "source": "./plugins/subagent-review-tier-calibration-for-overnight-pr-chains",
       "description": "Calibrate review intensity per-PR (Tier 1 two-stage / Tier 2 combined single-agent / Tier 3 bash-only verification) when orchestrating a long chain (10+ PRs) of independent tasks overnight from a single implementation plan. Specializes subagent-driven-development's review step for throughput-tuned chains: prescribes three tiers, a decision rubric, and a concrete bash-verification recipe for low-risk visual-restyle PRs. Sister to subagent-driven-development (master pattern; this specializes the review step) and overnight-multi-issue-implementation (different shape: stacked PRs from issues vs. independent PRs from plan). Companion to large-redesign-parallel-branch-collision-audit (pre-flight before STARTING a chain).",
+      "version": "1.0.0"
+    },
+    {
+      "name": "schedule-poll-orchestrator-pattern",
+      "source": "./plugins/schedule-poll-orchestrator-pattern",
+      "description": "Fire-ASAP orchestrator pattern for multi-track autonomous overnight workflows on scheduled triggers — a self-rescheduling poll loop that consolidates the moment all tracks report complete, and survives a 12-20h session end. Companion safety pattern.",
       "version": "1.0.0"
     }
   ]
