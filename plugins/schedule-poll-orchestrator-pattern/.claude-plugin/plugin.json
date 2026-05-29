@@ -1,0 +1,19 @@
+{
+  "name": "schedule-poll-orchestrator-pattern",
+  "description": "Fire-ASAP orchestrator pattern for multi-track autonomous overnight workflows dispatched via scheduled triggers (RemoteTrigger / CronCreate). Replaces a fixed `t+Nh` consolidation timer with a self-rescheduling poll loop that exits to consolidation at the first poll where all parallel tracks report `phase: complete`, and lets a scheduled successor survive a 12-20h session end. Distinct from successor-handoff (in-session parent polling a subagent); this is for scheduled-trigger orchestrators that must outlive their session.",
+  "version": "1.0.0",
+  "author": { "name": "wan-huiyan" },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "orchestration",
+    "overnight",
+    "scheduled-trigger",
+    "polling",
+    "cron",
+    "multi-track",
+    "consolidation"
+  ]
+}
