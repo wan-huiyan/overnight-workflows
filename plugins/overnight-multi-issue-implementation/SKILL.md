@@ -26,7 +26,7 @@ description: |
   client-delivery`), or generating insights from data (use `overnight-
   insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.1.0
+version: 1.2.0
 date: 2026-05-29
 ---
 
@@ -53,7 +53,10 @@ All of these conditions:
 3. **Human availability**: user is going to sleep / away for 6-10 hours; not
    available to merge PR1 between phases.
 4. **Issue quality**: each issue has clear acceptance criteria (so per-issue
-   tasks are implementable + testable independently).
+   tasks are implementable + testable independently). **These preconditions
+   assume _pre-validated_ issues. If the cluster is large (>15) or the user
+   flags that some may be outdated/already-done, run Phase 0 triage first**
+   (below) — it produces the validated, scoped set this workflow then implements.
 5. **Codebase familiarity**: agent has implementation context (CLAUDE.md,
    existing tests, conventions) — this isn't for greenfield bootstrapping.
 
@@ -92,6 +95,20 @@ git checkout -b feat/task-N+1 ...
 
 Bucket the plan's tasks by file-overlap up front: file-disjoint sets may parallelize; same-file sets become an ordered sequence with `reset --hard origin/main` after every merge. Skipping the resync is how task N+1 silently reverts task N (see `stale-base-pr-silently-reverts-upstream-content`).
 
+## Phase 0 (conditional): triage a large or possibly-stale backlog
+
+The "When to use" preconditions assume **pre-validated** issues. That breaks for a common real case: a backlog of 15+ issues filed over weeks, where intervening PRs may have resolved items **without** closing the issue, the issues describe gaps against a spec/mockup that has since moved, or the user explicitly says *"some might be outdated."* Implementing such a list naively re-does merged work — and a naive "close the done ones" pass naively **silently drops a still-live issue**, which leaves no trace.
+
+So when **the cluster is >15 issues, OR the user flags possible staleness, OR the issues are "drift / missing-feature vs a mockup" filed before recent redesign PRs** — run a read-only triage pass FIRST and bring a cut-line to the user before any implementation. Standalone skill: **`stale-backlog-triage-adversarial-verify`** (the essentials are inlined here so this plugin is self-contained).
+
+1. **Pin triage to real `origin/main`**, not a stale/feature worktree: `git fetch && git checkout -B triage-base origin/main`; assert `HEAD == origin/main`. Agents grep whatever is checked out — a stale tree yields wrong verdicts.
+2. **One read-only investigator per issue** (fan out). Each reads the issue + comments, searches BOTH commit messages AND merged-PR **titles/bodies** (`gh pr list --search "<n> in:title,body"` — partial status hides in titles like *"(#190 partial / #193)"*), then verifies against live code with its own eyes. For drift issues, **inject the mockup/spec path** + require a per-bullet status (a "page X lacks Y" issue is un-triageable without the target).
+3. **Bias the verdict schema AGAINST dismissal — load-bearing.** Error costs are asymmetric: a wrong `still_valid` is caught at implementation; a wrong `already_fixed`/`outdated_superseded` silently drops real work. A dismissal verdict may be returned ONLY if the agent cites **both a merged PR# AND a concrete `file:line` in the current tree**; otherwise default to `still_valid`. Never round "probably done" up to "fixed."
+4. **Adversarially verify ONLY the dismissals.** Pipe each `already_fixed`/`outdated` verdict to a second agent told to REFUTE it (re-check the cited PR + file:line; hunt for any unmet acceptance criterion — one fixed bullet ≠ issue fixed). Flip refuted dismissals back to `still_valid`/`partially_done`. Spend verification budget here, not on the keeps (keeps verify themselves when implemented).
+5. **Present a cut-line; never auto-close.** Output buckets (implement-now / defer / close-as-outdated) and let the user ratify scope. The surviving "implement-now" set is the input to Phase A/B below — and if it is still >15, propose **waves** rather than forcing it into one run's PR shape.
+
+Worked example (2026-05-29, 36 issues): 36 investigators + adversarial-verify-on-dismissals. The adversarial pass flipped one wrongly-dismissed issue (the file was deleted, but 3 capabilities silently didn't migrate) and confirmed one genuinely done; only **1/36** was actually done. Cut-line → user picked a security/bugs wave → shipped 3 PRs (no merged work re-done, no live issue dropped).
+
 ## Phases
 
 ```dot
@@ -127,6 +144,18 @@ digraph overnight {
 
 Per task: **implementer subagent → spec-compliance reviewer → code-quality
 reviewer → mark complete**. Standard `subagent-driven-development` protocol.
+
+**Parallel implementers — keep git in the controller.** When you fan implementers
+out across file-disjoint PRs *concurrently* (the plan-driven variant), have each
+agent **edit + run tests only, in its own isolated worktree — no git commands**;
+the controller does all add/commit/push/PR/merge. Subagents are error-prone at git
+mechanics (wrong-worktree `cd`, stranded branch refs, "reports complete but PR
+unmerged" — see `subagent-bash-cd-wrong-worktree`,
+`subagent-driven-branch-ref-froze-stranded-commits`,
+`subagent-reports-complete-but-pr-unmerged`). Edit-only agents + controller-owned
+git keeps the parallelism while sidestepping all of those traps; the agent's
+deliverable is its edited worktree + a structured report (files changed, tests run,
+baseline-diff), which the controller stages into per-issue commits.
 
 For overnight throughput, calibrate review intensity **per-task** using the 3-tier rubric below (this generalizes the previous "two pragmatic deviations" version into a formal framework — see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains` for the standalone skill).
 
@@ -450,6 +479,13 @@ By morning the user should have:
 
 ## References / sister skills
 
+- `stale-backlog-triage-adversarial-verify` — **Phase 0**: triage a large or
+  possibly-stale backlog against live `origin/main` with a verdict schema biased
+  against dismissal + adversarial verification of every dismissal, producing the
+  validated/scoped set this workflow implements.
+- `subagent-bash-cd-wrong-worktree` / `subagent-driven-branch-ref-froze-stranded-commits`
+  / `subagent-reports-complete-but-pr-unmerged` — why parallel implementers should
+  be edit-only with controller-owned git.
 - `superpowers:subagent-driven-development` — the per-task protocol this
   skill builds on (implementer + spec-reviewer + code-quality-reviewer
   per task).
