@@ -1,27 +1,37 @@
 ---
-name: code-reviewer-subagent-no-bash-blocked-on-pr-diff
+name: overnight-review-panel-blocked-reviewer-reads-as-clean
 description: |
-  Code-review subagents are frequently provisioned WITHOUT a Bash tool, so they
-  cannot run `gh pr diff`, `git diff`, or `git checkout` — and when you prompt
-  them to "review PR #N, fetch the diff with gh pr diff" they return a BLOCKED
-  report (no review performed), not findings. Use when: (1) an overnight review
-  panel (e.g. `overnight-multi-issue-implementation` Phase C, or any
+  Overnight specialization of `code-reviewer-subagent-no-bash-blocked-on-pr-diff`
+  (the general tool-gap mechanism). In an UNATTENDED overnight review panel, a
+  reviewer that couldn't see the code reads as a CLEAN one — so a real bug ships
+  by morning. The usual cause: code-review subagents (feature-dev:code-reviewer,
+  voltagent-*, Explore) are frequently provisioned WITHOUT a Bash tool, so when
+  prompted to "review PR #N, fetch the diff with gh pr diff" they return a
+  BLOCKED report (no review performed), or silently review the current checkout
+  (often `main`, which predates the PR). Use when: (1) an overnight review panel
+  (e.g. `overnight-multi-issue-implementation` Phase C, or any
   `agent-review-panel` run) dispatches reviewers against GitHub PRs or branches
   not checked out in the working tree; (2) a reviewer returns "I have no
-  shell/gh/git tool" or "the PR sources are not in the working tree", or reviews
-  the current checkout (often `main`, which predates the PR) instead of the PR;
-  (3) one reviewer in a parallel panel comes back BLOCKED while siblings
-  succeeded. In an UNATTENDED overnight run a BLOCKED reviewer reads as a CLEAN
-  one — so a real bug ships by morning. Fix: pre-generate per-base diffs to
-  files, materialize PR branches as worktrees, hand the agent explicit paths,
-  and treat BLOCKED as not-clean. Sibling to `voltagent-reviewer-no-write-tool`
-  (Write gap → inline output) and `stacked-pr-review-per-base-diff-and-attach`.
+  shell/gh/git tool" or "the PR sources are not in the working tree"; (3) one
+  reviewer in a parallel panel comes back BLOCKED while siblings succeeded. Fix:
+  pre-generate per-base diffs to files, materialize PR branches as worktrees,
+  hand each reviewer explicit paths, and in the morning synthesis treat BLOCKED
+  as not-clean (re-dispatch before counting the vote). Sibling to
+  `voltagent-reviewer-no-write-tool` (Write gap → inline output) and
+  `stacked-pr-review-per-base-diff-and-attach`.
 author: Claude Code
 version: 1.0.0
 date: 2026-05-29
 ---
 
-# Code-reviewer subagents have no Bash — blocked when told to `gh pr diff`
+# Overnight review panel: a BLOCKED reviewer reads as CLEAN by morning
+
+> **Overnight specialization.** The bare mechanism — a code-review subagent with
+> no `Bash` tool can't `gh pr diff`/checkout a PR, so it returns BLOCKED — is the
+> general skill `code-reviewer-subagent-no-bash-blocked-on-pr-diff`, applicable to
+> any PR review. **This** skill is the overnight-specific consequence: in an
+> unattended run there's no human to notice the BLOCKED report, so it silently
+> counts as a passing reviewer and the bug ships.
 
 ## Problem
 
@@ -128,6 +138,9 @@ would have read as a clean reviewer and the P0 would have shipped.
 
 ## References
 
+- General version: `code-reviewer-subagent-no-bash-blocked-on-pr-diff` — the bare
+  no-Bash → BLOCKED tool-gap mechanism, applicable to any PR review (this skill is
+  its overnight specialization: the BLOCKED-reads-as-CLEAN consequence under autonomy)
 - Sibling skill: `voltagent-reviewer-no-write-tool` — Write-tool gap (inline output)
 - `stacked-pr-review-per-base-diff-and-attach` — per-base diff scoping for stacked PRs
 - `subagent-bash-cd-wrong-worktree` — Bash-capable agents landing in the wrong worktree
