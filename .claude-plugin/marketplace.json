@@ -19,9 +19,9 @@
       "version": "1.0.0"
     },
     {
-      "name": "code-reviewer-subagent-no-bash-blocked-on-pr-diff",
-      "source": "./plugins/code-reviewer-subagent-no-bash-blocked-on-pr-diff",
-      "description": "Companion safety pattern: code-review subagents often lack a Bash tool, so when told to `gh pr diff`/checkout a PR they return a BLOCKED report (or review main, which predates the PR) — and in an unattended overnight run a BLOCKED reviewer reads as CLEAN. Pre-generate per-base diffs + materialize worktrees + hand explicit paths, and treat BLOCKED as not-clean.",
+      "name": "overnight-review-panel-blocked-reviewer-reads-as-clean",
+      "source": "./plugins/overnight-review-panel-blocked-reviewer-reads-as-clean",
+      "description": "Companion safety pattern: in an unattended overnight review panel, a reviewer that couldn't see the code reads as a CLEAN one — usually because the code-review subagent lacks a Bash tool, so when told to `gh pr diff`/checkout a PR it returns a BLOCKED report (or reviews main, which predates the PR). Pre-generate per-base diffs + materialize worktrees + hand explicit paths, and treat BLOCKED as not-clean. Overnight specialization of the general skill code-reviewer-subagent-no-bash-blocked-on-pr-diff.",
       "version": "1.0.0"
     },
     {
