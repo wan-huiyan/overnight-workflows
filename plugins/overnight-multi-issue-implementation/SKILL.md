@@ -26,8 +26,8 @@ description: |
   client-delivery`), or generating insights from data (use `overnight-
   insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.0.0
-date: 2026-05-08
+version: 1.1.0
+date: 2026-05-29
 ---
 
 # Overnight Multi-Issue Implementation
@@ -80,6 +80,17 @@ The Phase A/B/C structure below still applies, but:
 - "PR1 / PR2" become "PR-of-task-N" — every task gets its own PR + auto-merge cycle
 - The pre-flight tracker-ID audit is supplemented by a **parallel-branch file-collision audit** (see next section) — for plans that rewrite shared files, the file-level audit catches stranded-commit risk that the ID audit doesn't
 - The final code-review step becomes a per-PR review-tier choice (see "Per-PR review-tier calibration" below)
+
+**Shared-file, independently-shippable tasks (a common middle case).** "File-disjoint" (above) is the easy case. But tasks can share a file and still each be independently shippable — e.g. three polish PRs that each touch different regions of the same `report.html`. These are NOT candidates for parallel branches (they'd conflict) and they don't need *stacking* either. Run them **strictly sequentially with a resync between each**:
+
+```bash
+# after PR-of-task-N squash-merges:
+git checkout <work-branch> && git fetch origin --prune
+git reset --hard origin/main            # absorb task-N's merge before branching N+1
+git checkout -b feat/task-N+1 ...
+```
+
+Bucket the plan's tasks by file-overlap up front: file-disjoint sets may parallelize; same-file sets become an ordered sequence with `reset --hard origin/main` after every merge. Skipping the resync is how task N+1 silently reverts task N (see `stale-base-pr-silently-reverts-upstream-content`).
 
 ## Phases
 
@@ -169,6 +180,18 @@ gh pr view <N> --json body -q .body | head -30  # confirm intentional drops docu
 ```
 
 If anything red, drop to Tier 2 and dispatch a combined reviewer.
+
+**"Baseline clean" means identical failing *set*, not identical *count*.** When the suite carries pre-existing failures (common in a mature repo), a matching pass/fail *count* can mask a swap — your change broke test X while flakily fixing test Y. Diff the failing set against the pre-run baseline:
+
+```bash
+# once, before the chain:
+pytest -q 2>&1 | grep -E '^FAILED' | sort > /tmp/baseline_fails.txt
+# after each PR:
+pytest -q 2>&1 | grep -E '^FAILED' | sort > /tmp/now_fails.txt
+diff /tmp/baseline_fails.txt /tmp/now_fails.txt && echo "IDENTICAL — zero regressions"
+```
+
+**For UI tasks, static checks are not verification.** `node --check` is syntax-only; a render test proves the template renders, not that it *looks right* or that interactive JS works. When the live flow is blocked (auth/seed bugs) or needs heavy state, verify the rendered template standalone: render to a file, inline the stylesheet, serve it (`python3 -m http.server` — `file://` is blocked in the Playwright MCP), then drive with Playwright and assert layout facts via `getBoundingClientRect` (e.g. "the dropdown's bottom extends past its clipping ancestor AND its last item is within the viewport" proves an `overflow:hidden` clip fix). Bounding-box assertions beat screenshots, which time out on external web-font loading. See `flask-webapp-browser-debug`.
 
 ### Decision rubric
 
@@ -353,6 +376,35 @@ If you accidentally trigger the stacked-PR delete trap, see
 with `--base main` from the same head branch; preserve review comments
 by linking the closed PR's comment thread.
 
+### Auto-closed *issue* (partial-implementation PR / negated close-keyword)
+
+Distinct from the dependent-**PR** trap above: a multi-PR chain often
+implements only a **partial** slice of a multi-part issue (e.g. "do the
+Prob+ hero now, defer the big-number block + breadcrumb + CTAs"). If any
+close-keyword (`close/closes/fix/fixes/resolve/resolves`) lands adjacent to
+`#N` in the **commit body or PR description**, GitHub auto-closes `#N` on
+default-branch merge — orphaning the deferred items inside a closed issue.
+This is **silent and especially dangerous overnight** (no one notices the
+remaining scope vanished) and survives two foot-guns:
+
+- **Negation does not save you.** `Does not close #N`, `partial — closes #N
+  later`, `not resolving #N yet` all STILL close `#N` — the parser is a flat
+  substring scan, not negation-aware.
+- **Squash-merge reads the COMMIT body**, which can differ from the PR
+  description you carefully worded. Scan the merge-commit message too.
+
+Detect + recover:
+```bash
+gh issue view <N> --json closedAt,stateReason
+gh api repos/<O>/<R>/issues/<N>/timeline \
+  --jq '[.[] | select(.event=="closed")][-1] | {commit_id, actor: .actor.login}'
+# if the closing commit_id is your own merge → it was the keyword trap:
+gh issue reopen <N> --comment "Reopened — auto-closed by the partial-impl merge <sha>; the following deferred items remain: …"
+```
+Prevention: for partial work, use a non-keyword verb (`Scopes part of #N`,
+`Partial for #N`, `Defers the rest of #N`) and **verify `#N` is still OPEN
+after each merge** in the chain. See `prep-pr-close-keyword-auto-closes-issue`.
+
 ## Output (morning checklist)
 
 By morning the user should have:
@@ -365,6 +417,8 @@ By morning the user should have:
 - [ ] Tracker entries reserved (`cat7-7eX` and `cat7-7eY`) + site regenerated
 - [ ] Session handoff doc at `docs/handoffs/session_NNN_handoff.md`
 - [ ] MEMORY.md updated with one-line index entry per skill convention
+- [ ] Every issue only partially implemented this chain verified still **OPEN**
+      (close-keyword trap check — see "Auto-closed issue" recovery pattern)
 - [ ] Any new project-feedback files saved under `memory/feedback_*.md`
 
 ## Anti-patterns
@@ -387,6 +441,12 @@ By morning the user should have:
   project has auto-deploy-on-merge wired, the deploy preflight (e.g.,
   `deploy-from-stale-worktree-silent-rollback`) needs human review for
   high-stakes changes.
+- **Don't** put a close-keyword next to an issue `#N` you're only partially
+  resolving — *even negated* (`does not close #N` still closes it). For
+  partial-slice PRs in a chain, use a non-keyword verb and verify `#N` stays
+  OPEN after the merge. See the "Auto-closed issue" recovery pattern.
+- **Don't** call a chain "zero-regression" on a matching pass/fail *count* —
+  diff the failing *set* (a new break can hide a flaky new pass).
 
 ## References / sister skills
 
@@ -405,6 +465,13 @@ By morning the user should have:
   but local cleanup failed" gotcha.
 - `stacked-pr-base-branch-deletion-auto-closes-dependent` — handles the
   trap of deleting a base branch while a stacked PR is still open.
+- `prep-pr-close-keyword-auto-closes-issue` — handles the **issue** auto-close
+  trap (a close-keyword, even negated, in a partial-impl PR's commit/body
+  closes a multi-part issue prematurely).
+- `stale-base-pr-silently-reverts-upstream-content` — why same-file sequential
+  PRs need `git reset --hard origin/main` between merges.
+- `flask-webapp-browser-debug` — standalone-render browser verification when
+  the live flow is blocked.
 - `pr-conflict-site-regen` (project-specific example) —
   conflict-resolution recipe for the project repo's site-regen pattern;
   template for "your project's PR-conflict skill" referenced above.
