@@ -47,6 +47,8 @@ Neither plugin trusts the author (or the track) to self-review. A panel of 4–8
 
 **But verify every reviewer actually saw what it reviewed.** Many review/search subagents (`feature-dev:code-reviewer`, `voltagent-*`, `Explore`) ship **without a `Bash` tool**, so a reviewer told to `gh pr diff`/checkout a PR returns a **BLOCKED** report — or silently reviews the current checkout (often `main`, which predates the work) instead. In an unattended overnight run, **a BLOCKED reviewer reads as a CLEAN one**, and the bug it never looked at ships by morning. Pre-generate per-base diffs to files + materialize PR branches as worktrees + hand each reviewer explicit paths, and in the morning synthesis treat **BLOCKED as not-clean** (re-dispatch before counting the vote). See [`overnight-review-panel-blocked-reviewer-reads-as-clean`](plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/).
 
+> **Standing convention — review every non-trivial PR with the panel before merge.** Distinct from the *deliverable* panel above (Phase B audits a doc/deck): before squash-merging any **non-trivial code PR**, run the [`roundtable:agent-review-panel`](https://github.com/wan-huiyan/agent-review-panel) skill with **all panel agents set to `model: opus`** (the skill's enforced default) instead of (or in addition to) a single code-reviewer agent — multiple independent opus reviewers catch what one reviewer misses, gating client-facing / substantive changes. Fold/triage findings, fix, re-run if needed, THEN squash-merge. **Trivial / docs-only PRs may skip the full panel** (same non-trivial threshold). This `roundtable:`-invoked panel is the same `agent-review-panel` dependency named in §1 + [Dependencies](#dependencies). (Origin: barryU propensity project, 2026-06-02.)
+
 ### 2. Locked-file escape hatch
 
 Client-facing files are LOCKED by default. Modifying one requires **four conditions**: explicit prompt authorization, independent verification (BQ query OR second reviewer confirming), surgical-only edit, and prominent documentation in the morning summary. Without all four, flag as "REQUIRES USER DECISION."
@@ -154,6 +156,7 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-06-02** — Standing convention added: review every **non-trivial PR** with the `roundtable:agent-review-panel` skill (all agents `model: opus`) before squash-merge; trivial/docs-only PRs may skip the full panel. Reconciled with the per-PR tier rubric (the panel is the heavyweight tier; single-reviewer tiers remain for low-risk PRs). `overnight-multi-issue-implementation` SKILL → v1.1.1, `subagent-review-tier-calibration-for-overnight-pr-chains` SKILL → v1.0.1.
 - **v1.1.0** (2026-05-08) — Adds `overnight-multi-issue-implementation` for the engineering-side overnight pattern (issues → stacked PRs). README updated to reflect three plugins; install + compose sections expanded.
 - **v1.0.0** (2026-04-17) — Initial release bundling two plugins. `overnight-review-client-delivery` was previously a standalone skill; this bundle adds the insight-discovery sibling and unifies the shared patterns (locked-file escape hatch, branch hygiene, file-first successor handoff, archive-and-regenerate).
 

@@ -19,7 +19,7 @@ description: |
   subagents in one session when 14 × 1 + 5 × 0 would have caught the same
   bugs in half the wall time.
 author: Claude Code
-version: 1.0.0
+version: 1.0.1
 date: 2026-05-28
 ---
 
@@ -56,6 +56,12 @@ Apply this calibration when **all** of these hold:
 ## Solution
 
 ### Tier 1 — Full two-stage review (`subagent-driven-development` default)
+
+> **Standing convention (the heavyweight tier):** for any non-trivial PR, prefer
+> the **`roundtable:agent-review-panel`** skill (all panel agents `model: opus`)
+> over the two-stage single-reviewer pair — multiple independent opus reviewers
+> catch what one misses. Tier 2 / Tier 3 (single-reviewer / bash-only) are for the
+> trivial / low-risk PRs that "skip the full panel." Same threshold as below.
 
 Use when:
 - PR rewrites a view handler (request.form consumption, session-state shape)
