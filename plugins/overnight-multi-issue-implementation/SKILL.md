@@ -26,7 +26,7 @@ description: |
   client-delivery`), or generating insights from data (use `overnight-
   insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.1.0
+version: 1.1.1
 date: 2026-05-29
 ---
 
@@ -133,6 +133,12 @@ For overnight throughput, calibrate review intensity **per-task** using the 3-ti
 ### Tier 1 — Full two-stage (strict `subagent-driven-development`)
 
 Spec-compliance reviewer → fix loop → code-quality reviewer → fix loop → merge.
+
+> **Standing convention (the heavyweight tier):** for any non-trivial PR, prefer
+> the **`roundtable:agent-review-panel`** skill (all panel agents `model: opus`)
+> over the two-stage single-reviewer pair — multiple independent opus reviewers
+> catch what one misses (see Phase C step 1). The single-reviewer tiers below
+> (Tier 2 / Tier 3) are for the trivial / low-risk PRs that "skip the full panel."
 
 Use when:
 - Task touches a view handler / request-form consumer / session-state shape
@@ -307,11 +313,20 @@ See sister skill `gh-pr-merge-worktree-checkout-trap`.
 
 Before proposing merge to user:
 
-1. **Final code-review subagent on the full PR diff** (not just per-task).
+1. **Final PR-level review on the full PR diff** (not just per-task).
    Per-task reviews catch implementation bugs; PR-level review catches
-   cross-task integration concerns. Use `voltagent-qa-sec:code-reviewer`
-   or invoke `code-review:code-review` skill. Run PR1 + PR2 reviews in
-   parallel (single message, multiple Agent calls).
+   cross-task integration concerns. For any **non-trivial** PR, run the
+   **`roundtable:agent-review-panel`** skill with **all panel agents set to
+   `model: opus`** (the skill's enforced default) — multiple independent opus
+   reviewers catch what one reviewer misses, which is the point of gating a
+   client-facing / substantive change. This is the same `agent-review-panel`
+   dependency the repo already names (see README §1 + Dependencies); the
+   `roundtable:` form invokes it as a skill. Triage/fold its findings, fix,
+   re-run if needed, THEN squash-merge. **Trivial / docs-only PRs may skip the
+   full panel** — fall back to a single reviewer (`voltagent-qa-sec:code-reviewer`
+   or the `code-review:code-review` skill); use the same non-trivial threshold
+   as the tier rubric above. Run PR1 + PR2 reviews in parallel (single message,
+   multiple Agent calls).
 
 2. **Surface findings as PR comments BEFORE merge**. Squash discards the
    in-branch commit messages; review-finding text only persists if posted
