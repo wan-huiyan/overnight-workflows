@@ -1,0 +1,21 @@
+{
+  "name": "observational-analysis-rigor",
+  "description": "A validity toolkit for observational data analysis (no randomization): 29 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, and provenance/re-derivation — the deep-dives behind overnight-insight-discovery's analytical validity gate. One flagship 8-step protocol skill + 28 focused deep-dive skills.",
+  "version": "1.0.0",
+  "author": {
+    "name": "wan-huiyan"
+  },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "observational-analysis",
+    "causal-inference",
+    "data-leakage",
+    "simpsons-paradox",
+    "point-in-time",
+    "ml-analysis",
+    "bigquery"
+  ]
+}

@@ -99,7 +99,7 @@ its variants. Examples:
 ```json
 {"family": "accepted_nd_tenure", "members": ["days_in_accepted_not_deposited", "accepted_nd_tenure", "accepted_nd_tenure_band_0_30d", ...]}
 {"family": "acceptance_variant", "members": ["acceptance_variant", "acceptance_variant_clean_accept", "acceptance_variant_pending_docs", ...]}
-{"family": "fafsa", "members": ["has_fafsa_submitted", "fafsa_filed", "will_apply_for_financial_aid", "days_since_isir_receipt", ...]}
+{"family": "financial_aid", "members": ["has_aid_submitted", "aid_filed", "will_apply_for_aid", "days_since_aid_doc", ...]}
 ```
 
 Why families matter: `days_in_accepted_not_deposited` and
@@ -143,7 +143,7 @@ auditors can trace.
 
 Every pattern the skill captures is helpful, but the novelty gate is load-bearing.
 Without it, Track B (LLM-autonomous) will happily narrate "students with filed
-FAFSA enroll more" as a finding. Track C's scans will surface the same. The
+aid-eligibility enroll more" as a finding. Track C's scans will surface the same. The
 review panel, lacking a concrete gate, will defer to "well, it's statistically
 significant" and let it through. The consolidation will include it. The client
 reads it and says "we already knew that."

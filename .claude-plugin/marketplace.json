@@ -47,6 +47,12 @@
       "source": "./plugins/schedule-poll-orchestrator-pattern",
       "description": "Fire-ASAP orchestrator pattern for multi-track autonomous overnight workflows on scheduled triggers — a self-rescheduling poll loop that consolidates the moment all tracks report complete, and survives a 12-20h session end. Companion safety pattern.",
       "version": "1.0.0"
+    },
+    {
+      "name": "observational-analysis-rigor",
+      "source": "./plugins/observational-analysis-rigor",
+      "description": "A validity toolkit for observational data analysis (no randomization): 29 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, and provenance/re-derivation — the deep-dives behind overnight-insight-discovery's analytical validity gate.",
+      "version": "1.0.0"
     }
   ]
 }

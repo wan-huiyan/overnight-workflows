@@ -6,7 +6,7 @@
 
 ## The pitfall
 
-`cdp_imports.salesforce_adm_application.profile` **regenerates per
+`<cdp_dataset>.application.profile` **regenerates per
 application cycle**. It is not a stable person-level identifier.
 
 Verified:
