@@ -47,7 +47,7 @@ WITH panel_flagged AS (
 ),
 decided AS (
   SELECT LOWER(a.id) AS acct_id
-  FROM `your-project.cdp_imports.crm_account` a
+  FROM `your-project.<cdp_dataset>.crm_account` a
   WHERE a.decision_date IS NOT NULL
 )
 SELECT
