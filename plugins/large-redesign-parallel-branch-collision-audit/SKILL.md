@@ -8,7 +8,7 @@ description: |
   of main but other long-running branches exist with active work, (3) the
   redesign will replace files wholesale (template rewrites, route extractions,
   base.css migrations), (4) the project has a multi-branch flow (one main per
-  client/deployment, e.g. `main` + `release-uk` + `feature/whitelabel-X`).
+  client/deployment, e.g. `main` + `client-a-uk` + `feature/whitelabel-X`).
   Symptom of having skipped this audit: hours after the redesign ships,
   cherry-picking the parallel branch's work into main produces a head-on
   conflict on the rewritten file (often progress.html / report.html / a base
@@ -30,7 +30,7 @@ date: 2026-05-28
 
 You're about to start a large multi-PR redesign that branches from `main`. The branch is clean, tests are green, the plan is locked. You execute 14 PRs overnight, all merge cleanly to main.
 
-The next day someone asks: "What about the changes on `release-uk` / `feature/whitelabel-X` / `staging-customer-Y`?" — and you discover that long-running branch has 10 unmerged commits, including a11y/safety hotfixes on a file (`progress.html`, `report.html`, `_base.html`) that your redesign has just **completely rewritten** with the bold-editorial markup.
+The next day someone asks: "What about the changes on `client-a-uk` / `feature/whitelabel-X` / `staging-customer-Y`?" — and you discover that long-running branch has 10 unmerged commits, including a11y/safety hotfixes on a file (`progress.html`, `report.html`, `_base.html`) that your redesign has just **completely rewritten** with the bold-editorial markup.
 
 Now those 10 commits can't be cherry-picked cleanly. The a11y improvements you'd want to keep (innerHTML→DOM migration, button-onclick→href fixes, focus-trap fixes) collide directly with the redesigned markup. Hand-merge required, possibly losing safety improvements if not careful.
 
@@ -42,7 +42,7 @@ Use this audit BEFORE starting work when **all** of these apply:
 
 1. The user requests a multi-PR redesign / migration / restructure (anything that will rewrite ≥3 templates, the base layout, central views, or shared CSS)
 2. The repo has a multi-branch flow — long-running parallel branches that aren't trivially behind main:
-   - Client-variant branches (`release-uk`, `client-acme`)
+   - Client-variant branches (`client-a-uk`, `client-acme`)
    - Staging branches (`feature/whitelabel-X`)
    - Pending feature branches with unmerged work
 3. The redesign will REPLACE files (not just restyle in-place)
@@ -108,18 +108,18 @@ If non-empty: the conflict resolution work was correctly anticipated and (per up
 
 Worktree on `worktree-redesigned-UI` branching from main `1ae1c4e`. Plan to redesign 13 templates including `progress.html`, `report.html`, `_base.html`, `home.html`, etc.
 
-What was missed: `release-uk` branch had 10 commits ahead of main (last activity 1 week before S75 started), including:
+What was missed: `client-a-uk` branch had 10 commits ahead of main (last activity 1 week before S75 started), including:
 - `f10b87c` per-test re-run buttons modifying validate.html / progress.html JS
 - `bc913c0` progress.html a11y + innerHTML migration finish
 - `125f178` progress.html innerHTML sinks → DOM construction
 - `2410c37` decommission orphaned /permutation route
 
-What happened: S75 PR #166 rewrote progress.html wholesale with bold-editorial markup. The a11y / innerHTML / DOM-construction improvements from #133 and #142 (still on release-uk) now conflict head-on. They can't be cherry-picked — they must be hand-merged into the new markup, preserving the safety improvements.
+What happened: S75 PR #166 rewrote progress.html wholesale with bold-editorial markup. The a11y / innerHTML / DOM-construction improvements from #133 and #142 (still on client-a-uk) now conflict head-on. They can't be cherry-picked — they must be hand-merged into the new markup, preserving the safety improvements.
 
 What the audit would have shown:
 
 ```
-COLLISION RISK: origin/release-uk has 4 commits touching planned files:
+COLLISION RISK: origin/client-a-uk has 4 commits touching planned files:
 f10b87c feat(report): per-test re-run buttons + /api/validation/rerun (#143)
 bc913c0 fix(progress): a11y + finish innerHTML migration (#139 items 3-7) (#142)
 125f178 fix(progress): migrate innerHTML sinks to DOM construction (#133) (#138)
