@@ -16,10 +16,29 @@ description: |
   data-analysis), single-track LLM exploration (use deep-research), or work that needs
   user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.7.1
-date: 2026-04-21
+version: 1.8.0
+date: 2026-07-08
 
 # Changelog
+# 1.8.0 (2026-07-08 — analytical VALIDITY gate)
+#   Adds references/observational_analysis_rigor.md — an 8-step validity protocol
+#   (leak-free cohort · probe outcome−anchor before an event-anchored design ·
+#   decompose pooled rates by the structural axis before believing a gradient ·
+#   de-confound survivors with a BH-corrected regression · marker-vs-lever discipline ·
+#   coverage-limited-join unbiasedness · triple-probe headlines · honest de-stale ledger).
+#   COMPLEMENTS the novelty gate: the novelty gate stops a finding that is a restatement
+#   of a known feature; this stops a finding that is genuinely surprising but WRONG
+#   (a composition artifact, a leak, or an intent marker dressed up as a lever) — the
+#   error class that survives both a novelty check and a sleepy morning read. Wired as a
+#   Phase A self-gate (a signal that fails step 2/collapses under step 3-4 is logged as a
+#   checked-and-retired signal, not written as a finding) and a Phase B blocking review
+#   item (data-scientist + scientific-critical-thinker treat a missing within-axis
+#   decomposition / adjusted effect / marker-lever label like a wrong CI). Origin:
+#   an independently-verified funnel behavioural-lenses analysis where a pooled
+#   several-fold "event lift" was retired as pure level composition (adjusted OR ≈ 1,
+#   a statistical null) and a post-milestone engagement design was shown structurally
+#   invalid because most of the outcome (roughly two-thirds) preceded the anchor stamp.
+#   Generalized (client-agnostic) from a standalone observational-analysis-rigor skill.
 # 1.7.1 (2026-04-21, S100 post-CCR-env-mismatch — 1 addition)
 #   Patch release. Adds Phase 0.Y Remote-env toolchain pre-flight gate for any
 #   CCR-dispatched overnight run. Origin: S100 v5 dispatch fired 4 track triggers
@@ -692,6 +711,7 @@ when you're executing that specific phase; don't load all of them upfront.
 - `references/phase_b_review_loop.md` — panel orchestration + exit criteria
 - `references/phase_c_consolidation.md` — consolidation + HTML + morning handoff
 - `references/cohort_novelty_gate.md` — deep dive on the novelty mechanism
+- `references/observational_analysis_rigor.md` — **v1.8.0** the analytical **validity** gate (composition / leak / anchor-timing / marker-vs-lever); complements the novelty gate — a finding must be both novel AND valid before promotion
 - `references/adaptive_tuning.md` — yield classes + parameter tuning table
 - `references/sql_reexecution_gate.md` — **v1.4.0** pre-panel SQL re-execution + MHT correction
 - `references/cross_model_tiebreaker.md` — **v1.4.0** external-judge tie-breaker with graceful degradation

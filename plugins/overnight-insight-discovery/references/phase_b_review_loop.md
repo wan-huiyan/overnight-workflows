@@ -194,6 +194,17 @@ until the orchestrator did it manually. Had the test run in-flight, Round 2
 would have received the corrected number and the client-facing brief would
 never have shipped with 4.4×.
 
+**Validity checklist (v1.8.0).** Before a claim is accepted, the `data-scientist` +
+`scientific-critical-thinker` personas run it against the **validity gate**
+(`references/observational_analysis_rigor.md`). A promoted finding that lacks a
+**within-structural-axis decomposition** (is the pooled gradient just composition?), an
+**adjusted effect [CI]** net of the obvious confounders, or a **marker-vs-lever label**
+(is this a selection marker being sold as an intervention?) is a **blocking** review item —
+the same standing as a wrong CI or an inverted sign — and emits a stats-verification request
+below. For any "activity after milestone → advanced" claim, the checklist also requires the
+`outcome_date − anchor_date` probe (step 2): if much of the outcome precedes the anchor, the
+design is invalid and the claim is retired, not merely re-tested.
+
 **Trigger.** The `data-scientist` persona's Round N report **may emit one or
 more stats-verification requests**, one per claim whose methodology is
 under-specified. A request is a JSON object in `review/round_N/stats_requests.jsonl`:
