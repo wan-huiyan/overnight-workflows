@@ -1,0 +1,4 @@
+
+# local-only leak-gate term lists (never commit real client names)
+.leakterms
+.leakfigs
