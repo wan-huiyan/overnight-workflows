@@ -2,12 +2,13 @@
 name: observational-analysis-rigor
 description: |
   The validity gate for any finding from OBSERVATIONAL data (no randomization). Use this
-  BEFORE trusting or shipping a data finding, and when reviewing/verifying one. Runs an
-  8-step protocol — leak-free point-in-time cohort · probe outcome−anchor before an
+  BEFORE trusting or shipping a data finding, and when reviewing/verifying one. Runs a
+  9-step protocol — leak-free point-in-time cohort · probe outcome−anchor before an
   event-anchored design · decompose pooled rates by the structural axis (composition /
   Simpson) · de-confound with a multiple-testing-corrected regression · marker-vs-lever
   discipline · coverage-limited-join unbiasedness · triple-probe headlines · honest
-  de-stale ledger — that catches the finding which is genuinely surprising but WRONG
+  de-stale ledger · ship the correction to every rendered surface — that catches the
+  finding which is genuinely surprising but WRONG
   (a composition artifact, a leak, an anchor-timing inversion, or an intent marker sold
   as a lever). Invoke whenever you analyze funnels, cohorts, lift, conversion rates,
   feature signals, retention, or any "do X → they convert / advance" claim from
@@ -15,7 +16,7 @@ description: |
   verify a finding before it reaches a stakeholder. The deep-dive skills in this bundle
   each generalize one step — load the matching one when a step gets hard.
 author: wan-huiyan + Claude Code
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Observational analysis rigor — the validity gate
@@ -83,6 +84,18 @@ gradient. Clean the cohort, then decompose, then de-confound, then interpret.
    denominator/anchor, give the corrected value; reproduces = re-derived clean) with the
    replacement. State every rate's as-of date; keep protected attributes aggregate-only.
 
+9. **Ship the correction to every RENDERED surface — the ledger isn't shipped until the surfaces match.**
+   Steps 1–8 make the *finding* true; this makes the *shipped surfaces* true. Editing the sentence that
+   quotes a figure does **not** touch the other places it is rendered: the **served/baked copy** of the
+   doc (re-bake + confirm the deploy actually re-baked, not a cached payload), **embedded chart images**
+   (a caption edit does not regenerate the PNG — grep the chart generators for the stale figure AND its
+   retired causal title, regenerate, and *view the render*; don't assume "there is no chart pipeline"),
+   **twin / mirrored copies** (a partially-swept twin self-contradicts), and **dashboard payloads / cache
+   tables** (a separate baker holds the value). Match each corrected value to the TARGET cell's
+   **construct** (in-window@Nd vs cumulative vs @120d — same numeral, different metric; don't cross them).
+   When step 4/5 retires a "lift" to a null, the CHART must lead with the adjusted estimate + a CI whisker
+   on the no-lift line and **subordinate** the raw gap (muted, "raw · self-selected"); kill causal titles.
+
 ## Red flags — a finding about to ship as an artifact
 
 | The brief says… | What it may actually be |
@@ -94,6 +107,7 @@ gradient. Clean the cohort, then decompose, then de-confound, then interpret.
 | "N% of the matched rows show…" | Is the unmatched fraction missing-at-random? Validate the bridge (step 6). |
 | "We should get them to do X so they advance" | Associational → marker; needs an A/B to be a lever (step 5). |
 | A raw effect is negative/null but "should" be positive | Simpson — control the axis, it may flip (steps 3–4). |
+| "I fixed the number" (edited the text) | Did the baked chart / twin doc / cached payload update too? A caption edit doesn't regenerate the chart (step 9). |
 
 ## How to apply
 
@@ -103,6 +117,9 @@ gradient. Clean the cohort, then decompose, then de-confound, then interpret.
 - **Reviewing a finding:** treat a promoted claim that lacks a within-axis decomposition (step 3), an
   adjusted effect (step 4), or a marker/lever label (step 5) as a **blocking** issue — the same
   standing as a wrong CI or an inverted sign.
+- **De-staling a number already on a live surface:** correcting the text is half the job — run step 9 to
+  propagate to the served/baked copy, embedded charts, twins, and cached payloads. A de-stale PR that
+  edited the captions but left a baked chart rendering the retired figure is **incomplete**, not done.
 
 ## Deep-dive skills (one per hard step)
 
@@ -136,3 +153,4 @@ Each step generalizes into a focused skill in this bundle; load the matching one
   `data-provenance-verifier`,
   `amplifying-an-existing-number-is-a-provenance-recheck-trigger`
 - **Step 8 — honest ledger / framing:** `single-anchor-point-estimate-needs-range-framing`
+- **Step 9 — ship the correction:** `ship-the-correction-to-every-rendered-surface`
