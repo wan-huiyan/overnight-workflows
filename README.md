@@ -27,6 +27,14 @@ Cross-cutting skills that strengthen any overnight workflow. Installable indepen
 
 The workflow plugins share the same phase structure, locked-file escape hatch, branch hygiene, and file-first discipline — use them as a set, in pairs, or individually. The companion safety patterns layer on top of any of the workflow plugins (or on standalone `subagent-driven-development` runs). For the orchestrator-takeover boundary when a track's subagent is blocked waiting on external state (CI / Cloud Build / a `gcloud` poll), see [`subagent-external-wait-orchestrator-takeover`](https://github.com/wan-huiyan/agent-traffic-control) in `agent-traffic-control`.
 
+## Analysis toolkit
+
+A standalone methodology bundle — not an overnight workflow, but the analytical backbone the insight-discovery workflow leans on. Installable independently.
+
+| Plugin | When to use |
+|---|---|
+| [**observational-analysis-rigor**](plugins/observational-analysis-rigor/) | The validity gate for any finding from **observational** data (no randomization). A flagship 8-step protocol skill + 28 focused deep-dive skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, and provenance/re-derivation. Catches the *surprising-but-wrong* finding — a composition artifact, a leak, an anchor-timing inversion, or an intent marker sold as a lever. Backs `overnight-insight-discovery`'s analytical validity gate; usable in any analysis. |
+
 ## Why use these
 
 Overnight autonomous runs are seductive but brittle. The typical failure modes:
