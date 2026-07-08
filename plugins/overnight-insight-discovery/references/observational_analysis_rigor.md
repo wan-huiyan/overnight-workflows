@@ -59,10 +59,11 @@ Clean the cohort, then decompose, then de-confound, then interpret.
    bridged-subset rate to an **independent full-coverage reference**; match ⇒ report with a coverage
    caveat, diverge ⇒ the estimate is biased. Distinguish "value 0 = none" from "value 0 = not observed."
 
-7. **Triple-probe every headline via an independent construction.** Reproduce the number a second way
-   (different source table, join path, or grain) and confirm they agree before it ships. Two
-   constructions landing on the same value is the evidence; one is a hypothesis. Report SQL,
-   denominators, coverage, and the **as-of date** per headline.
+7. **Triple-probe every headline via independent constructions.** Reproduce the number **at least a
+   second way** (different source table, join path, or grain) — and for the highest-stakes headline, a
+   third — and confirm they agree before it ships. Independent constructions landing on the same value
+   is the evidence; a single construction is a hypothesis. Report SQL, denominators, coverage, and the
+   **as-of date** per headline.
 
 8. **Write the honest ledger — retire / reframe / reproduces.** For each prior figure in circulation,
    state a verdict (retire = artifact/leak; reframe = right direction, wrong denominator/anchor, give
