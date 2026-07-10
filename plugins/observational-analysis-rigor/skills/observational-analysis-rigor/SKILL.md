@@ -144,7 +144,8 @@ Each step generalizes into a focused skill in this bundle; load the matching one
 - **Step 4 — de-confound over time:** `observational-version-comparison-confounded-by-time`,
   `frozen-cohort-rebucket-newer-model-contemporaneity-leak`,
   `cohort-broadening-event-source-scope-leak`
-- **Step 5 — marker vs lever:** `differentiator-scoping-by-provenance-not-signal`
+- **Step 5 — marker vs lever:** `differentiator-scoping-by-provenance-not-signal`,
+  `funnel-stage-lift-needs-downstream-capacity-check`
 - **Step 6 — coverage-limited joins:** `coverage-limited-join-validate-unbiased-before-trusting`
 - **Step 7 — triple-probe / re-derive:** `verifier-rederive-from-raw-not-the-checked-artifact`,
   `finding-verification-live-bq-triple-probe`,
