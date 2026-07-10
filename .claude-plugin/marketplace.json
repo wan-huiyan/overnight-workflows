@@ -51,8 +51,8 @@
     {
       "name": "observational-analysis-rigor",
       "source": "./plugins/observational-analysis-rigor",
-      "description": "A validity toolkit for observational data analysis (no randomization): 30 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface — the deep-dives behind overnight-insight-discovery's analytical validity gate.",
-      "version": "1.0.0"
+      "description": "A validity toolkit for observational data analysis (no randomization): 31 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface — the deep-dives behind overnight-insight-discovery's analytical validity gate.",
+      "version": "1.2.0"
     }
   ]
 }
