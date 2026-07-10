@@ -33,7 +33,7 @@ A standalone methodology bundle — not an overnight workflow, but the analytica
 
 | Plugin | When to use |
 |---|---|
-| [**observational-analysis-rigor**](plugins/observational-analysis-rigor/) | The validity gate for any finding from **observational** data (no randomization). A flagship 9-step protocol skill + 29 focused deep-dive skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface. Catches the *surprising-but-wrong* finding — a composition artifact, a leak, an anchor-timing inversion, or an intent marker sold as a lever. Backs `overnight-insight-discovery`'s analytical validity gate; usable in any analysis. |
+| [**observational-analysis-rigor**](plugins/observational-analysis-rigor/) | The validity gate for any finding from **observational** data (no randomization). A flagship 9-step protocol skill + 30 focused deep-dive skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface. Catches the *surprising-but-wrong* finding — a composition artifact, a leak, an anchor-timing inversion, or an intent marker sold as a lever. Backs `overnight-insight-discovery`'s analytical validity gate; usable in any analysis. |
 
 ## Why use these
 
