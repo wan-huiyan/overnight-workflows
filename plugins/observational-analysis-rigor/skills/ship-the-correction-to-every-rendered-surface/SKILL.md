@@ -79,17 +79,19 @@ must say so — a bar chart still showing a hot `4×` bar is a stronger residual
 
 ## Example
 
-Barry `/actions` dossier de-stale (#1666). A first PR corrected the dossier TEXT — spine 14.7→18.7
-cumulative; a card in-window rate re-derived to 13.5; a recruitment-event `~4×` "lift" retired to an
-adjusted null (OR 1.03, p=0.81) — and shipped. But the two baked chart PNGs still rendered the retired
-figures: one still titled "Event attendees enrol far more" with 4.0×/2.4× bars and a "gap peaks in the
-decision zone" arrow; the other's trendline still anchored at 14.7. The corrected captions sat next to
-charts that contradicted them. The claim "there is no chart-generation pipeline" was false — 27
+A client dashboard's insights-page de-stale (figures below are illustrative). A first PR corrected
+the page TEXT — the headline cumulative rate revised upward (~15%→~19%); a card's in-window rate
+re-derived (~13%); an event-attendance `~4×` "lift" retired to an adjusted null (OR ≈ 1.0, n.s.) —
+and shipped. But the two baked chart PNGs still rendered the retired figures: one still titled with
+the causal "attendees convert far more" claim over the old ~4×/~2× bars plus a "gap peaks" annotation;
+the other's trendline still anchored at the old headline value. The corrected captions sat next to
+charts that contradicted them. The claim "there is no chart-generation pipeline" was false — dozens of
 `make_*.py` generators existed. A follow-up PR regenerated them (the event chart now leads with
-`1.03× · null` + a CI whisker on the no-lift line, raw ratios muted + "self-selected, uncontrolled"; the
-trendline baseline 14.7→13.5), re-baked on a branch off current main, and proved the served-copy diff was
-image-stripped-identical except the 2 intended PNG blobs. A separate near-miss: the card's in-window 13.5
-was almost "corrected" to the spine's 18.7 cumulative — same numeral, different construct.
+`≈1× · null` + a CI whisker on the no-lift line, raw ratios muted + "self-selected, uncontrolled";
+the trendline re-anchored to the corrected baseline), re-baked on a branch off current main, and
+proved the served-copy diff was image-stripped-identical except the 2 intended PNG blobs. A separate
+near-miss: the card's in-window rate was almost "corrected" to the headline's cumulative value —
+interchangeable-looking numerals, different constructs.
 
 ## Notes
 - This is the delivery counterpart to the analysis steps: steps 1–8 make the finding *true*; this step
