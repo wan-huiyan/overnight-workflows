@@ -24,9 +24,13 @@ description: |
   NOT for: synchronous single-PR work (use plain `subagent-driven-
   development`), polishing an existing deliverable (use `overnight-review-
   client-delivery`), or generating insights from data (use `overnight-
-  insight-discovery`).
+  insight-discovery`). v1.2.0 adds Phase 0 for UNVALIDATED backlogs —
+  stale-issue triage biased against dismissal, owner cut-line ratification,
+  rulings baked as issue comments, wave-ordered kickoff prompt — use when
+  the user says "triage this backlog first", "some of these might be
+  stale", or "apply the owner's rulings".
 author: wan-huiyan + Claude Code
-version: 1.1.1
+version: 1.2.0
 date: 2026-05-29
 ---
 
@@ -62,6 +66,45 @@ NOT for:
 - Polishing an existing deliverable → use `overnight-review-client-delivery`
 - Generating insights from data → use `overnight-insight-discovery`
 - One-shot experiments without merge intent → just iterate
+
+## Phase 0: backlog triage + owner-ruling application (when issues are NOT pre-validated)
+
+"When to use" condition 4 assumes each issue is live and well-specified. When the input is
+instead a **backlog** — dozens of issues filed over weeks, some possibly already fixed by
+intervening PRs, some obsolete — running the overnight build directly either re-does merged
+work or (worse) silently drops still-live issues. Insert a decision layer first. In practice
+the triage routinely flips wrong "already fixed" verdicts back to live — that is the
+dismissal-bias rule earning its keep.
+
+1. **Triage against live `main`, biased AGAINST dismissal.** Pin to `origin/main` (not your
+   worktree); one read-only investigator per issue; verdicts `still_valid | partially_done |
+   already_fixed | outdated_superseded | needs_owner_input`. A dismissal verdict requires BOTH
+   the merged PR number that did the work AND a current `file:line` proving it — otherwise
+   default to `still_valid`. Adversarially re-verify ONLY the dismissals (a wrong "still valid"
+   is cheap — caught at implementation; a wrong "already fixed" silently drops real work).
+2. **Present a cut line — never auto-close.** The owner ratifies per item: close / build /
+   defer / discuss. An interactive per-item review page beats chat retyping — see
+   [`interactive-feedback-report`](https://github.com/wan-huiyan/interactive-feedback-report),
+   which collects the rulings and emits them as one structured paste-back prompt.
+3. **Bake rulings into the issues BEFORE building.** One comment per ruled issue under a fixed,
+   greppable header (e.g. `Owner ruling — <date> backlog review`). Rulings become **repo state,
+   not conversation state** — the overnight build then reads authoritative specs from issue
+   comments, never from a chat transcript that may be gone by morning.
+4. **Split decision-application from build execution.** Apply closures / ruling comments /
+   re-scopes in the decision session (cheap, minutes); hand the builds to a fresh session via a
+   **wave-ordered kickoff prompt** (quick unblocked items → standard builds → large sequenced
+   work) that lists "already done — do NOT redo" up top and points at the issue comments as the
+   specs. The kickoff prompt feeds this skill's Phase A/B directly. Before each build, re-verify
+   the issue's premise on current `main` — parallel sessions move fast.
+5. **Rulings arrive in ROUNDS.** The first cut-line reply rarely settles every open ask; later
+   answers use the SAME comment header plus a "(follow-up round)" suffix, and the kickoff prompt
+   is amended **additively** (append new wave items; strike through resolved "awaiting owner"
+   entries — never rewrite sections an executing session may already have read).
+6. **Two sequencing rules that prevent orphaned work:** (a) when a ruling says "close X as
+   absorbed and raise a successor", file the successor FIRST so X's closure comment cites the
+   real issue number; (b) when a ruling answers an ask whose remaining work is a build, re-scope
+   the issue in the ruling comment and keep it OPEN pointing at its wave item — closing it
+   orphans the build (and beware the close-keyword trap below, which can do this silently).
 
 ## Variant: Plan-driven (independent PRs)
 
@@ -403,10 +446,19 @@ This is **silent and especially dangerous overnight** (no one notices the
 remaining scope vanished) and survives two foot-guns:
 
 - **Negation does not save you.** `Does not close #N`, `partial — closes #N
-  later`, `not resolving #N yet` all STILL close `#N` — the parser is a flat
-  substring scan, not negation-aware.
+  later`, `not resolving #N yet` all STILL close `#N` — the parser matches
+  any close-keyword immediately followed by the issue ref and is not
+  negation-aware.
 - **Squash-merge reads the COMMIT body**, which can differ from the PR
   description you carefully worded. Scan the merge-commit message too.
+- **Docs-only planning PRs fire it too.** The parser doesn't know your PR is
+  prose *about future work*: a kickoff-prompt addendum whose body narrates
+  "…replace the interim line, then close #N" closes the still-open tracker
+  `#N` the moment the docs PR merges — before any build has run. Since only
+  keyword-immediately-before-ref matches, phrasing the intention with the
+  keyword AFTER the ref ("#N is then closed") or detached ("close it once
+  shipped") is safe. Apply this to EVERY PR body, including pure-docs ones,
+  and re-check tracker states after each merge in the chain.
 
 Detect + recover:
 ```bash
@@ -459,7 +511,13 @@ By morning the user should have:
 - **Don't** put a close-keyword next to an issue `#N` you're only partially
   resolving — *even negated* (`does not close #N` still closes it). For
   partial-slice PRs in a chain, use a non-keyword verb and verify `#N` stays
-  OPEN after the merge. See the "Auto-closed issue" recovery pattern.
+  OPEN after the merge. See the "Auto-closed issue" recovery pattern. This
+  applies to **docs-only planning PRs too** — "then close #N" in a kickoff
+  prompt's PR body closes the tracker on merge.
+- **Don't** run the overnight build on an unvalidated backlog — triage +
+  owner ratification first (Phase 0). Re-implementing already-merged work
+  wastes the night; a mistaken dismissal silently drops real scope. Both
+  cost far more than the afternoon of triage that prevents them.
 - **Don't** call a chain "zero-regression" on a matching pass/fail *count* —
   diff the failing *set* (a new break can hide a flaky new pass).
 
@@ -468,6 +526,10 @@ By morning the user should have:
 - `superpowers:subagent-driven-development` — the per-task protocol this
   skill builds on (implementer + spec-reviewer + code-quality-reviewer
   per task).
+- [`interactive-feedback-report`](https://github.com/wan-huiyan/interactive-feedback-report)
+  — single-file HTML review page for collecting the owner's per-item Phase-0
+  rulings as one structured paste-back prompt (no backend, localStorage
+  persistence, copy-as-prompt dock).
 - `superpowers:writing-plans` — produces the implementation plan that
   feeds into Phase A/B.
 - `superpowers:brainstorming` — produces the design doc that feeds into
