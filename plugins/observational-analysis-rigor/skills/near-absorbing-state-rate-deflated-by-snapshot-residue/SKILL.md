@@ -1,8 +1,9 @@
 ---
 name: near-absorbing-state-rate-deflated-by-snapshot-residue
 description: |
-  A "conversion / never-convert / progression" rate for a near-absorbing funnel state (created-not-
-  submitted, abandoned-cart, stalled-ticket, dormant-lead, draft-not-finished) swings by orders of
+  A "conversion / never-convert / progression" rate for a near-absorbing funnel state
+  (created-not-submitted, abandoned-cart, stalled-ticket, dormant-lead, draft-not-finished)
+  swings by orders of
   magnitude depending on WHEN you observe the pool, NOT on a data error. Observe each record at
   CREATION-time → high conversion (fast movers included). Observe the pool as it sits at a LATE
   SNAPSHOT date → near-zero conversion / ~99% "never move" — because the fast movers already drained

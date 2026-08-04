@@ -12,9 +12,9 @@ description: |
   ALWAYS use this skill when the user asks for "ah-ha insights", "surprise patterns",
   "funnel leaks", "hidden findings", "overnight analysis to surface X", or wants a
   dual-approach (creative + mechanical) for client-facing insight work — even if they
-  don't explicitly name the pattern. NOT for: synchronous analysis (use exploratory-
-  data-analysis), single-track LLM exploration (use deep-research), or work that needs
-  user input mid-stream.
+  don't explicitly name the pattern. NOT for: synchronous analysis (use
+  exploratory-data-analysis), single-track LLM exploration (use deep-research), or work that
+  needs user input mid-stream.
 author: wan-huiyan + Claude Code
 version: 1.8.0
 date: 2026-07-08
