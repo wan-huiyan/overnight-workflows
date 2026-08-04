@@ -1,23 +1,20 @@
 ---
 name: conditional-funnel-by-segment-within-level
 description: |
-  Methodology for breaking a multi-stage conversion FUNNEL down by a SEGMENT to find WHERE in the funnel the
-  segment acts (not just whether it correlates with the final outcome). Use when: (1) asked to break a funnel —
+  Break a multi-stage conversion FUNNEL down by a SEGMENT to find WHERE in the funnel the segment acts (not
+  just whether it correlates with the final outcome). Use when: (1) asked to break a funnel —
   signup→activate→subscribe, applied→submitted→accepted→deposited→enrolled, cart→checkout→purchase — down by a
   segment dimension (geography, scholarship/plan tier, acquisition channel/source, campaign-touch, engagement
-  band, plan type, cohort timing); (2) someone is about to headline a POOLED/MARGINAL "segment X converts more"
-  number; (3) the segment value is correlated with a dominant axis (account level, product line, plan) so the
-  pooled number could be composition; (4) the segmenting attribute might itself be recorded/awarded only AFTER
-  reaching a downstream stage. Three things this prevents: (a) reporting a pooled segment→outcome rate that is
-  really level/program COMPOSITION (read WITHIN the dominant stratum instead); (b) missing that the segment's
-  whole effect concentrates at ONE transition (e.g. deposit|accepted) while submit/accept are flat — you only
-  see that by computing CONDITIONAL transition rates, not the cumulative marginal; (c) the structural artifact
-  where an attribute conditioned on a downstream stage (a merit/discount tier awarded at acceptance, a
-  "syndicated-apply source" that IS the submission act, an "aid-application-complete" flag) reads ~100% at every
-  UPSTREAM gate BY CONSTRUCTION, so its upstream cells are
-  meaningless. See also: cohort-milestone-lift-is-funnel-position-not-effect (the milestone-cohort composition
-  trap), within-stratum-residual-event-floor-anchor-split (de-confounding a single ranked metric; events are the
-  binding floor), funnel-lever-vs-predictor-deleaked-forward-gap (turning the same cut into actionable levers).
+  band, cohort timing); (2) someone is about to headline a POOLED/MARGINAL "segment X converts more" number;
+  (3) the segment is correlated with a dominant axis (account level, product line, plan) so the pooled number
+  could be composition; (4) the segmenting attribute might itself be recorded/awarded only AFTER reaching a
+  downstream stage. Prevents: (a) reporting a pooled segment→outcome rate that is really level/program
+  COMPOSITION (read WITHIN the dominant stratum instead); (b) missing that the segment's whole effect
+  concentrates at ONE transition (e.g. deposit|accepted) while submit/accept are flat — you only see that by
+  computing CONDITIONAL transition rates, not the cumulative marginal; (c) the artifact where an attribute
+  conditioned on a downstream stage (a merit/discount tier awarded at acceptance, a "syndicated-apply source"
+  that IS the submission act, an "aid-application-complete" flag) reads ~100% at every UPSTREAM gate BY
+  CONSTRUCTION, so its upstream cells are meaningless.
 author: Claude Code
 version: 1.0.0
 date: 2026-06-25
