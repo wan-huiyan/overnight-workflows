@@ -26,15 +26,44 @@ past char 1535 is already dead: the skill cannot fire on it and nothing reports 
 python3 scripts/check_skill_descriptions.py . --no-color --triggers
 ```
 
-Exit 0 = clean, 1 = at least one description over the cap, 2 = bad path. `--triggers` lists the
-quoted phrases that fall past the cut. When trimming: cut prose and cross-references (they
-belong in the SKILL.md body, which lazy-loads only when the skill fires), never trigger
-vocabulary or a NOT-for list; and land ~30-50 chars under the cap so the next edit does not
-re-break it. Also **wrap the block scalar at ~110 cols and never mid-token** — YAML folds
-`foo-\n  bar` into `foo- bar`, which silently corrupts skill names inside the description.
+Exit 0 = clean, 1 = a description is over the cap **or** broken by a line wrap, 2 = bad path.
+`--triggers` lists the quoted phrases that fall past the cut. When trimming: cut prose and
+cross-references (they belong in the SKILL.md body, which lazy-loads only when the skill fires),
+never trigger vocabulary or a NOT-for list; and land ~30-50 chars under the cap so the next edit
+does not re-break it.
 
-The script is vendored from `wan-huiyan/context-police`; fix it upstream and re-vendor rather
-than editing the copy here.
+**Never wrap mid-token.** A `description: >` / `description: |` scalar joins its lines with a
+SPACE, so `foo-\n  bar` is injected as `foo- bar` — a corrupted skill name or domain term, at an
+unchanged character count that no length check can see. `textwrap.wrap()` breaks on hyphens **by
+default**; pass `break_on_hyphens=False`. The gate reports these under `BROKEN BY LINE-WRAP`.
+
+**Under the cap is not the same as visible.** The cap is only the per-skill limit. A second
+limit, `skillListingBudgetFraction` (1% of the context window), caps the listing as a whole; when
+the total exceeds it the harness collapses whichever entries no longer fit down to bare names,
+ranked by usage rather than by length. Getting a description under the cap guarantees it is no
+longer *truncated* — not that it is *injected*. Check the `Listing budget` section of the gate
+output, and check it against the whole install, not just this repo:
+
+```bash
+python3 scripts/check_skill_descriptions.py . --no-color --context 1000000
+```
+
+### Before/after a trim: diff the trigger surface, don't just count words
+
+```bash
+python3 scripts/check_skill_descriptions.py --compare main:path/to/SKILL.md path/to/SKILL.md
+python3 scripts/score_trigger_coverage.py --old-ref main
+```
+
+`--compare` flags `DROPPED` / `NARROWED` / `REWORDED` triggers. `NARROWED` is the one to read by
+hand: turning `trigger on X — and separately, watch for Y` into `trigger on X WHOSE Y` keeps the
+identical word set, so every word-overlap score is blind to it, while the trigger now only fires
+for users who already diagnosed Y. `score_trigger_coverage.py` is the coverage harness and
+`scripts/eval/description-trigger-suite.json` its committed suite — if a PR quotes coverage
+numbers, they must come from a committed harness a reviewer can re-run.
+
+The gate script is vendored from `wan-huiyan/context-police`; fix it upstream and re-vendor
+rather than editing the copy here.
 
 ## One-time local setup (recommended)
 
