@@ -7,10 +7,11 @@ description: |
   rank levers by raw or adjusted lift from an event table; (3) the "strongest" lever is itself part of the
   transition act (uploading a doc to submit, a checklist that IS submission) — the act-in-disguise; (4) a
   behavior's NEGATIVE or null RAW association flips POSITIVE once you control stage/level (Simpson); (5)
-  VERIFYING a "N× more likely if they do Y AFTER event X" claim whose probe SQL has no join to each unit's OWN
-  event-X date — a mis-described whole-window read; rebuild on the own-anchor, never the pooled lift
-  (composition inflates it), a volume/engagement-stratified ablation PASSING does NOT clear it; (6) the anchor is
-  a REWRITABLE milestone/decision date that can POSTDATE the outcome — probe the outcome−anchor gap FIRST; if the
+  VERIFYING a shipped "N× more likely if they do Y AFTER event X" claim — IF its probe SQL has no join to each
+  unit's OWN event-X date, it is a mis-described whole-window read; rebuild on the own-anchor, never the
+  pooled lift (composition inflates it), a volume/engagement-stratified ablation PASSING does NOT clear it;
+  (6) the anchor is a REWRITABLE milestone/decision date that can POSTDATE the outcome — probe the
+  outcome−anchor gap FIRST; if the
   outcome often precedes it the forward-ordered design is INAPPLICABLE and an "engagement ≤ anchor" window LEAKS
   post-outcome activity. Fix: a DE-LEAKED FORWARD-GAP TEST — measure the predictor in an EARLY window, the
   outcome in a LATER gap-separated window, AMONG users still un-transitioned at the gap boundary; survives = a
