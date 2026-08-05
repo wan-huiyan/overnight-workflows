@@ -141,7 +141,6 @@ would have read as a clean reviewer and the P0 would have shipped.
 - General version: `code-reviewer-subagent-no-bash-blocked-on-pr-diff` — the bare
   no-Bash → BLOCKED tool-gap mechanism, applicable to any PR review (this skill is
   its overnight specialization: the BLOCKED-reads-as-CLEAN consequence under autonomy)
-- Sibling skill: `voltagent-reviewer-no-write-tool` — Write-tool gap (inline output)
 - `stacked-pr-review-per-base-diff-and-attach` — per-base diff scoping for stacked PRs
 - `subagent-bash-cd-wrong-worktree` — Bash-capable agents landing in the wrong worktree
 - Empirically observed 2026-05-29 in a GA/GTM audit project's stacked-PR review panel

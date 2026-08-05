@@ -217,7 +217,3 @@ most low-propensity records never apply *for this period*).
 - Sister skills:
   - `null-bucket-hides-progressors-in-snapshot-training` — same family
     (cohort-vs-event scope mismatch in ML training data)
-  - `bucket-at-first-prediction` — same family (snapshot cohort vs
-    full-history event scope)
-  - `bq-join-using-ambiguous-case-silent-empty` — joins with silent
-    semantics, different layer

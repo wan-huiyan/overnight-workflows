@@ -533,11 +533,6 @@ By morning the user should have:
   closes a multi-part issue prematurely).
 - `stale-base-pr-silently-reverts-upstream-content` — why same-file sequential
   PRs need `git reset --hard origin/main` between merges.
-- `flask-webapp-browser-debug` — standalone-render browser verification when
-  the live flow is blocked.
-- `pr-conflict-site-regen` (project-specific example) —
-  conflict-resolution recipe for the project repo's site-regen pattern;
-  template for "your project's PR-conflict skill" referenced above.
 
 ## Worked example — 2026-05-08 chatbox session
 

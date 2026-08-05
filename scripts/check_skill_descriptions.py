@@ -1,9 +1,30 @@
 #!/usr/bin/env python3
 """Gate SKILL.md frontmatter descriptions against Claude Code's skill-listing cap.
 
-Vendored from wan-huiyan/context-police (scripts/check_skill_descriptions.py) at v2.2.0.
-Do not edit locally -- fix it upstream and re-vendor, so every repo's gate agrees
-on the cap arithmetic.
+--8<-- vendoring note (local addition; stripped before the parity hash) --8<--
+Vendored from wan-huiyan/context-police, scripts/check_skill_descriptions.py.
+Do not edit locally -- fix it upstream and re-vendor, so every repo's gate agrees.
+
+PROVENANCE, exactly:
+    upstream commit  eedad0f  (on context-police main)
+    upstream version 2.2.1    -- a plugin.json/marketplace version, NOT a git tag.
+                                 Upstream's newest tag is v2.0.0; there is no v2.2.x tag.
+    upstream sha256  f210ccd2feb4a3f76289e078bdc5621919ca657026f3d86cc5d7cb1201985fb0
+    re-vendored      2026-08-05
+
+    This file is byte-identical to that upstream revision apart from this note.
+
+WHAT CHANGED SINCE THE PREVIOUSLY VENDORED v2.2.0 (commit 4dc1a62):
+    Only find_wrap_corruption(). It now matches the WHOLE block header including a
+    chomping or explicit-indent indicator (`>-`, `|+`, `|2`), and stops at the end of
+    the block body instead of running on into the next frontmatter key. Without that,
+    a description written `description: >-` leaves the `-` behind as a phantom
+    one-character line, the hyphen test fires on it, and the gate reports a bogus
+    BROKEN BY LINE-WRAP on a clean skill.
+
+    The cap arithmetic did NOT change. `desc_chars - (MAX_DESC_CHARS - 1)` was already
+    in v2.2.0, so re-vendoring moves no "N chars discarded" figure.
+--8<-- end vendoring note --8<--
 
 WHY THIS EXISTS
     Claude Code injects every model-invocable skill's name + description into
