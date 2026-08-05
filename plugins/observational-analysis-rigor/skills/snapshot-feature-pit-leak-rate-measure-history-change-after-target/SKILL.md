@@ -13,10 +13,7 @@ description: |
   rows where today's snapshot value differs from the value the model should have seen. Includes: the
   exact SQL template (single-hop + two-hop via a bridge), the join-via-identity-map gotcha, and four
   honesty caveats (field-level leak is an UPPER bound on feature-level; absence-of-history ≠ static;
-  row-modstamp upper bound is loose; leak-rate ≠ AUC impact). See also:
-  cdc-field-history-coverage-audit-before-scoping-temporal-fix (one history row = one field, not the
-  whole record), field-pit-mode-triage-when-no-history-table (what to do with no history),
-  ml-feature-pit-derive-from-anchor-else-ablation-upper-bound, null-bucket-hides-progressors-in-snapshot-training.
+  row-modstamp upper bound is loose; leak-rate ≠ AUC impact).
 author: Claude Code
 version: 1.0.0
 date: 2026-06-07
@@ -139,7 +136,8 @@ transfer-credits count) → INVESTIGATE, not GO. Deliverable: a per-field GO/FIX
 ## Notes
 
 - Pairs with `cdc-field-history-coverage-audit-before-scoping-temporal-fix` (verify the table covers your
-  field), `field-pit-mode-triage-when-no-history-table` (the INVESTIGATE branch), and
-  `ml-feature-pit-derive-from-anchor-else-ablation-upper-bound` (how to bound impact once you decide to FIX).
+  field), `field-pit-mode-triage-when-no-history-table` (the INVESTIGATE branch),
+  `ml-feature-pit-derive-from-anchor-else-ablation-upper-bound` (how to bound impact once you decide to FIX),
+  and `null-bucket-hides-progressors-in-snapshot-training`.
 - Read-only audit. If the training table feeds an auto-promote/retrain trigger, do NOT rebuild it as a
   side effect of probing — reads are safe, rebuilds can arm a retrain.

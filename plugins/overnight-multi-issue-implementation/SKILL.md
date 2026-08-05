@@ -1,34 +1,20 @@
 ---
 name: overnight-multi-issue-implementation
 description: |
-  Run an overnight autonomous workflow that takes a cluster of related GitHub
-  issues (typically a P1 review-panel finding set) and ships them to merged
-  PRs by morning. Use when: (1) the user wants 6-15 related issues closed in
-  one autonomous run, (2) the issues split naturally into two PRs (e.g.,
-  hardening + features, or refactor + new-functionality), (3) the user is
-  going to sleep and won't be available to merge PR1 between phases, (4) each
-  issue has clear acceptance criteria so each task can be implemented +
-  tested + reviewed independently. Specializes `superpowers:subagent-driven-
-  development` for the "issues -> stacked PRs by morning" problem shape:
-  stacks PR2 on PR1's branch (so PR2 doesn't wait for human PR1-merge mid-
-  night), audits tracker IDs against main before claiming (concurrent
-  sessions steal ids), runs final code-review subagent before proposing
-  merge, and surfaces important findings as PR comments before squashing
-  (so review trail survives). Sister plugin to `overnight-review-client-
-  delivery` (deliverable polishing) and `overnight-insight-discovery`
-  (ah-ha pattern surfacing) — different problem shape, same overnight-
-  autonomous philosophy + multi-agent review-panel discipline. ALWAYS use
-  this skill when the user says "implement these issues overnight",
-  "ship #N–#M autonomously", "wake up to merged PRs", "two-PR overnight
-  plan", or wants a stacked-PR autonomous run from an issue cluster.
-  NOT for: synchronous single-PR work (use plain `subagent-driven-
-  development`), polishing an existing deliverable (use `overnight-review-
-  client-delivery`), or generating insights from data (use `overnight-
-  insight-discovery`). v1.2.0 adds Phase 0 for UNVALIDATED backlogs —
-  stale-issue triage biased against dismissal, owner cut-line ratification,
-  rulings baked as issue comments, wave-ordered kickoff prompt — use when
-  the user says "triage this backlog first", "some of these might be
-  stale", or "apply the owner's rulings".
+  Run an overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1
+  review-panel finding set) and ships them to merged PRs by morning. Use when: (1) the user wants 6-15 related
+  issues closed in one autonomous run, (2) the issues split naturally into two PRs (e.g., hardening + features,
+  or refactor + new-functionality), (3) the user is going to sleep and won't be available to merge PR1 between
+  phases, (4) each issue has clear acceptance criteria so each task can be implemented + tested + reviewed
+  independently, (5) the backlog is UNVALIDATED and needs Phase 0 first — stale-issue triage biased against
+  dismissal, owner cut-line ratification, rulings baked as issue comments, wave-ordered kickoff prompt.
+  Specializes `superpowers:subagent-driven-development` for the "issues -> stacked PRs by morning" problem
+  shape: PR2 is stacked on PR1's branch so it doesn't wait for a human PR1-merge mid-night. ALWAYS use this
+  skill when the user says "implement these issues overnight", "ship #N–#M autonomously", "wake up to merged
+  PRs", "two-PR overnight plan", "triage this backlog first", "some of these might be stale", "apply the
+  owner's rulings", or wants a stacked-PR autonomous run from an issue cluster. NOT for: synchronous single-PR
+  work (use plain `subagent-driven-development`), polishing an existing deliverable (use
+  `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
 version: 1.2.0
 date: 2026-05-29

@@ -1,30 +1,21 @@
 ---
 name: funnel-lever-vs-predictor-deleaked-forward-gap
 description: |
-  Methodology for "what can we DO to move users from funnel stage A to stage B" analyses where the deliverable
-  is a list of ACTIONABLE LEVERS (interventions), not just correlates. Use when: (1) a client/PM asks "how do we
-  get more people to advance from <stage A> to <stage B>" (stalled→submitted, signup→activate, trial→paid, cart→checkout)
-  and you must recommend interventions; (2) you have a behavior/event table and are about to rank levers by raw or
-  adjusted lift on the transition; (3) the a-priori "strongest" lever is itself part of the transition act (uploading
-  a doc to submit, completing a checklist that IS submission) so its lift is the act-in-disguise; (4) a behavior
-  shows a NEGATIVE or null RAW association that flips POSITIVE once you control stage/level (Simpson). The fix is a
-  DE-LEAKED FORWARD-GAP TEST: measure the predictor in an EARLY window strictly before the outcome window, measure the
-  outcome in a LATER gap-separated window, AMONG users still un-transitioned at the gap boundary — a surviving effect
-  is a genuine forward driver (a lever), one that evaporates is a predictor/intent-marker (use for targeting, not as
-  the intervention). Also covers the intervention-vs-intent-marker classification and the by-stage Simpson check;
-  and (5) VERIFYING a shipped "N× more likely if they do Y AFTER event X" claim — if the probe SQL has no join to
-  each unit's OWN event-X date, the claim is a whole-window read mis-described; rebuild on the own-anchor
-  (censored-window primary + fixed forward-gap robustness + specific-vs-generic conditional control; never ship
-  the pooled lift — segment composition Simpson-inflates it). A volume/engagement-stratified ablation PASSING does
-  NOT clear such a claim — volume strata cannot control cohort-vintage composition; only the own-anchor read
-  adjudicates; and (6) the anchor is a REWRITABLE business-milestone date (a decision/status date overwritten by
-  re-decisions) that can POSTDATE the outcome — probe the outcome−anchor gap FIRST; if the outcome frequently
-  precedes the anchor a post-milestone forward-ordered design is structurally INAPPLICABLE (not just biased),
-  and an "engagement ≤ anchor" window LEAKS post-outcome activity; re-anchor on an immutable-upstream event.
-  See also: marginal-lift-collapses-on-pre-event-temporal-restriction (sister: pre/post-creation leakage for FEATURE
-  selection), cohort-milestone-lift-is-funnel-position-not-effect, within-stratum-residual-event-floor-anchor-split,
-  exposure-sliced-by-stage-at-event-window-defined-by-outcome (the outcome-defined-window biases the own-anchor
-  variant's paired design is built to dodge).
+  Turn "what can we DO to move users from funnel stage A to stage B" into a list of ACTIONABLE LEVERS
+  (interventions), not correlates. Use when: (1) a client/PM asks "how do we get more people to advance from
+  <stage A> to <stage B>" (stalled→submitted, signup→activate, trial→paid, cart→checkout); (2) you are about to
+  rank levers by raw or adjusted lift from an event table; (3) the "strongest" lever is itself part of the
+  transition act (uploading a doc to submit, a checklist that IS submission) — the act-in-disguise; (4) a
+  behavior's NEGATIVE or null RAW association flips POSITIVE once you control stage/level (Simpson); (5)
+  VERIFYING a shipped "N× more likely if they do Y AFTER event X" claim — IF its probe SQL has no join to each
+  unit's OWN event-X date, it is a mis-described whole-window read; rebuild on the own-anchor, never the
+  pooled lift (composition inflates it), a volume/engagement-stratified ablation PASSING does NOT clear it;
+  (6) the anchor is a REWRITABLE milestone/decision date that can POSTDATE the outcome — probe the
+  outcome−anchor gap FIRST; if the
+  outcome often precedes it the forward-ordered design is INAPPLICABLE and an "engagement ≤ anchor" window LEAKS
+  post-outcome activity. Fix: a DE-LEAKED FORWARD-GAP TEST — measure the predictor in an EARLY window, the
+  outcome in a LATER gap-separated window, AMONG users still un-transitioned at the gap boundary; survives = a
+  genuine forward driver (a lever), evaporates = a predictor/intent-marker (use for targeting, not intervention).
 author: Claude Code
 version: 1.6.0
 date: 2026-07-07
@@ -232,6 +223,11 @@ own feature (e.g. earliest-touch channel, from the account/entity side) so the r
 own definition.
 
 ## Notes
+- Sibling skills (moved here from the frontmatter description, which is resident in every turn's context and
+  capped at 1,536 chars): `cohort-milestone-lift-is-funnel-position-not-effect` (the milestone-cohort
+  composition trap), `within-stratum-residual-event-floor-anchor-split` (de-confounding a single ranked
+  metric), `exposure-sliced-by-stage-at-event-window-defined-by-outcome` (the outcome-defined-window bias the
+  own-anchor variant's paired design is built to dodge).
 - This is the **actionability** counterpart to `marginal-lift-collapses-on-pre-event-temporal-restriction` (which
   de-leaks a per-event lift table by pre/post entity-creation split for FEATURE/anchor selection). Same instinct
   (temporally separate predictor from the transition), different question: that skill asks "is this a clean

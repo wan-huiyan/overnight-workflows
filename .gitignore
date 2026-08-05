@@ -2,3 +2,8 @@
 # local-only leak-gate term lists (never commit real client names)
 .leakterms
 .leakfigs
+
+# byte-compiled Python (scripts/ is executed by CI and the pre-push hook, but a
+# contributor who imports check_skill_descriptions.py instead produces this)
+__pycache__/
+*.py[cod]

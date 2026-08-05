@@ -13,8 +13,9 @@ description: |
   newer score reads PIT/current-state features that REFLECT the realized outcome (deposit/convert
   status already set) → it is reading the outcome, not predicting it. A 100% forward rate on a
   real cohort is the tell. Three confounds stack: disjoint windows, ~0 prediction horizon
-  (contemporaneity), and survivorship (the newer cohort is a smaller, terminalized-records-
-  dropped subset). The honest comparison needs BOTH models scored at a MATCHED information cutoff
+  (contemporaneity), and survivorship (the newer cohort is a smaller,
+  terminalized-records-dropped subset). The honest comparison needs BOTH models scored at a
+  MATCHED information cutoff
   predicting a FORWARD realized outcome (feasible if the new model is PIT: reconstruct early-date
   features and score offline). Trigger phrases: "re-bucket the cohort with the new model", "score
   the same units with the new model and compare the funnel", "v_new differentiates mid-funnel way

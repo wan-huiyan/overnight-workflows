@@ -1,0 +1,169 @@
+{
+  "_note": "Trigger-coverage eval suite for the five descriptions trimmed in PR #19. Positives are realistic user utterances derived from each skill's FULL pre-trim description, INCLUDING the parts that lived past the 1,535-char cut and were therefore invisible to the model. Negatives are utterances that must NOT pull this skill; most are the trigger surface of a sibling skill in the same plugin, which is what makes the separation number mean something. Run: python3 scripts/score_trigger_coverage.py --old-ref main",
+  "_baseline": "BEFORE is scored against old_description[:1535] -- what the harness actually showed the model -- NOT the full authored text. Scoring against the full oversized source would compare the trim to text nobody ever read and make every honest trim look like a regression.",
+  "skills": {
+    "funnel-lever-vs-predictor-deleaked-forward-gap": {
+      "path": "plugins/observational-analysis-rigor/skills/funnel-lever-vs-predictor-deleaked-forward-gap/SKILL.md",
+      "positive": [
+        "what can we do to move users from the stalled stage to submitted?",
+        "how do we get more people to advance from signup to activate?",
+        "the PM wants a list of interventions to lift cart to checkout conversion",
+        "I have an event table, help me rank which behaviors drive the trial to paid transition",
+        "which levers should we actually pull to increase submissions, not just what correlates",
+        "uploading a document has by far the biggest lift on submitting, is that real or is it just the submission act?",
+        "this feature is the strongest predictor but I think it's part of the transition itself",
+        "the raw association is negative but it flips positive once I control for account level",
+        "we found a Simpson's paradox when we broke the funnel lift down by stage",
+        "is this an actionable lever or just an intent marker we should use for targeting?",
+        "verify this claim: users are 3x more likely to convert if they do Y after event X",
+        "the probe SQL doesn't join to each user's own event date, is the N times more likely claim valid?",
+        "we shipped a pooled lift number and I think segment composition is inflating it",
+        "the ablation stratified by engagement volume passed, does that clear the leakage concern?",
+        "our anchor is a decision date that gets overwritten when the decision is revisited",
+        "the milestone date sometimes comes after the outcome, is the forward-ordered design still valid?",
+        "should I probe the gap between outcome and anchor before running the forward test?",
+        "we filtered engagement to on or before the anchor date, does that leak post-outcome activity?",
+        "how do I separate a predictor from a driver in a funnel progression analysis?",
+        "measure the behavior in an early window and the outcome in a later gap-separated window among users still stuck"
+      ],
+      "negative": [
+        "break this enrollment funnel down by scholarship tier and see where the segment acts",
+        "measure whether our snapshot training feature leaks point-in-time information",
+        "design a conformance judge that validates rendered HTML against its source",
+        "implement these six github issues overnight and wake me up to merged PRs",
+        "run a multi-agent adversarial review panel on this design doc",
+        "audit our CDC field history table coverage before scoping the temporal fix",
+        "write unit tests for the payment module",
+        "refactor this React component to use hooks",
+        "set up a pre-commit hook that runs prettier",
+        "what is the p99 latency of our checkout endpoint?"
+      ]
+    },
+    "conditional-funnel-by-segment-within-level": {
+      "path": "plugins/observational-analysis-rigor/skills/conditional-funnel-by-segment-within-level/SKILL.md",
+      "positive": [
+        "break this conversion funnel down by segment and tell me where in the funnel the segment acts",
+        "split the applied to submitted to accepted to deposited to enrolled funnel by geography",
+        "break signup to activate to subscribe down by acquisition channel",
+        "we want to headline that segment X converts more than segment Y",
+        "is the pooled scholarship-tier conversion number just composition?",
+        "the plan tier is correlated with account level, is the marginal number misleading?",
+        "should I report the cumulative marginal rate or conditional transition rates?",
+        "the segment's whole effect looks like it lands on one transition, deposit given accepted",
+        "this merit tier is only awarded at acceptance, can I use it as a funnel segment?",
+        "the source flag reads 100 percent at every upstream gate, that seems wrong",
+        "compute conversion within the dominant stratum instead of pooled",
+        "does the campaign-touch segment matter at submit, at accept, or only at deposit?",
+        "break the cart checkout purchase funnel down by engagement band",
+        "an attribute that is recorded only after a downstream stage is being used as a segment"
+      ],
+      "negative": [
+        "what interventions can we ship to move stalled users to submitted?",
+        "verify the 3x more likely claim by rebuilding on each user's own anchor date",
+        "measure the snapshot to point-in-time leak rate for this CRM field",
+        "design a verifier that re-derives expectations from raw inputs",
+        "ship these eight issues to stacked PRs overnight",
+        "red team this architecture with several reviewer personas",
+        "add a database index to speed up this query",
+        "generate a brand guidelines board",
+        "resolve this git merge conflict",
+        "what does this stack trace mean?"
+      ]
+    },
+    "verifier-rederive-from-raw-not-the-checked-artifact": {
+      "path": "plugins/observational-analysis-rigor/skills/verifier-rederive-from-raw-not-the-checked-artifact/SKILL.md",
+      "positive": [
+        "I'm building a conformance judge for our rendered report",
+        "design a verifier that checks whether the output honestly reflects the input",
+        "write an LLM-as-judge that validates a generated dashboard against the source data",
+        "our golden-render check always passes, I can't tell if it has teeth",
+        "the fixture gate renders then checks and never fails",
+        "the verifier reads its expected values from the same dict the template consumed",
+        "a green badge is showing on a negative result and our check passed anyway",
+        "the linter compares a value to itself so it passes tautologically",
+        "should the check re-derive expectations from the raw source bundle?",
+        "write a verify function over a derived HTML artifact",
+        "the producer emits metadata that both the artifact and the check read",
+        "how do I stop my conformance check from trusting the artifact under test?",
+        "validate a serialized payload against the inputs it was produced from",
+        "our cached classification is being used as the expected value in the test"
+      ],
+      "negative": [
+        "break the funnel down by segment within level",
+        "rank which behaviors are actionable levers for stage advancement",
+        "measure whether the snapshot feature leaks point-in-time info",
+        "run these issues overnight into two stacked PRs",
+        "convene a review panel with security and performance perspectives",
+        "add type annotations to this python module",
+        "design a landing page hero section",
+        "bump the version and cut a release",
+        "explain what this regex does",
+        "profile this function's memory usage"
+      ]
+    },
+    "snapshot-feature-pit-leak-rate-measure-history-change-after-target": {
+      "path": "plugins/observational-analysis-rigor/skills/snapshot-feature-pit-leak-rate-measure-history-change-after-target/SKILL.md",
+      "positive": [
+        "does our snapshot-sourced training feature leak point-in-time information?",
+        "the pipeline reads the crm_account current-state table for a feature evaluated at a historical target date",
+        "someone said this field is static so the snapshot is fine, can we check that?",
+        "they justified the snapshot as a static attribute by engineering judgment, never measured it",
+        "I need a go / fix / investigate verdict for each remaining snapshot field before the cutover",
+        "we have a field-history table, how do I use it to measure leakage?",
+        "compute the fraction of training rows whose field history changed after that row's target date",
+        "give me the SQL to measure the leak rate against a CDC history table",
+        "dim_customer is a current view and we're using it for as_of_date features",
+        "how do I justify each snapshot field in the audit?",
+        "what is the leak rate for this feature and does it need fixing?",
+        "the join goes through an identity map, does that break the history lookup?",
+        "is absence of history rows the same as the field being static?",
+        "how loose is the row modstamp as an upper bound on leakage?"
+      ],
+      "negative": [
+        "break the funnel down by acquisition channel within account level",
+        "which behaviors are levers versus predictors for the stalled to submitted transition",
+        "build a judge that re-derives its expectations from raw inputs",
+        "implement this backlog of issues overnight",
+        "get a second and third opinion on this plan from multiple agents",
+        "set up husky pre-commit hooks",
+        "write a migration to add a nullable column",
+        "make this chart accessible in dark mode",
+        "summarize this PDF",
+        "why is my docker build failing?"
+      ]
+    },
+    "overnight-multi-issue-implementation": {
+      "path": "plugins/overnight-multi-issue-implementation/SKILL.md",
+      "positive": [
+        "implement these issues overnight",
+        "ship #12 through #19 autonomously while I sleep",
+        "I want to wake up to merged PRs",
+        "give me a two-PR overnight plan for this issue cluster",
+        "I'm going to bed, close these twelve related issues in one autonomous run",
+        "these issues split into a hardening PR and a features PR",
+        "stack the second PR on the first so it doesn't wait for me to merge overnight",
+        "run an autonomous overnight run over this P1 review-panel finding set",
+        "each of these issues has acceptance criteria, implement test and review them independently",
+        "triage this backlog first",
+        "some of these might be stale",
+        "apply the owner's rulings",
+        "these issues were never validated, triage them before implementing",
+        "I need the owner to ratify a cut line before you start building",
+        "bake the owner's decisions into the issues as comments then kick off",
+        "give me a wave-ordered kickoff prompt for this backlog"
+      ],
+      "negative": [
+        "fix this one bug and open a PR",
+        "polish this client deliverable before I send it",
+        "find the ah-ha insights in this dataset overnight",
+        "review the pull request I just opened",
+        "break the funnel down by segment",
+        "measure the point-in-time leak rate of this feature",
+        "design a verifier for our rendered report",
+        "help me write a plan for this refactor",
+        "explain this codebase's architecture",
+        "run the test suite and tell me what fails"
+      ]
+    }
+  }
+}

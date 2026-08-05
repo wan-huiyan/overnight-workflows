@@ -10,12 +10,10 @@ description: |
   it exists to catch (e.g. a "green badge on a negative result" passes because the badge token and the
   expected token came from the same already-computed dict). Fix + design rule: the verifier must RE-DERIVE
   its expectations from the RAW inputs by calling the producer logic ITSELF (classify/compute from the source
-  bundle), never trust the intermediate artifact under test. Use when: (1) writing a verify_*/conformance/
-  judge function over a rendered or derived artifact; (2) the producer emits an intermediate dict/metadata
-  that BOTH the artifact and a naive check could read; (3) a "fixture gate" that renders-then-checks always
-  passes and you can't tell if it has teeth. See also: blind-rederive-pass-when-orchestrator-already-read-the-answer
-  (the subagent-anchoring variant), test-fixture-nondiscriminating-verify-by-mutation (prove the check
-  discriminates), redteam-llm-attacks-adjudicated-by-real-code (LLM generates, real code adjudicates).
+  bundle), never trust the intermediate artifact under test. Use when: (1) writing a
+  verify / conformance / judge function (verify_*) over a rendered or derived artifact; (2) the producer emits an
+  intermediate dict/metadata that BOTH the artifact and a naive check could read; (3) a "fixture gate" that
+  renders-then-checks always passes and you can't tell if it has teeth.
 author: Claude Code
 version: 1.0.0
 date: 2026-06-07
