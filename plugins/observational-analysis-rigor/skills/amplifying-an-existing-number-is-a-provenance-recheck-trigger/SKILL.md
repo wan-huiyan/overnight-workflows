@@ -102,7 +102,4 @@ client-facing plot.
 ## See also
 
 - `finding-verification-live-bq-triple-probe` — the re-derivation mechanics (triple-probe, anchors).
-- `data-provenance-verifier`, `verify-plan-constants-against-data` — provenance/constant checks.
-- `preserve-caveats-when-refactoring-annotated-content` — bake the caveat into the amplified visual.
-- `dashboard-redesign-gated-on-finding-revalidation` — the redesign-time sibling.
-- `handoff-fabricated-locked-decision-vs-open-roadmap` — fabricated-authority in handoffs.
+- `data-provenance-verifier` — provenance/constant checks.

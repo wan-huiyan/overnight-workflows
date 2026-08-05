@@ -106,8 +106,5 @@ the prior-cycle number would be reported as bounded/unverified instead.
 
 ## References / See also
 
-- `feature-join-path-choice-is-coverage-not-leakage-measure-before-building` — sibling: choosing among
-  multiple join paths for a *model feature* is a coverage (not leakage) decision; take the union.
-- `bq-identity-resolution-debug` — mechanics of debugging identity resolution in BigQuery.
 - `snapshot-transient-state-cohort-censors-outcome-use-ever-entered-from-history` — related snapshot-vs-history censoring trap.
 - Missing-data taxonomy: MCAR / MAR / MNAR (Rubin 1976) — the check above distinguishes MAR-enough from MNAR empirically.

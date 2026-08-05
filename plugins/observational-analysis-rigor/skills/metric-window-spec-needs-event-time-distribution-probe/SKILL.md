@@ -273,12 +273,3 @@ Same nominal 14d; two completely different documented justifications.
   "post-impression conversion windows", "cohort retention windows".
   Probe the underlying time-to-event distribution before picking
   the window.
-
-## See also
-
-- `availability-tier-conflates-base-rate-with-data-gap` — sister
-  skill on per-signal grading discipline (same probe-before-grade
-  family: measure the underlying data before assigning a label).
-- `verify-plan-constants-against-data` — for verifying numeric
-  constants in plan docs (different surface, same probe-before-ship
-  family).
