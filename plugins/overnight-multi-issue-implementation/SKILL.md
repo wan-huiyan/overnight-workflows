@@ -16,7 +16,7 @@ description: |
   work (use plain `subagent-driven-development`), polishing an existing deliverable (use
   `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.3.0
+version: 1.3.1
 date: 2026-05-29
 ---
 
@@ -174,7 +174,7 @@ still says the gate worked.
 Observed: three reviewers returned **six** critical findings; the merging agent received
 `JSON.stringify(reviews).slice(0, 9000)` and **five arrived**. The sixth was cut mid-object. It was
 the worst of the six — a keep-or-kill decision resting on a margin about five times finer than the
-data could resolve, in a 553-line pre-registration with no power statement anywhere. Three
+data could resolve, in a pre-registration that had no power statement anywhere. Three
 reviewers dispatched, three verdicts returned, findings commented on the PR, PR merged. Nothing
 looked wrong.
 
@@ -233,9 +233,13 @@ REJECT with categorized findings.
 *"Check whether this change ships a fresh instance of the defect it repairs."* On the observed run
 **five of twenty merged PRs did** — a correction to a figure with no corpus named printed a figure
 with no corpus named; a document about uncited copied numbers contained an uncited copied number.
-About one in four, on documents. It was the single most common review finding, ahead of ordinary
-regressions, and **every instance was caught by someone re-deriving a number, never by reading the
-diff**. Budget a round for it.
+It was the single most common review finding, ahead of ordinary regressions, and **every instance
+was caught by someone re-deriving a number, never by reading the diff**.
+
+**Don't turn that into a rate.** The run's own count of five was reopened afterwards by the repo
+that hosted it: a sixth instance turned up in a PR body, and two of the five were documents written
+from scratch, where "the defect it existed to repair" is a stretch. **Budget a round for it as
+something common, not as a measured rate** — the number was never the useful part.
 
 **And tell reviewers that dropping an honest POSITIVE is drift too.** A summary that omits the
 reassuring facts its source carries is not "conservative" — it is inaccurate in the direction nobody
@@ -729,7 +733,8 @@ lessons appear:
   payload, and was recovered only because the merging agent said the payload
   looked cut → "Never truncate a findings payload".
 - Five of the twenty merged PRs shipped a fresh instance of the defect they
-  repaired; every one was caught by re-deriving a number → the verbatim
+  repaired — a count the host repo later reopened, so read it as "common", not
+  as a rate. Every one was caught by re-deriving a number → the verbatim
   reviewer line in the tier rubric.
 - The published test counts moved under the run (`server 269` → `314`) and an
   item quoted its own brief → the stale-baseline rule.
