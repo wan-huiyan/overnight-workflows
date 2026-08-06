@@ -16,8 +16,8 @@ description: |
   (in-session parent polling a subagent) — this is for scheduled-trigger
   orchestrators that need to survive session ends.
 author: Claude Code
-version: 1.0.0
-date: 2026-04-21
+version: 1.0.1
+date: 2026-08-06
 ---
 
 # Schedule-Poll Orchestrator Pattern
@@ -206,10 +206,23 @@ v5 the client ah-ha insight run (2026-04-21):
 
 ## References
 
-- [`successor-handoff`](~/.claude/skills/successor-handoff/SKILL.md) —
-  sibling skill for in-session parent orchestrators.
-- [`claude-code-delayed-execution`](~/.claude/skills/claude-code-delayed-execution/SKILL.md)
-  — choosing between CronCreate and RemoteTrigger dispatch mechanisms.
-- [`overnight-insight-discovery`](~/.claude/skills/overnight-insight-discovery/SKILL.md)
-  — reference consumer of this pattern (Phase F / RESUME_MORNING.md).
+- The **`successor-handoff`** skill — sibling skill for in-session parent
+  orchestrators. Source:
+  [wan-huiyan/context-baton](https://github.com/wan-huiyan/context-baton/blob/main/plugins/successor-handoff/SKILL.md).
+- The **`claude-code-delayed-execution`** skill — choosing between CronCreate
+  and RemoteTrigger dispatch mechanisms.
+- The **`overnight-insight-discovery`** skill — reference consumer of this
+  pattern (Phase F / RESUME_MORNING.md). Source:
+  [wan-huiyan/overnight-workflows](https://github.com/wan-huiyan/overnight-workflows/blob/main/plugins/overnight-insight-discovery/SKILL.md).
 - Pattern origin: the client v5 overnight run session S98 (2026-04-21).
+
+## Version history
+
+- **v1.0.1** (2026-08-06) — The three References entries above were markdown
+  links to `~/.claude/skills/<name>/SKILL.md`. That path only exists when a
+  skill was copied in by hand; a plugin install puts it under
+  `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, so the links
+  pointed at a file most readers cannot open. There is no local path that
+  resolves under every install method, so they are now plain skill names plus
+  a GitHub URL where the source repo is known.
+- **v1.0.0** (2026-04-21) — Initial release.
