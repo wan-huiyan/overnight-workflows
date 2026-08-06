@@ -11,8 +11,11 @@ of writing) is a **bare** Claude Code container:
 - No `bq` CLI
 - No `gcloud` SDK / ADC flow (user's personal ADC does not propagate)
 - No Python data stack (pandas / scipy / statsmodels / xgboost / matplotlib)
-- No plugin/skill tree — `~/.claude/skills/overnight-insight-discovery/` does
-  not exist, so Skill-tool invocations fail silently
+- No plugin/skill tree at any install root — the skill is present under
+  none of `$CLAUDE_PLUGIN_ROOT`, `~/.claude/skills/`, or
+  `~/.claude/plugins/cache/`, so Skill-tool invocations fail silently.
+  Check all three before concluding the skill is absent: a plugin install
+  populates only the third.
 - Tools you *think* are auto-included by "being an autonomous Claude Code
   agent" are in fact gated by the trigger's `allowed_tools` list. If you
   don't list `RemoteTrigger` explicitly, the dispatched agent cannot call it
@@ -66,8 +69,19 @@ python3.11 -c "import pandas, scipy, statsmodels, xgboost, matplotlib, seaborn, 
 # Project-specific auth — service account, NOT user's personal ADC
 test -f "$GOOGLE_APPLICATION_CREDENTIALS" && echo "SA key present"
 
-# Skill tree
-test -f ~/.claude/skills/overnight-insight-discovery/SKILL.md
+# Skill tree — probe ALL THREE install roots. A plugin install creates
+# neither of the first two, so checking ~/.claude/skills/ alone reports a
+# perfectly healthy plugin install as a missing skill and tap-outs the run.
+S="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/SKILL.md}"
+[ -f "$S" ] || S="$HOME/.claude/skills/overnight-insight-discovery/SKILL.md"
+[ -f "$S" ] || S="$(find -L "$HOME/.claude/plugins/cache" -mindepth 4 -maxdepth 4 \
+    -path '*/overnight-insight-discovery/*/SKILL.md' 2>/dev/null \
+  | awk -F/ '{print $(NF-1)"\t"$0}' | sort -V -k1,1 | tail -1 | cut -f2-)"
+if [ -f "$S" ]; then
+  echo "overnight-insight-discovery SKILL.md: $S"
+else
+  echo "overnight-insight-discovery SKILL.md: not found — tried \$CLAUDE_PLUGIN_ROOT/, ~/.claude/skills/overnight-insight-discovery/, and ~/.claude/plugins/cache"
+fi
 
 # gh CLI + git
 gh --version

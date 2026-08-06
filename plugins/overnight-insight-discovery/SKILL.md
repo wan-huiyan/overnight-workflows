@@ -16,10 +16,22 @@ description: |
   exploratory-data-analysis), single-track LLM exploration (use deep-research), or work that
   needs user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.8.0
-date: 2026-07-08
+version: 1.9.0
+date: 2026-08-06
 
 # Changelog
+# 1.9.0 (2026-08-06 — plugin-install path resolution)
+#   The Phase 0.Y toolchain pre-flight decided whether this skill was installed by
+#   testing one path, ~/.claude/skills/overnight-insight-discovery/SKILL.md. A plugin
+#   install creates no such directory — it unpacks under
+#   ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/ — so a healthy plugin
+#   install failed the check and the track tapped out with [ENV_BLOCKER] claiming there
+#   was no skill tree. The check now probes $CLAUDE_PLUGIN_ROOT, then ~/.claude/skills/,
+#   then the plugin cache (ranked on the version path segment alone, via find not a
+#   glob), and on a miss says "not found — tried <the three paths>" instead of anything
+#   that reads as proof the skill is absent. The ~/.claude/skills/** patterns in
+#   § "Autonomous-safe skill edits" are deliberately unchanged: those describe which
+#   paths fire a sensitive-file permission prompt, not where this skill lives.
 # 1.8.0 (2026-07-08 — analytical VALIDITY gate)
 #   Adds references/observational_analysis_rigor.md — an 8-step validity protocol
 #   (leak-free cohort · probe outcome−anchor before an event-anchored design ·
@@ -761,14 +773,36 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.9.0** (2026-08-06, plugin-install path resolution) — The Phase 0.Y
+  toolchain pre-flight decided whether this skill was installed by testing one
+  path, `~/.claude/skills/overnight-insight-discovery/SKILL.md`. A plugin
+  install does not create that directory — it unpacks under
+  `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/` — so a perfectly
+  healthy plugin install failed the check, and the track tapped out with
+  `[ENV_BLOCKER]` claiming there was no skill tree. `CLAUDE_PLUGIN_ROOT` does
+  not rescue this: it is often unset in the shell the check runs in, and it
+  points at the running plugin's own root, so it can never reach a sibling.
+  The check now probes all three install roots in order and, when it finds
+  nothing, prints "not found — tried <the three paths>" rather than anything
+  that reads as proof the skill is absent. Two details in the snippet look
+  fussy but each fixes a real defect, so do not simplify them away: it ranks
+  candidates on the **version** path segment alone (the marketplace segment comes first, so a
+  plain `sort -V` over whole paths would let `aaa-mkt/2.5.0` lose to
+  `zzz-mkt/1.0.0`), and it uses `find` rather than a shell glob (zsh's
+  `nomatch` fails a non-matching glob at expansion time, before `2>/dev/null`
+  can suppress anything). Also removed a `~/.claude/skills/`-rooted
+  self-reference from the v1.3.2 entry below. The permission-prompt path
+  patterns in § "Autonomous-safe skill edits" are unchanged and still name
+  `~/.claude/skills/**` deliberately — that section is about which paths fire
+  a sensitive-file dialog, not about where this skill lives.
 - **v1.7.0** (2026-04-21, post-S99 pre-dispatch stall) — Added **Phase 0.X pre-dispatch confirmation gate** (`references/phase_0_predispatch_gate.md`). S99 dispatch prep hit two mid-run stalls: (1) the `schedule` skill's 1-hour cron minimum conflicted with an inherited 30-min polling spec; (2) branch-checkout question for remote agents surfaced ad-hoc. Both required user intervention at the worst possible moment (mid-dispatch). New gate runs at Phase 0 closeout, surfaces all confirmation-requiring items in ONE batched `AskUserQuestion` call, and either proceeds silently (if zero deltas) or applies user redirects before firing. Covers 5 canonical item types: dispatch-mechanism deviations · blast-radius confirmation · branch-checkout question · probe-result surprises that changed planned behaviour · skill/remote-sync status reminder. Config knob `predispatch_gate.mode: ask|skip_and_log` — skip mode records items to morning_summary §0 for CI-style unattended runs. User feedback driving v1.7: "update the overnight workflow skill so next time we don't need user intervention mid run, if we have something to confirm, ask at the beginning of the session."
 - **v1.4.1** (2026-04-17, post-v2 phone-readability ask) — Added **"Phone-readable bundle"** section (Phase F addendum). Deliverables ship as client-facing HTMLs + markdown docs that are awkward to read on mobile via GitHub or Drive separately (Drive's HTML preview can't resolve relative asset paths across files). New build step emits a **single self-contained HTML** with all deliverables inline + chart PNGs base64-embedded + mobile-optimised CSS with sticky top nav. Drag-to-Drive workflow → user reads on phone. Template in project repo at `scripts/build_drive_bundle.py`. Triggered by S92 user ask "how can I easily read them on my phone". Private-repo Vercel/Netlify/Pages considered but rejected (public by default); Google Drive upload is simplest-private-path. v1.5 roadmap candidate: auto-upload bundle to IAP-protected Cloud Run for team-shared review.
 - **v1.3.2** (2026-04-17, post-v2 sensitive-file-prompt block) — Added
   **"Autonomous-safe skill edits" contract** for Phase G. Second production
   run hit a sensitive-file permission prompt when claudeception tried to
-  directly edit `~/.claude/skills/overnight-insight-discovery/references/
-  phase_b_review_loop.md` mid-run — a dialog the autonomous overnight
-  session couldn't resolve until morning. New contract: during autonomous
+  directly edit this skill's own `references/phase_b_review_loop.md` mid-run
+  — a dialog the autonomous overnight session couldn't resolve until
+  morning. New contract: during autonomous
   runs, Phase G writes proposed skill-update diffs to
   `docs/overnight/<date>/skill_updates/` (project-local, no prompts) and
   lists them in morning_summary §4 for batched post-run review and apply.
