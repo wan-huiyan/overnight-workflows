@@ -16,7 +16,7 @@ description: |
   work (use plain `subagent-driven-development`), polishing an existing deliverable (use
   `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.2.0
+version: 1.3.0
 date: 2026-05-29
 ---
 
@@ -34,6 +34,12 @@ review-finding preservation as PR comments before squash.
 Sister to `overnight-review-client-delivery` (polishes existing deliverables)
 and `overnight-insight-discovery` (generates insights from data). Different
 problem shape, same overnight-autonomous philosophy.
+
+Two real runs back this skill, and both are written up at the end. Passages
+below that say **"the observed run"** or "the observed night" all mean the
+larger one: 2026-08-05, 17 items across 4 orchestrated workflows, 91
+subagents, ~11 hours, 20 PRs merged by morning. The 2026-05-08 chatbox
+session is the smaller run the skill was first extracted from.
 
 ## When to use
 
@@ -157,7 +163,36 @@ digraph overnight {
 Per task: **implementer subagent → spec-compliance reviewer → code-quality
 reviewer → mark complete**. Standard `subagent-driven-development` protocol.
 
-For overnight throughput, calibrate review intensity **per-task** using the 3-tier rubric below (this generalizes the previous "two pragmatic deviations" version into a formal framework — see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains` for the standalone skill).
+For overnight throughput, calibrate review intensity **per-task** using the 3-tier rubric below (this generalizes the previous "two pragmatic deviations" version into a formal framework — see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains` for the standalone skill). Whichever tier a task lands in, the reviewer's findings must reach the actor intact — the rule immediately below holds at every tier.
+
+### Never truncate a findings payload — the reviews happen, the fixes don't
+
+The reviewer's output is the only thing standing between a bad change and `main`. If your
+orchestration hands it onward as a **sliced string**, findings die silently and every visible signal
+still says the gate worked.
+
+Observed: three reviewers returned **six** critical findings; the merging agent received
+`JSON.stringify(reviews).slice(0, 9000)` and **five arrived**. The sixth was cut mid-object. It was
+the worst of the six — a keep-or-kill decision resting on a margin about five times finer than the
+data could resolve, in a 553-line pre-registration with no power statement anywhere. Three
+reviewers dispatched, three verdicts returned, findings commented on the PR, PR merged. Nothing
+looked wrong.
+
+**Rules:**
+
+- **Never `.slice()` a findings list, verdict, or review payload.** Truncate self-reports and prose
+  if you must; never the artifact whose entire purpose is to block an action.
+- **Make the actor count.** Require the merging agent to report how many findings it *received*
+  against how many it *answered*, and treat a mismatch as blocking. The only reason the loss above
+  was recoverable is that the agent **noticed the payload was cut and said so** instead of
+  proceeding quietly. Put that instruction in the prompt in those words.
+- **The journal is the recovery path.** A workflow journal (`journal.jsonl`, one
+  `{"type":"result"}` line per agent) holds each agent's true return value even when the
+  orchestrator's own view was truncated. Parse it and diff against what was acted on.
+
+Same family as a green suite that executed zero tests: the machinery reports success over an empty
+set. See sister skill `overnight-review-panel-blocked-reviewer-reads-as-clean` — that one is a
+reviewer that could not see; this one is a reviewer that saw and could not be heard.
 
 ### Tier 1 — Full two-stage (strict `subagent-driven-development`)
 
@@ -194,6 +229,18 @@ with P0/P1/P2 categorization. Return VERDICT: APPROVE | REQUEST_CHANGES |
 REJECT with categorized findings.
 ```
 
+**Put this line in every reviewer prompt, verbatim — Tier 1's review-panel prompts included:**
+*"Check whether this change ships a fresh instance of the defect it repairs."* On the observed run
+**five of twenty merged PRs did** — a correction to a figure with no corpus named printed a figure
+with no corpus named; a document about uncited copied numbers contained an uncited copied number.
+About one in four, on documents. It was the single most common review finding, ahead of ordinary
+regressions, and **every instance was caught by someone re-deriving a number, never by reading the
+diff**. Budget a round for it.
+
+**And tell reviewers that dropping an honest POSITIVE is drift too.** A summary that omits the
+reassuring facts its source carries is not "conservative" — it is inaccurate in the direction nobody
+audits, and it reads as more alarming than the truth. Check omissions in both directions.
+
 ### Tier 3 — Bash-only verification (no reviewer subagent)
 
 Controller verifies inline via bash/grep on the PR diff, no subagent dispatch.
@@ -225,6 +272,17 @@ pytest -q 2>&1 | grep -E '^FAILED' | sort > /tmp/baseline_fails.txt
 pytest -q 2>&1 | grep -E '^FAILED' | sort > /tmp/now_fails.txt
 diff /tmp/baseline_fails.txt /tmp/now_fails.txt && echo "IDENTICAL — zero regressions"
 ```
+
+**And your own brief's baseline numbers go stale mid-run.** On the observed night the published test
+counts were re-derived by a parallel PR while the run was in flight — the guardrail text said
+`server 269`, the truth became `314`, and a later item read a number from its own brief. **The rule
+survives; the numbers do not.** Instruct every agent to measure the baseline itself, on its own
+rebase, immediately before judging its branch, and never to carry a count from a document. This is
+about the *count a document quotes*, not the failing-set snapshot above — that one is still taken
+once, before the chain, or a regression gets absorbed into a re-measured baseline and the set-diff
+prints IDENTICAL over it. An item
+that pastes a stale count *inside the PR that exists to fix stale counts* is not hypothetical — it
+happened, in a document about uncited copied figures.
 
 **For UI tasks, static checks are not verification.** `node --check` is syntax-only; a render test proves the template renders, not that it *looks right* or that interactive JS works. When the live flow is blocked (auth/seed bugs) or needs heavy state, verify the rendered template standalone: render to a file, inline the stylesheet, serve it (`python3 -m http.server` — `file://` is blocked in the Playwright MCP), then drive with Playwright and assert layout facts via `getBoundingClientRect` (e.g. "the dropdown's bottom extends past its clipping ancestor AND its last item is within the viewport" proves an `overflow:hidden` clip fix). Bounding-box assertions beat screenshots, which time out on external web-font loading. See `flask-webapp-browser-debug`.
 
@@ -267,8 +325,8 @@ If your overnight run is the only writer, this is a no-op. If you're running
 in parallel with another session (common during P1 sweeps after a review
 panel), the concurrent session WILL take your reserved IDs by the time you
 reach Phase B's finalization. Resolve via the project's standard
-PR-conflict skill (e.g., `pr-conflict-site-regen` for the
-the project) — hand-union the generator + regenerate site.
+PR-conflict skill (e.g., `pr-conflict-site-regen` for the project) —
+hand-union the generator + regenerate site.
 
 ## Pre-flight: parallel-branch file-collision audit
 
@@ -305,7 +363,67 @@ For each collision-risk branch, surface a 3-way decision to the user BEFORE plan
 
 The user owns this decision. Don't decide unilaterally — the cost asymmetry is large (10 min of audit pre-flight vs. hours of careful manual conflict resolution post-redesign).
 
-For the full pattern, decision rubric, and worked example, see the companion skill `large-redesign-parallel-branch-collision-audit` (plugin in this bundle).
+For the full pattern, decision rubric, and worked example, see the companion skill `large-redesign-parallel-branch-collision-audit` (plugin in this bundle). It covers the branch-level case only — the third kind below is outside its reach by construction, because there is no branch to diff.
+
+**A third kind of collision, and neither pre-flight audit can see it: the same PIECE OF WORK, in two
+places, under two names.** A live session was building a box-to-region join inside its own analysis
+script, declared against a *different* issue than the one that tracks the join. A file-level audit
+shows no conflict — different paths, different issues — and two implementations get built. What
+catches it is reading the live session's actual working tree, not its branch.
+
+**When you find it, gate rather than parallelise.** The correct sequencing is: let the session that
+is already in it finish, then a follow-up item **extracts** the piece into a named, tested,
+reusable module and closes the tracking issue — proving the refactor changed no result by running
+both paths and diffing the outputs. That gate is worth writing even when you expect it to skip;
+a plan that predicts a skip and skips is honest, and it fires when the blocker clears (it did).
+
+## Coordinating with sessions you do not control
+
+The collision audits above assume the other work is a *branch*. Increasingly it is another **agent
+session**, running right now, whose files are not committed yet. A branch you can diff; a live
+session you can only negotiate with.
+
+**Claim your intent on a shared board, in the repo, before you start.** One entry appended to a
+committed file (this project uses `docs/site/assets/live.json`) carrying: an id, a state, a
+plain-English label, and **the list of files this run intends to touch**. It works — during the
+observed run a parallel session read the board, saw two of its three assigned tasks already claimed,
+and correctly did only the third. That coordination cost one small merged PR.
+
+**Rules that make the board load-bearing rather than decorative:**
+
+- **APPEND to the array; never replace it.** Two sessions each wrote a single-element `running`
+  array on the same night, so whichever landed second erased the other's claim. Neither noticed.
+- **Amend the claim when your scope grows.** Adding three items mid-run without updating the board
+  invites a parallel session to start one of them. Do it before the work, not at wrap-up.
+- **A pause needs an honest state — and your validator may reject the one you invent.** `paused` was
+  refused by the project's own schema (`running | waiting | blocked`), which is the gate working. An
+  absent state often defaults to "running", so it must be set explicitly.
+- **Do NOT delete your claim while your PRs are still open.** It is tempting on a pause: it frees the
+  files. It also invites another session to pick up half-reviewed PRs and land them. Keep the claim,
+  list the open PR numbers in the note, and say plainly what to do if the run never comes back.
+- **Take it down at the end.** Nothing expires it. There is no heartbeat and no TTL.
+
+## Amend a running orchestration through a file on disk, not the script
+
+An overnight run will need correcting mid-flight — a PR merges and unblocks something, a
+reservation lifts, a premise moves. **Editing the orchestration script is the wrong channel**: the
+guardrail text is embedded in every agent prompt, so changing it changes every call signature, and a
+resume then re-runs completed work instead of replaying it from cache. On the observed run that
+would have discarded eight finished PRs.
+
+**So put the brief on disk and have every agent read it at start.** The script points at a plan
+file; amendments are appended to that file as dated addenda. Agents that have already started keep
+their instructions; agents that start later read the correction. No cache invalidation, no rebuild.
+
+Corollaries:
+
+- **Verify the amendment actually reaches someone.** An addendum appended after the last agent has
+  started is a note to nobody. Check which phase is running first.
+- **State in the addendum which of the brief's own facts it supersedes**, by name. "The baseline
+  counts in your guardrails are stale — measure your own" beats silently changing a number.
+- Resume by run id — whatever your orchestration harness calls it (`resumeFromRunId` in the one used
+  here) — so unchanged agents replay from cache. Same script plus same args equals a 100% hit; the
+  first edited call and everything after it runs live.
 
 ## Stacked-PR strategy (load-bearing for overnight)
 
@@ -337,6 +455,45 @@ For overnight unattended runs, **always use the UI merge button or
 If `gh pr merge --delete-branch` fails locally with the worktree-checkout-
 trap, leave the branch undeleted overnight; user can clean up morning.
 See sister skill `gh-pr-merge-worktree-checkout-trap`.
+
+## What an autonomous run may and may not decide
+
+Overnight autonomy is a spectrum, and the useful line is not "how risky" but "who owns the call".
+Settle these before the run, in the brief, in these words.
+
+**"Proceed on a clearly-flagged assumption" never overrides a standing rule.** Letting the run
+proceed rather than park is usually right — a parked item delivers nothing and the owner wakes to a
+queue. But an assumption is a *default*, not a *ruling*. Anything a documented decision already
+settles, or that a pre-registration exists to protect, is out of scope for an assumption no matter
+how well flagged. Name those explicitly in the guardrails; do not rely on judgement.
+
+**For pre-registered questions the conservative assumption is DISCLOSE, not COMPUTE.** Computing a
+registered criterion after the outcome is known is precisely the thing registration prevents. The
+honest autonomous action is to record that it was never satisfied and leave the arithmetic to the
+owner.
+
+**An un-run unit is not an inconclusive result.** When a gate correctly stops a round from running,
+report "no result" — inconclusive is an outcome of something that *happened*, and reporting it
+claims a measurement that does not exist. The observed run got this right unprompted and it is
+worth making explicit.
+
+**Production changes: the reverting direction only, and only on unanimous authorisation.** If the
+run can change a live system, bound it two ways. First, direction: it may return production to the
+behaviour that ran before, never enable something new — a revert is cheap to undo and its failure
+mode is known. Second, authorisation: require every independent reviewer to answer, as a separate
+explicit field, *"is a production change authorised by what I personally verified?"* — anchored to a
+gate that passed and a rule fixed before the data. Unanimity, or nothing changes. Be clear-eyed
+about who those reviewers are: they are the run's own review agents, and no human is in the loop at
+3am. That is exactly why the direction bound comes first — unanimity among agents is not a
+substitute for a person, so the only change they may authorise is one whose failure mode is already
+known and cheap to undo.
+
+**Merging its own PRs is a separate grant from changing production.** Do not infer one from the
+other. Where the repo has no CI and no branch protection, say so in the brief: the run's own review
+gates are the *only* safety net, which is the argument for tiering them rather than skipping them.
+Neither grant is implied by the instruction to *implement* — Phase C step 4 and the anti-patterns
+below hold that line; what this section adds is that the two grants are also independent of each
+other.
 
 ## Phase C: morning hand-off discipline
 
@@ -493,7 +650,12 @@ By morning the user should have:
 - **Don't** auto-deploy after merge. The user is asleep; even if your
   project has auto-deploy-on-merge wired, the deploy preflight (e.g.,
   `deploy-from-stale-worktree-silent-rollback`) needs human review for
-  high-stakes changes.
+  high-stakes changes. The only bounded exception is the one set out in
+  "What an autonomous run may and may not decide", and it is narrow: returning
+  production to the behaviour that ran before, never enabling anything new,
+  only where the evening's brief granted it, and only on unanimous
+  authorisation from the run's own reviewers. Anything that is not a revert
+  still waits for a person.
 - **Don't** put a close-keyword next to an issue `#N` you're only partially
   resolving — *even negated* (`does not close #N` still closes it). For
   partial-slice PRs in a chain, use a non-keyword verb and verify `#N` stays
@@ -524,6 +686,10 @@ By morning the user should have:
   polishing an existing deliverable.
 - `overnight-insight-discovery` — sister overnight pattern for surfacing
   ah-ha findings from data.
+- `overnight-review-panel-blocked-reviewer-reads-as-clean` — the other half
+  of the review-integrity pair: a reviewer that could not see the code reads
+  as a clean one (this skill's "never truncate a findings payload" covers the
+  reviewer that saw and could not be heard).
 - `gh-pr-merge-worktree-checkout-trap` — handles the "merge succeeded
   but local cleanup failed" gotcha.
 - `stacked-pr-base-branch-deletion-auto-closes-dependent` — handles the
@@ -551,3 +717,26 @@ PR-level reviews = ~38 dispatches.
 Lessons fed back: 1 new global skill (`stacked-pr-base-branch-deletion-
 auto-closes-dependent`), 1 new project feedback (always run code-reviewer
 pass before merging PRs), this skill.
+
+## Worked example — 2026-08-05 overnight run ("the observed run")
+
+17 items across 4 orchestrated workflows, 91 subagents, ~11 hours, 20 PRs
+merged by morning, on a repo with no CI and no branch protection. This is the
+run every "observed run" above refers to. What it cost, in the order the
+lessons appear:
+
+- One of six critical findings was lost to a `slice(0, 9000)` on the reviews
+  payload, and was recovered only because the merging agent said the payload
+  looked cut → "Never truncate a findings payload".
+- Five of the twenty merged PRs shipped a fresh instance of the defect they
+  repaired; every one was caught by re-deriving a number → the verbatim
+  reviewer line in the tier rubric.
+- The published test counts moved under the run (`server 269` → `314`) and an
+  item quoted its own brief → the stale-baseline rule.
+- A parallel session read the shared board, found two of its three assigned
+  tasks already claimed, and correctly did only the third → "Coordinating with
+  sessions you do not control".
+- A mid-flight correction went into the plan file rather than the
+  orchestration script, so the resume replayed eight finished PRs from cache
+  instead of rebuilding them → "Amend a running orchestration through a file
+  on disk".
