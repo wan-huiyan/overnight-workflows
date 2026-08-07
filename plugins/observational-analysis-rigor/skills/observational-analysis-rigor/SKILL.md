@@ -96,6 +96,37 @@ gradient. Clean the cohort, then decompose, then de-confound, then interpret.
    When step 4/5 retires a "lift" to a null, the CHART must lead with the adjusted estimate + a CI whisker
    on the no-lift line and **subordinate** the raw gap (muted, "raw · self-selected"); kill causal titles.
 
+## When your headline is a NULL, the risk inverts — assert EXTRACTION COMPLETENESS
+
+The nine steps above defend against a finding that is surprising but wrong. A **null**
+("X does not predict Y", "the flag does not mark what the eye dislikes") fails the other
+way, and steps 1-8 will not catch it: **under-extraction manufactures nulls.** Every row
+your parser silently drops out of the exposed group weakens the association you are
+testing, so a quiet bug reads as a clean negative — and a clean negative is exactly the
+answer that stops further work.
+
+It is not the coverage-limited *join* of step 6 (that is about a subset being
+observable). It is your own extraction dropping rows it should have had.
+
+**So before you publish a null, assert your parsed counts against the raw source**, in
+code, as a test — not by eye:
+
+    assert n_parsed_exposures == raw.count("<the marker>")   # e.g. 50 == 50
+    assert n_parsed_outcomes  == raw.count("<the marker>")   # e.g. 168 == 168
+
+A real instance: a log parser lost **19 of 218** advisory lines in silence — the source
+format omits a rotation clause at zero degrees, and over-budget records end on a line
+naming no coordinates, so whole blocks were skipped. The totals looked plausible. Left
+unchecked it would have thinned the exposed group and made an already-null result look
+even cleaner.
+
+**And step 7 earns the most on a null.** Build the second construction with the OPPOSITE
+bias — deliberately over-inclusive. If a construction that over-attributes exposure still
+lands on the same answer, the null is not an artifact of under-extraction in either. In
+the case above, attribution by log structure gave 29 units and attribution by geometry
+gave 40, agreeing on only 19 — and both returned the same headline (17% and 18% against a
+20% base rate).
+
 ## Red flags — a finding about to ship as an artifact
 
 | The brief says… | What it may actually be |
@@ -106,6 +137,7 @@ gradient. Clean the cohort, then decompose, then de-confound, then interpret.
 | "The rate is Z%" | As-of when? Cumulative vs mid-cycle snapshot differ (steps 7–8). |
 | "N% of the matched rows show…" | Is the unmatched fraction missing-at-random? Validate the bridge (step 6). |
 | "We should get them to do X so they advance" | Associational → marker; needs an A/B to be a lever (step 5). |
+| "X turned out NOT to predict Y" (a clean null) | Did your extraction drop exposed rows? Assert parsed counts against the raw source, and re-probe with an over-inclusive construction. |
 | A raw effect is negative/null but "should" be positive | Simpson — control the axis, it may flip (steps 3–4). |
 | "I fixed the number" (edited the text) | Did the baked chart / twin doc / cached payload update too? A caption edit doesn't regenerate the chart (step 9). |
 
