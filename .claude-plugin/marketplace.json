@@ -28,7 +28,7 @@
       "name": "overnight-multi-issue-implementation",
       "source": "./plugins/overnight-multi-issue-implementation",
       "description": "Overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1 review-panel finding set) and ships them to merged stacked PRs by morning. Builds on subagent-driven-development with overnight-specific discipline: stacked PRs (so PR2 doesn't wait on a human PR1-merge mid-night), pre-flight tracker-id audit (concurrent sessions on main steal IDs), final PR-level code review before proposing merge, review findings preserved as PR comments before squash. Sister to overnight-review-client-delivery and overnight-insight-discovery.",
-      "version": "1.3.1"
+      "version": "1.4.0"
     },
     {
       "name": "large-redesign-parallel-branch-collision-audit",

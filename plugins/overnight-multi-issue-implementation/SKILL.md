@@ -16,7 +16,7 @@ description: |
   work (use plain `subagent-driven-development`), polishing an existing deliverable (use
   `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.3.1
+version: 1.4.0
 date: 2026-05-29
 ---
 
@@ -380,6 +380,106 @@ is already in it finish, then a follow-up item **extracts** the piece into a nam
 reusable module and closes the tracking issue — proving the refactor changed no result by running
 both paths and diffing the outputs. That gate is worth writing even when you expect it to skip;
 a plan that predicts a skip and skips is honest, and it fires when the blocker clears (it did).
+
+## Pre-flight: stale-base audit — what your OWN branch deletes
+
+The audit above looks **outward**: other branches that might conflict with you. This one looks **inward**, at the branch you are about to merge. It is the mirror image, and it is the one that fires without a sound.
+
+**The rule has two halves, and the second is why nobody looks.**
+
+1. **A merged, green pull request is not evidence your work survived it.** Green means your branch's tests passed on your branch's tree. It says nothing about what your tree did to everyone else's.
+2. **A branch built on a stale base can delete other people's work without a single conflict.** Git merges the two trees it was handed. A file that reached `main` after you branched is simply not in your tree, and "not in my tree" resolves to "deleted" — no marker, no red check, no question asked. A schema validator cannot tell a deletion from a decision.
+
+**The evidence — one incident, 2026-08-07, a solo repo with several agent sessions running in parallel.** A pull request merged from a branch created before several other pull requests landed and never rebased; its conflict resolution took its own side across the whole tree. The diff: **59 files, 1,891 insertions, 5,081 deletions.** It reverted **11 files and 15 tracker entries belonging to three other sessions** — source modules, their tests, analysis pages, next-session handoff prompts, and rows in a hand-edited tracker — plus a function that two surviving files still imported.
+
+**Nothing failed.** No conflict. The pull request was green, the tracker's schema validator passed, the site still rendered. All three affected sessions had finished a full wrap-up that morning and would have told you their work was on `main` — and it was, for **between 6 and 90 minutes**. The fastest discovery took **16 minutes 36 seconds** and was an accident: a session checking whether one unrelated one-word correction had survived found that it had not. Nobody else was looking, because there was nothing to look at.
+
+And the merged content was legitimate — rulings the owner had personally ticked, which had to stand. So `git revert` was the wrong tool: reverting the merge would have destroyed everything merged after it, the same mistake pointed the other way.
+
+### Before you merge: read what you are DELETING, not what you are adding
+
+Every review reads the additions. The deletions are the half that hurts other people.
+
+**A long-lived branch must be rebased onto `origin/main` immediately before merge, every time** — not "if it looks stale", and not "if the host says out of date". A host's mergeability check answers *will this apply without conflicts*, which here was yes. **"It merged cleanly" does not mean "it changed only what I meant".** Rebase first, then look, because the rebase is what makes the diff below true:
+
+```bash
+git fetch origin main && git rebase origin/main   # FIRST — the order is load-bearing
+
+# 1. Whole files your tip lacks that CURRENT main has. TWO dots, not three.
+#    Expect zero; read every line that appears.
+git diff origin/main..HEAD --diff-filter=D --stat
+
+# 2. Total deletions. Compare against what your PR description claims to do.
+git diff origin/main..HEAD --shortstat
+```
+
+**Set a deletion threshold that makes you stop and read, and set it low** — a few hundred deleted lines on a branch whose subject is "apply three rulings" is already a story you should be able to tell out loud. The incident deleted 5,081 lines under exactly that kind of subject, and the ratio alone would have caught it. Nothing computes that ratio for you.
+
+**Two dots, not three, and this is the trap.** `git diff origin/main...HEAD` is the form everyone reaches for, and it diffs from the **merge base**. On a branch that never took `main`'s newer commits the merge base is your old base, so a file added to `main` after you branched is absent from *both* sides and reports as **no change at all**. Verified on a two-commit synthetic repo: the three-dot form prints nothing, the two-dot form prints the file. Run three-dot as your only check on a stale branch and you get a clean bill of health that means nothing. Two dots over-reports on an un-rebased branch — it flags everything `main` has gained — which is the safe direction to be wrong in, and it collapses to the truth the moment you rebase.
+
+**And a plain merge of a stale branch is harmless**, which is why this is rare enough to be invisible: git keeps what only `main` has. The damage needs the branch's tree to win **wholesale** — someone merges `main` into the branch and resolves by taking their own side, or resolves with `-X ours`, or the result lands as a squash of the branch's tree. That is what happened in the incident, and it is also why that branch's merge base had moved up to current `main`, the one case where three-dot does see it. Do not rely on that.
+
+### After someone else merges: check for a marker YOUR change added
+
+This is the part most checklists get wrong. **The existence check is the weak one.**
+
+```bash
+git cat-file -e origin/main:path/to/your/file.py   # the WEAK check
+```
+
+It asks only *does this path exist*. **A file can be present with its contents rolled back to a pre-session version, and no existence check, no id check and no validator will report it.** A structured record — a tracker row, a config entry, a JSON object — is worse, because it can keep its id, keep its length and carry an earlier session's text. A second branch in the same repo, caught before merge, would have rolled a task body back from 1,519 characters to a **different** 1,519 characters. An id check is blind to that and so is a length check.
+
+So audit for something your change **added**, chosen so a rollback necessarily removes it — a sentence you wrote, a constant you introduced, an escape you inserted:
+
+```bash
+# 1. A phrase your change ADDED — expect >= 1
+git show origin/main:path/to/file.md | grep -c "the exact sentence you introduced"
+
+# 2. A phrase your change DELETED — expect 0
+git show origin/main:path/to/file.md | grep -c "the wording you removed"
+
+# 3. A structured record: compare its TEXT, not its id
+git show <sha-before-that-merge>:path/to/records.js > /tmp/before.js
+git show origin/main:path/to/records.js             > /tmp/after.js
+# extract YOUR object by id from each file, then diff the two strings
+```
+
+Check 2 earns its place: a rollback restores what you deleted, and the old wording is often easier to grep for than the new.
+
+### Worked example — why the marker has to be something you added
+
+A page in that repo carries seven interactive widgets. Each widget's option list is a **single-quoted HTML attribute** (`data-opts='[["laptop", "Laptop"], …]'`), read at load time by one `JSON.parse` inside a single `forEach` over all seven. Three of the options contain an apostrophe — `Haven't`, `Don't`, `bar's` — and a one-character escape (`&#39;`) is the only thing stopping the attribute from ending early.
+
+Roll back that one escape on the **fourth** widget and:
+
+- the file is still present, so `git cat-file -e` passes;
+- the HTML is still valid and the browser still renders the page;
+- all **seven** widgets are still in the markup, so a structural count passes;
+- every committed check that touches that page passes — they confirm the artifact exists, and none of them looks inside it;
+- and **four of the seven widgets are silently dead.** The truncated attribute makes `JSON.parse` throw, the throw aborts the `forEach`, and widgets four through seven never get their buttons. They render as a heading above an empty gap.
+
+Measured rather than assumed, by loading the real page with each escape rolled back one at a time: breaking the fourth widget leaves three working; breaking the **first** leaves **none** working, because the loop dies on iteration one. `git cat-file -e` says the file is fine in every case. The check that works is `grep -c '&#39;'` — a marker the change added, that a rollback cannot leave behind.
+
+Choose markers with that property: small, added by you, and load-bearing for nothing else.
+
+### Recovery: splice forward, never revert
+
+**Do not `git revert` the offending merge.** By the time you find it, work has merged on top of it; reverting takes that down too. The offending pull request's own content is usually legitimate — it was reviewed and merged for a reason — so the job is a **separation, not a reversal**.
+
+Recover each object from the last commit where it was intact and splice it forward into current `main`. The merge's own parent is usually that commit:
+
+```bash
+BEFORE=$(git rev-parse <merge-sha>^)
+git show $BEFORE:path/to/file.py > path/to/file.py    # or: git checkout $BEFORE -- path/to/file.py
+```
+
+Three things that bite during the splice:
+
+- **Restore what the restored file IMPORTS.** The incident removed a function from a module that survived; checking the test file back out failed at collection until that function came back too.
+- **Re-check state before every restore.** Other affected sessions are repairing in parallel, so an inventory written twenty minutes ago is already wrong — both audit pages written that morning were inaccurate by the time they were finished. Re-run the check, then act.
+- **A merge resolves text and tells you nothing about values.** Where a restored file carries a count or a figure, **re-measure it** rather than reconciling two versions by eye.
+
+**Two guards worth building once, because neither exists by default:** a check that every file a pull request deletes is named somewhere in that pull request's own description, and a check that a hand-edited record file has not lost entries that existed yesterday. The incident's description named none of the eleven files it deleted, and the validator passed a tracker that had lost fifteen entries.
 
 ## Coordinating with sessions you do not control
 
