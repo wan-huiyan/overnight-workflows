@@ -76,6 +76,13 @@ proof, split classifications, granular authority, per-item budgets and file
 claims, a durable state schema, serial integration, immutable base/head review,
 and an adversarial plan preflight.
 
+The authority section immediately below applies to both input shapes. After
+recording those grants, the large-queue reference is the complete procedure for
+that shape, including its closeout checklist. A large queue does **not** continue
+into the issue-cluster Phase 0, Phase A/B/C graph, stacked-PR procedure,
+tracker-ID examples, issue-comment workflow, or issue-cluster morning checklist
+below.
+
 ## Authority before any command
 
 Record the grants for network access, branch and commit, push, PR comments,
@@ -86,7 +93,12 @@ worked example uses imperative wording. Without fetch authority, freshness is
 `UNCHECKED` and execution or merge must stop; without push or PR authority,
 review an immutable local commit and report the remaining action.
 
-## Phase 0: backlog triage + owner-ruling application (when issues are NOT pre-validated)
+## Issue-cluster procedure
+
+The remainder of this file applies to the issue-cluster input shape. Large
+mixed queues use the reference above instead.
+
+### Phase 0: backlog triage + owner-ruling application (when issues are NOT pre-validated)
 
 The issue-cluster path normally assumes each issue is live and well-specified. When the input is
 instead a **backlog** — dozens of issues filed over weeks, some possibly already fixed by
@@ -525,9 +537,12 @@ session you can only negotiate with.
 
 **Claim your intent on a shared board, in the repo, before you start.** One entry appended to a
 committed file (this project uses `docs/site/assets/live.json`) carrying: an id, a state, a
-plain-English label, and **the list of files this run intends to touch**. It works — during the
-observed run a parallel session read the board, saw two of its three assigned tasks already claimed,
-and correctly did only the third. That coordination cost one small merged PR.
+plain-English label, and **the list of files this run intends to touch**. Distinguish the
+controller's liveness from an item's path reservation: stopping a controller must not leave a
+false running session, while an open branch or PR may still need an explicitly owned collision
+reservation. It works — during the observed run a parallel session read the board, saw two of its
+three assigned tasks already claimed, and correctly did only the third. That coordination cost one
+small merged PR.
 
 **Rules that make the board load-bearing rather than decorative:**
 
@@ -538,10 +553,14 @@ and correctly did only the third. That coordination cost one small merged PR.
 - **A pause needs an honest state — and your validator may reject the one you invent.** `paused` was
   refused by the project's own schema (`running | waiting | blocked`), which is the gate working. An
   absent state often defaults to "running", so it must be set explicitly.
-- **Do NOT delete your claim while your PRs are still open.** It is tempting on a pause: it frees the
-  files. It also invites another session to pick up half-reviewed PRs and land them. Keep the claim,
-  list the open PR numbers in the note, and say plainly what to do if the run never comes back.
-- **Take it down at the end.** Nothing expires it. There is no heartbeat and no TTL.
+- **Do NOT delete an item's path reservation while its PR is still active.** It is tempting on a
+  pause: it frees the files. It also invites another session to pick up half-reviewed work and land
+  it. Record the open PR, current owner, expiry or takeover condition, and next action. This is a
+  reservation, not proof that the original controller is still running.
+- **Take controller liveness down when the controller stops.** Nothing expires it. Release the item
+  reservation after verified merge/content, explicit abandonment or supersession, or a named
+  transfer to a successor. Do not leave a false running entry merely because merge authority is
+  absent.
 
 ## Amend a running orchestration through a file on disk, not the script
 
@@ -639,7 +658,7 @@ other.
 
 Before proposing merge to user:
 
-1. **Final PR-level review on one immutable base/head diff** (not just per-task).
+1. **Final PR-level review on one immutable two-tree diff** (not just per-task).
    Per-task reviews catch implementation bugs; PR-level review catches
    cross-task integration concerns. For any **non-trivial** PR, run the
    **`roundtable:agent-review-panel`** skill with **all panel agents set to
@@ -654,10 +673,21 @@ Before proposing merge to user:
    as the tier rubric above. Run PR1 + PR2 reviews in parallel (single message,
    multiple Agent calls). Commit every integrator-owned tracker, release-note,
    index, and handoff edit first; push only when authorized. Require a clean
-   worktree and record the reviewed target/base SHA, head SHA, and diff or tree
-   digest in the report. A later head commit, rebase, changed target/base SHA,
-   or changed digest invalidates the affected verdict and requires review
-   again.
+   worktree and record `target_ref`, its immutable `target_sha`,
+   `merge_base_sha`, `head_sha`, `head_tree_oid`, the diff artifact path,
+   SHA-256 digest, and exact command. Require `merge_base_sha == target_sha`
+   before review. Materialize the deterministic two-tree diff with the same
+   contract used by the large-queue reference, then hash the file:
+
+   ```bash
+   git diff --binary --full-index --no-color --no-ext-diff --no-textconv \
+     --no-renames --diff-algorithm=myers --unified=3 \
+     "$TARGET_SHA" "$HEAD_SHA" -- > "$DIFF_PATH"
+   shasum -a 256 "$DIFF_PATH"
+   ```
+
+   A later head commit, rebase, target change, merge-base change, or digest
+   change invalidates the affected verdict and requires review again.
 
 2. **Surface findings as PR comments BEFORE merge**. Squash discards the
    in-branch commit messages; review-finding text only persists if posted
@@ -765,7 +795,7 @@ Prevention: for partial work, use a non-keyword verb (`Scopes part of #N`,
 `Partial for #N`, `Defers the rest of #N`) and **verify `#N` is still OPEN
 after each merge** in the chain. See `prep-pr-close-keyword-auto-closes-issue`.
 
-## Output (morning checklist)
+## Issue-cluster output (morning checklist)
 
 By morning the user should have:
 

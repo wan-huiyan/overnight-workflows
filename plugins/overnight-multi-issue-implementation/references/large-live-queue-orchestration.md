@@ -52,9 +52,9 @@ records. Record at least:
 
 | Field | Meaning |
 |---|---|
-| `source_id` | Stable row, prompt, issue, or task identifier |
+| `source_occurrence_id` | Stable row identity; distinguish repeated links with a durable row key or `(source_path, occurrence_index)` |
 | `workstream` | Product or operational area |
-| `current_state` | One of the states below |
+| `classification_state` | One of the exact queue-classification states below |
 | `autonomous_slice` | Work an unattended agent may complete |
 | `stop_before` | First owner- or authority-only action |
 | `owner_gate` | Judgement, account, signature, payment, or recruitment needed |
@@ -66,9 +66,9 @@ records. Record at least:
 | `evidence` | Current code, decision, tracker, PR, or prompt location |
 | `slices` | Optional subrecords when parts have different state, authority, dependency, or stop points |
 
-Use these classification states:
+Use these exact classification states:
 
-- `READY`: the whole remaining item can run with current authority.
+- `EXECUTABLE`: the whole remaining item can run with current authority.
 - `CONDITIONAL`: a bounded autonomous slice exists; state the stopping point.
 - `OWNER_BLOCKED`: the next action needs the owner.
 - `AUTHORITY_BLOCKED`: technically ready, but permission is absent.
@@ -87,11 +87,17 @@ After classification, assert both:
 
 ```text
 source_row_count == parent_classification_count
-set(source_ids) == set(parent.source_id for parent in classifications)
+Counter(source_occurrence_ids) == Counter(parent.source_occurrence_id for parent in classifications)
 ```
 
+Do not compare plain filename sets: two rows may link the same prompt for
+different reasons. Give each occurrence a durable identity and compare the
+ordered occurrences or a multiset. As a negative control, duplicate one prompt
+path in a synthetic two-row input, omit or reuse one parent occurrence, and
+confirm the coverage check fails before trusting the harness.
+
 Then independently re-check every `STALE_DONE` and `SUPERSEDED` verdict. A false
-dismissal silently removes work; a false `READY` usually gets caught when an
+dismissal silently removes work; a false `EXECUTABLE` usually gets caught when an
 implementer opens the code.
 
 ### Prompts are evidence, not final truth
@@ -176,28 +182,46 @@ worktree while sessions are active. Record suspected debris for a later audit.
 
 ## 6. Use a durable state model
 
-Keep three dimensions separate:
+Keep four dimensions separate:
 
 1. `task_state`: `QUEUED | RUNNING | REVIEW | READY | BLOCKED | FAILED | MERGED | SKIPPED`
 2. `reason_code`: for example `OWNER`, `AUTHORITY`, `EXISTING_PR`, `COLLISION`,
    `REVIEW`, `AGENT_FAILURE`, `TIME`, or `NONE`
 3. `verification`: `PASS | FAIL | UNCHECKED | NOT_APPLICABLE`
+4. `run_disposition`: `ACTIVE | TERMINAL`
 
 Do not create combined spellings such as `BLOCKED_REVIEW` in one place and
 `READY_MERGE_BLOCKED` in another. Keep the base state stable and put the detail
 in `reason_code` and `next_action`.
+
+`classification_state` answers whether a source occurrence can start;
+`task_state` answers where an attempted slice is in its execution lifecycle.
+Reserve `task_state: READY` for an authored and reviewed result awaiting its
+next authorized action. The normal path is
+`QUEUED -> RUNNING -> REVIEW -> READY -> MERGED`. `BLOCKED` may return to
+`QUEUED` or `RUNNING` after its reason clears. A bounded retry may move
+`FAILED -> QUEUED` with a new attempt ID; after the retry cap, `FAILED` is final
+for this run. `MERGED` and `SKIPPED` are final for this run. A reviewed
+`READY` item with `reason_code: AUTHORITY`, or a `BLOCKED` item with an explicit
+handoff, may be a terminal **run disposition** while remaining unfinished work.
+Record that distinction in `next_action`; do not rewrite historical journal
+records to adopt a newer schema.
 
 Append transitions to a durable JSONL journal. Each record should carry:
 
 ```json
 {
   "time": "ISO-8601",
+  "schema_version": 1,
+  "source_occurrence_id": "stable-row-occurrence-id",
+  "classification_state": "EXECUTABLE",
   "task_id": "stable-id",
   "attempt_id": "stable-attempt-id",
   "agent_id": "agent-or-worker-id",
   "task_state": "REVIEW",
   "reason_code": "NONE",
   "verification": "UNCHECKED",
+  "run_disposition": "ACTIVE",
   "source_sha": "classification-source-sha",
   "execution_base_sha": "worktree-base-sha",
   "worktree": "/absolute/path",
@@ -248,11 +272,31 @@ Repository rules override generic review shortcuts. If a repository requires
 heavy review for a rendered surface, registered statistic, security boundary,
 or widely consumed constant, do not downgrade it because the diff looks small.
 
-For every review:
+For every review, record these separate identities:
+
+- `target_ref`: the destination ref observed at dispatch;
+- `target_sha`: that ref's immutable tip;
+- `merge_base_sha`: `git merge-base "$target_sha" "$head_sha"`;
+- `head_sha` and `head_tree_oid`;
+- `diff_digest_algorithm`, `diff_digest`, and the exact diff artifact path and
+  command.
+
+Require `merge_base_sha == target_sha` before final landing review. If it does
+not, reconcile the branch with the current target first. Materialize one
+deterministic two-tree diff and hash the file:
+
+```bash
+git diff --binary --full-index --no-color --no-ext-diff --no-textconv \
+  --no-renames --diff-algorithm=myers --unified=3 \
+  "$TARGET_SHA" "$HEAD_SHA" -- > "$DIFF_PATH"
+shasum -a 256 "$DIFF_PATH"
+```
+
+Do not substitute a three-dot-only diff; it can hide current-target content
+that a stale branch lacks. Then:
 
 1. Materialize the full artifact or diff at an immutable commit.
-2. Give the reviewer the exact paths, target/base SHA, head SHA, and diff or
-   tree digest.
+2. Give the reviewer the exact paths and every identity field above.
 3. Confirm the reviewer had access to every file it claims to have reviewed.
 4. Store the complete report durably; never slice or summarize the findings
    before handing them to the actor.
@@ -263,9 +307,9 @@ For every review:
 Integrator-owned tracker, index, release-note, and repository-required report
 or presentation edits are part of the pull-request diff. Commit them before
 final review and push only when authorized. Require a clean worktree, record
-the target/base SHA, final head SHA, and diff/tree digest, and review that exact
-input pair. A later commit, rebase, changed target/base SHA, or changed digest
-invalidates the affected verdict and requires review again.
+the identity fields and deterministic diff digest above, and review that exact
+input pair. A later commit, rebase, changed target SHA, changed merge base, or
+changed digest invalidates the affected verdict and requires review again.
 
 For plans that control many merges or change result-bearing surfaces, run an
 independent adversarial review of the plan before execution. Use separate source
@@ -289,15 +333,21 @@ For each item, in order:
 8. Compare the current diff with the declared write set, including deletions.
 9. Commit the complete final diff and push only when authorized; require a
    clean worktree.
-10. Review the exact target/base SHA, head SHA, and diff digest; resolve every
-    finding. Local immutable-commit review is valid when push is not authorized.
+10. Review the exact `target_sha`, `merge_base_sha`, `head_sha`, head tree, and
+    deterministic diff digest defined in §8; resolve every finding. Local
+    immutable-commit review is valid when push is not authorized.
 11. Apply the recorded merge grant. If merge is not authorized, stop in a
     reviewed ready state and say what remains.
 12. Merge only while the target remains healthy.
 13. Fetch the merged target and verify content that this item added, not only
     file existence or record IDs.
-14. Update the journal and release the claim only after the merge and content
-    verification are observed.
+14. Update the journal. Remove controller liveness whenever the controller
+    stops and no process or renewable lease remains. Release an item write
+    reservation after merge/content verification or an explicit terminal run
+    disposition such as abandonment, supersession, or named transfer. Preserve
+    a separately owned collision reservation while an active branch or PR still
+    claims the path; record its owner, expiry or takeover condition, and next
+    action rather than pretending the old controller is running.
 
 Never merge two items simultaneously when both ultimately edit the same shared
 record. A clean merge result does not prove current content survived it.
