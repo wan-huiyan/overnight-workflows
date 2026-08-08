@@ -150,7 +150,9 @@
         "these issues were never validated, triage them before implementing",
         "I need the owner to ratify a cut line before you start building",
         "bake the owner's decisions into the issues as comments then kick off",
-        "give me a wave-ordered kickoff prompt for this backlog"
+        "give me a wave-ordered kickoff prompt for this backlog",
+        "classify this live queue and execute its autonomous slices overnight",
+        "run this large mixed backlog by morning, separating stale rows, owner gates, and shared-file collisions"
       ],
       "negative": [
         "fix this one bug and open a PR",
@@ -162,7 +164,9 @@
         "design a verifier for our rendered report",
         "help me write a plan for this refactor",
         "explain this codebase's architecture",
-        "run the test suite and tell me what fails"
+        "run the test suite and tell me what fails",
+        "summarize this task index without executing anything",
+        "review this overnight plan and report findings only"
       ]
     }
   }

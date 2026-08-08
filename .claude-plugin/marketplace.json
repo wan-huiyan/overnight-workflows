@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "wan-huiyan-overnight-workflows",
-  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery \u2014 multi-agent review panels baked in.",
+  "description": "Autonomous overnight workflows for implementation, large live queues, client-facing delivery, and insight discovery, with durable recovery and review gates.",
   "owner": {
     "name": "wan-huiyan"
   },
@@ -27,8 +27,8 @@
     {
       "name": "overnight-multi-issue-implementation",
       "source": "./plugins/overnight-multi-issue-implementation",
-      "description": "Overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1 review-panel finding set) and ships them to merged stacked PRs by morning. Builds on subagent-driven-development with overnight-specific discipline: stacked PRs (so PR2 doesn't wait on a human PR1-merge mid-night), pre-flight tracker-id audit (concurrent sessions on main steal IDs), final PR-level code review before proposing merge, review findings preserved as PR comments before squash. Sister to overnight-review-client-delivery and overnight-insight-discovery.",
-      "version": "1.4.0"
+      "description": "Overnight autonomous implementation for either a related GitHub issue cluster or a large mixed live queue, with stale and partial classification, granular authority, shared-file ownership, durable recovery, immutable base/head review, and serial integration.",
+      "version": "1.5.0"
     },
     {
       "name": "large-redesign-parallel-branch-collision-audit",
