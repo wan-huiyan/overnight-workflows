@@ -7,6 +7,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import sys
+from typing import Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,6 +151,9 @@ def main() -> int:
         "Stopping a controller clears",
         "latest appended\noperational record is authoritative",
         "only join to them by ID",
+        "Execution leases use no transfer state",
+        "`TRANSFERRED` ends the old reservation",
+        "`replacement_reservation_id`",
     ):
         require(reference, phrase, REFERENCE, errors)
 
@@ -385,6 +389,54 @@ def main() -> int:
         errors.append("ended execution lease still reads as active")
     if latest[reservation_key]["state"] != "ACTIVE":
         errors.append("lease end incorrectly released the PR path reservation")
+
+    # A reservation transfer is terminal for the old ID and valid only when a
+    # different ACTIVE replacement preserves the same run, repository and
+    # exact path set. Exercise both the valid path and realistic false passes.
+    def valid_reservation_transfer(old: dict, replacement: Optional[dict]) -> bool:
+        replacement_id = old.get("replacement_reservation_id")
+        return bool(
+            old.get("state") == "TRANSFERRED"
+            and replacement_id
+            and replacement_id != old.get("reservation_id")
+            and replacement
+            and replacement.get("reservation_id") == replacement_id
+            and replacement.get("state") == "ACTIVE"
+            and replacement.get("run_id") == old.get("run_id")
+            and replacement.get("repository_id") == old.get("repository_id")
+            and replacement.get("exact_paths") == old.get("exact_paths")
+        )
+
+    replacement_reservation = {
+        **reservation,
+        "sequence": 22,
+        "reservation_id": "reservation-pr-934-data-js-successor",
+        "owner": {"kind": "agent", "id": "integrator-2", "branch": "successor"},
+    }
+    transferred_reservation = {
+        **reservation,
+        "sequence": 23,
+        "state": "TRANSFERRED",
+        "replacement_reservation_id": replacement_reservation["reservation_id"],
+        "released_at": "ISO-8601",
+        "release_reason": "named owner transfer",
+    }
+    if not valid_reservation_transfer(
+        transferred_reservation, replacement_reservation
+    ):
+        errors.append("valid reservation transfer control did not pass")
+    invalid_transfers = [
+        ({k: v for k, v in transferred_reservation.items()
+          if k != "replacement_reservation_id"}, replacement_reservation),
+        (transferred_reservation, None),
+        (transferred_reservation, {**replacement_reservation, "state": "RELEASED"}),
+        (transferred_reservation, {**replacement_reservation,
+                                   "repository_id": "github.com/example/other"}),
+        (transferred_reservation, {**replacement_reservation,
+                                   "exact_paths": ["different/path"]}),
+    ]
+    if any(valid_reservation_transfer(old, new) for old, new in invalid_transfers):
+        errors.append("invalid reservation transfer negative control passed")
 
     if task:
         if task.get("controller_id") != controller.get("controller_id"):

@@ -229,7 +229,7 @@ records when their task or reservation IDs happen to match.
 
 2. **Execution lease** gives one attempt temporary permission to run a command
    or agent. Its records carry `run_id`, `repository_id`, `lease_id`,
-   `attempt_id`, `lease_owner`, `state` (`ACTIVE`, `ENDED`, or `TRANSFERRED`),
+   `attempt_id`, `lease_owner`, `state` (`ACTIVE` or `ENDED`),
    `started_at`, `heartbeat_at`, `lease_expires_at`, `takeover_condition`,
    `ended_at`, `end_reason`, `tool_session_id`, `pid`, `command`, `worktree`,
    and `branch`. Passing `lease_expires_at` starts the recorded inspection; it
@@ -260,6 +260,12 @@ records when their task or reservation IDs happen to match.
   "branch": "unique-branch"
 }
 ```
+
+Execution leases use no transfer state. To hand an attempt to another owner,
+append an `ENDED` transition for the old lease after the required inspection,
+then create a different lease ID whose latest record is `ACTIVE`. Join later
+task transitions to the new lease ID. This leaves one unambiguous owner instead
+of making a transferred lease look simultaneously ended and active.
 
 3. **Path reservation** records that an active branch, pull request, or named
    owner still claims exact paths. It is a collision record, not a heartbeat or
@@ -310,6 +316,14 @@ same run, repository, `reservation_id`, exact paths, owner, a non-null
 controller liveness. It does not by itself end an execution lease whose agent
 or process is still alive, and it never releases an active branch or
 pull-request path reservation.
+
+`TRANSFERRED` ends the old reservation. Its terminal transition carries a
+mandatory `replacement_reservation_id`, non-null `released_at`, and transfer
+reason. The replacement ID must differ from the old ID, belong to the same run
+and repository, cover the same exact paths, and have an `ACTIVE` highest-valid
+record before the old transition is accepted. For a partial transfer, release
+the old reservation and create separately named active reservations for the
+new path sets; do not leave one transferred record partly active.
 
 For each `(run_id, repository_id, record_type, record ID)`, the latest appended
 operational record is authoritative. Give records a monotonically increasing
