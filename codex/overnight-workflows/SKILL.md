@@ -14,8 +14,9 @@ An overnight request requires persistence, not broader authority. Define allowed
 3. Split executable slices into reviewable units with durable IDs, explicit dependencies, write sets, review tiers, working budgets, latest starts, and autonomous stop points.
 4. Use isolated worktrees for writers. Give shared central files to one integrator and serialize their integration.
 5. Write a durable journal that keeps classification state, lifecycle state, blocker reason, and verification result separate, and records branch, commit, checks, review artifacts, and next action.
-6. Make every stage idempotent so a resumed run can inspect and continue rather than repeat.
-7. Reserve capacity for review, integration, and recovery instead of spending every slot on implementation.
+6. Track controller liveness, bounded execution leases, and exact-path reservations separately. A stopped controller is no longer live, but its active branch or pull request keeps its path reservation until verified release, abandonment, supersession, or named transfer.
+7. Make every stage idempotent so a resumed run can inspect and continue rather than repeat.
+8. Reserve capacity for review, integration, and recovery instead of spending every slot on implementation.
 
 ## Run safely
 

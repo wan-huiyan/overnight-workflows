@@ -190,6 +190,59 @@ Keep four dimensions separate:
 3. `verification`: `PASS | FAIL | UNCHECKED | NOT_APPLICABLE`
 4. `run_disposition`: `ACTIVE | TERMINAL`
 
+Do not use any of those four fields for controller health or file ownership.
+A durable runner also keeps three operational records separate:
+
+1. **Controller liveness** says whether a named controller session or process is
+   currently supervising the run. Record `controller_id`, `state` (`RUNNING` or
+   `STOPPED`), `heartbeat_at`, and `stopped_at`. A stopped controller is not a
+   live session even when branches or pull requests from its run remain open.
+2. **Execution lease** gives one attempt temporary permission to run a command
+   or agent. Record `lease_id`, `attempt_id`, `lease_owner`, `state`,
+   `lease_expires_at`, and the inspection required before takeover. An expired
+   heartbeat starts recovery inspection; it is not proof the old process ended.
+3. **Path reservation** records that an active branch, pull request, or named
+   owner still claims exact paths. It is a collision record, not a heartbeat or
+   execution lease. It may remain active after both the controller and its last
+   execution lease stop.
+
+Store path-reservation transitions durably, separately from any ephemeral
+running-session board. Each standalone transition repeats at least
+`reservation_id`, `exact_paths`, `owner`, `state`, `expires_at`,
+`takeover_condition`, `released_at`, and `release_reason`:
+
+```json
+{
+  "time": "ISO-8601",
+  "schema_version": 1,
+  "record_type": "path_reservation",
+  "reservation_id": "reservation-pr-934-data-js",
+  "exact_paths": ["docs/site/assets/data.js"],
+  "owner": {
+    "kind": "pull_request",
+    "id": "934",
+    "branch": "example-branch"
+  },
+  "state": "ACTIVE",
+  "created_at": "ISO-8601",
+  "expires_at": null,
+  "takeover_condition": "PR merged or closed, then branch and path diff inspected",
+  "released_at": null,
+  "release_reason": null
+}
+```
+
+Use `ACTIVE | RELEASED | TRANSFERRED` for reservation state. A nullable expiry
+means the claim does not age out automatically. Reaching a non-null expiry
+starts the recorded inspection and takeover procedure; it does not silently
+free the path. Release only after merge plus content verification, documented
+abandonment or supersession, or a named transfer. On release, append a
+transition with the same `reservation_id`, exact paths, owner, a non-null
+`released_at`, and a specific `release_reason`. Stopping a controller clears
+controller liveness. It does not by itself end an execution lease whose agent
+or process is still alive, and it never releases an active branch or
+pull-request path reservation.
+
 Do not create combined spellings such as `BLOCKED_REVIEW` in one place and
 `READY_MERGE_BLOCKED` in another. Keep the base state stable and put the detail
 in `reason_code` and `next_action`.
@@ -341,13 +394,15 @@ For each item, in order:
 12. Merge only while the target remains healthy.
 13. Fetch the merged target and verify content that this item added, not only
     file existence or record IDs.
-14. Update the journal. Remove controller liveness whenever the controller
-    stops and no process or renewable lease remains. Release an item write
-    reservation after merge/content verification or an explicit terminal run
-    disposition such as abandonment, supersession, or named transfer. Preserve
-    a separately owned collision reservation while an active branch or PR still
-    claims the path; record its owner, expiry or takeover condition, and next
-    action rather than pretending the old controller is running.
+14. Update the journal and the separate operational records. Mark controller
+    liveness `STOPPED` whenever the controller stops. End its execution lease
+    only after process inspection confirms no command or agent remains. Release
+    an item path reservation after merge/content verification or an explicit
+    terminal outcome such as abandonment, supersession, or named transfer.
+    Preserve a separately owned reservation while an active branch or pull
+    request still claims the path; repeat its `reservation_id`, exact paths,
+    owner, state, expiry or takeover condition, release time and reason, and
+    next action rather than pretending the old controller is running.
 
 Never merge two items simultaneously when both ultimately edit the same shared
 record. A clean merge result does not prove current content survived it.

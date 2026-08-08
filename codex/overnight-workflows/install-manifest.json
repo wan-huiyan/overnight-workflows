@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "installed_skill": "overnight-workflows",
+  "mappings": [
+    {
+      "canonical_source": "codex/overnight-workflows/SKILL.md",
+      "installed_path": "SKILL.md"
+    },
+    {
+      "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
+      "installed_path": "agents/openai.yaml"
+    },
+    {
+      "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
+      "installed_path": "references/workflows/references/large-live-queue-orchestration.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/references/large-live-queue-orchestration.md"
+    }
+  ]
+}
