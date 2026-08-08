@@ -17,4 +17,4 @@ jobs:
       - name: Skill-description cap gate (Claude Code skill listing)
         run: python3 scripts/check_skill_descriptions.py . --no-color --triggers
       - name: Large-queue routing and state contract
-        run: python3 scripts/check_large_queue_guidance.py
+        run: python3 scripts/check_large_queue_guidance.py --self-test

@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "record_mutations": [
+    {
+      "name": "rename_log_path",
+      "record_type": "task_transition",
+      "rename": {"log_path": "log_paths"},
+      "expect_error": "missing required field log_path"
+    },
+    {
+      "name": "rename_review_artifacts",
+      "record_type": "task_transition",
+      "rename": {"review_artifacts": "review_report_paths"},
+      "expect_error": "missing required field review_artifacts"
+    },
+    {
+      "name": "missing_controller_expiry",
+      "record_type": "controller_liveness",
+      "remove": ["heartbeat_expires_at"],
+      "expect_error": "missing required field heartbeat_expires_at"
+    },
+    {
+      "name": "empty_controller_takeover_condition",
+      "record_type": "controller_liveness",
+      "set": {"takeover_condition": ""},
+      "expect_error": "nonempty field takeover_condition"
+    },
+    {
+      "name": "missing_authorized_successors",
+      "record_type": "controller_liveness",
+      "remove": ["authorized_successor_ids"],
+      "expect_error": "missing required field authorized_successor_ids"
+    },
+    {
+      "name": "lease_without_controller_join",
+      "record_type": "execution_lease",
+      "remove": ["controller_id"],
+      "expect_error": "missing required field controller_id"
+    },
+    {
+      "name": "null_reservation_paths",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": null},
+      "expect_error": "field exact_paths has type null"
+    }
+  ],
+  "sequence_cases": [
+    {"name": "increasing", "sequences": [17, 20, 24], "expected_valid": true},
+    {"name": "duplicate", "sequences": [17, 17], "expected_valid": false},
+    {"name": "out_of_order", "sequences": [20, 19], "expected_valid": false}
+  ],
+  "operational_separation": {
+    "name": "controller_stop_retains_active_pr_reservation",
+    "controller_state": "STOPPED",
+    "lease_state": "ENDED",
+    "reservation_state": "ACTIVE",
+    "reservation_owner_kind": "pull_request",
+    "expected_valid": true
+  },
+  "takeover_cases": [
+    {
+      "name": "complete_inspected_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": true
+    },
+    {
+      "name": "stale_controller_without_inspection",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": false,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "unavailable_pid_is_unchecked",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {
+        "pid": {"status": "UNKNOWN", "detail": "could not inspect; unavailable"}
+      },
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "active_lease_blocks_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": true,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "expiry_alone_does_not_stop",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": false,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "unauthorized_successor",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-intruder",
+      "expected_valid": false
+    },
+    {
+      "name": "heartbeat_not_expired",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2999-01-01T00:00:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "lease_joined_to_different_controller",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "different-controller",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    }
+  ]
+}

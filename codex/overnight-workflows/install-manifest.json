@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "installed_skill": "overnight-workflows",
+  "layout": "per-workflow-package",
   "mappings": [
     {
       "canonical_source": "codex/overnight-workflows/SKILL.md",
@@ -12,43 +13,154 @@
     },
     {
       "canonical_source": "plugins/large-redesign-parallel-branch-collision-audit/SKILL.md",
-      "installed_path": "references/workflows/large-redesign-parallel-branch-collision-audit.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/large-redesign-parallel-branch-collision-audit.md"
+      "installed_path": "references/workflows/large-redesign-parallel-branch-collision-audit/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/large-redesign-parallel-branch-collision-audit/SKILL.md"
     },
     {
       "canonical_source": "plugins/overnight-insight-discovery/SKILL.md",
-      "installed_path": "references/workflows/overnight-insight-discovery.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-insight-discovery.md"
+      "installed_path": "references/workflows/overnight-insight-discovery/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-insight-discovery/SKILL.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/adaptive_tuning.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/adaptive_tuning.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/bq_shell_quoting.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/bq_shell_quoting.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/ccr_env_toolchain_preflight.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/ccr_env_toolchain_preflight.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cdp_event_temporal_proxy.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cdp_event_temporal_proxy.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/chart_divergence_check.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/chart_divergence_check.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cohort_novelty_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cohort_novelty_gate.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/country_bucket_decomposition.sql",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/country_bucket_decomposition.sql"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cross_model_tiebreaker.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cross_model_tiebreaker.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/meltdown_circuit_breaker.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/meltdown_circuit_breaker.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/observational_analysis_rigor.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/observational_analysis_rigor.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_6_historical_scoring.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_6_historical_scoring.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_predispatch_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_predispatch_gate.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_preparation.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_preparation.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_a_tracks.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_a_tracks.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_b_review_loop.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_b_review_loop.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_c_consolidation.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_c_consolidation.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sf_endpoint_defined_cohort_hazard.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sf_endpoint_defined_cohort_hazard.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sf_profile_per_cycle.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sf_profile_per_cycle.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/shap_interaction_scoring.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/shap_interaction_scoring.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sql_reexecution_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sql_reexecution_gate.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/stitched_view_case_completeness.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/stitched_view_case_completeness.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/canonical_numbers_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/canonical_numbers_template.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/config_yaml_template.yaml",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/config_yaml_template.yaml"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/morning_summary_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/morning_summary_template.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/pr_body_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/pr_body_template.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/tiebreaker_prompt_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/tiebreaker_prompt_template.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/scripts/bq_budget.py",
+      "installed_path": "references/workflows/overnight-insight-discovery/scripts/bq_budget.py"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/scripts/render_html.py",
+      "installed_path": "references/workflows/overnight-insight-discovery/scripts/render_html.py"
     },
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
-      "installed_path": "references/workflows/overnight-multi-issue-implementation.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation.md"
-    },
-    {
-      "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
-      "installed_path": "references/workflows/overnight-review-client-delivery.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery.md"
-    },
-    {
-      "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
-      "installed_path": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean.md"
-    },
-    {
-      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
-      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern.md"
-    },
-    {
-      "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
-      "installed_path": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains.md"
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation/SKILL.md"
     },
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
-      "installed_path": "references/workflows/references/large-live-queue-orchestration.md",
-      "navigation_stub": "codex/overnight-workflows/references/workflows/references/large-live-queue-orchestration.md"
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-client-delivery/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery/SKILL.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md"
+    },
+    {
+      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
+      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern/SKILL.md"
+    },
+    {
+      "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
+      "installed_path": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md"
     }
   ]
 }

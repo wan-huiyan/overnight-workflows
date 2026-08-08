@@ -33,4 +33,14 @@ An overnight request requires persistence, not broader authority. Define allowed
 
 Report completed and incomplete units, commits and PRs actually observed, verification by layer, blocked or unchecked work, assumptions used, and the safest next action.
 
-Read the relevant source workflow under `references/workflows/` for specialized patterns. For a live index or mixed backlog with stale, partial, owner-gated, or shared-file items, read `references/workflows/references/large-live-queue-orchestration.md` before classification or dispatch. For a related issue cluster or stacked PR sequence, read `references/workflows/overnight-multi-issue-implementation.md`. Translate Claude schedules, RemoteTrigger, model tiers, and workflow schemas into the goal, automation, wait, and agent facilities actually available.
+Read the relevant packaged workflow at
+`references/workflows/<plugin>/SKILL.md`; each workflow's relative
+`references/`, `assets/`, and `scripts/` dependencies live beside that
+entrypoint. For a live index or mixed backlog with stale, partial, owner-gated,
+or shared-file items, read
+`references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md`
+before classification or dispatch. For a related issue cluster or stacked PR
+sequence, read
+`references/workflows/overnight-multi-issue-implementation/SKILL.md`. Translate
+Claude schedules, RemoteTrigger, model tiers, and workflow schemas into the
+goal, automation, wait, and agent facilities actually available.

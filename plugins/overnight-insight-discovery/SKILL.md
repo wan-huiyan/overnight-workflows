@@ -553,9 +553,10 @@ Phase E — HTML rendering
 
 Phase F — Morning handoff
   read: references/phase_c_consolidation.md
-  - write_morning_summary.py (7-section template from overnight-review-client-delivery)
-  - open_pr.py with DO NOT MERGE banner
-  - build_drive_bundle.py (v1.4.1) — single self-contained HTML bundle for
+  - Write the 7-section morning summary defined in the phase reference.
+  - When pull-request authority exists, open the PR with the required banner by
+    following the phase reference's `gh pr create` contract.
+  - Adapt the project-local build_drive_bundle.py template (v1.4.1) — single self-contained HTML bundle for
     phone-readable review via Google Drive / Dropbox / any file share.
     Markdown + HTML deliverables combined, chart PNGs base64-inlined,
     mobile-optimised CSS with sticky top nav. User drags the one file
@@ -587,7 +588,12 @@ Added after the S92 run's client brief needed phone-readable review but Google D
 
 **Template.** See `scripts/build_drive_bundle.py` in the S92 run output for a working reference: reads 2 HTML briefs + 4 markdown docs + 2 chart PNGs, emits one 267-KB HTML. Adapt the `sections` list to match the current run's deliverables.
 
-**Phase F step.** Run `python3 scripts/build_drive_bundle.py` after `write_morning_summary.py` and `open_pr.py`. Output path: `docs/delivery/<run_date>_bundle_for_drive.html`. List the bundle path prominently in `morning_summary.md §1` so the user can drag-drop to Drive on waking.
+**Phase F step.** After writing the morning summary and, when authorized,
+opening the pull request, adapt and run the project-local
+`scripts/build_drive_bundle.py`. Output path:
+`docs/delivery/<run_date>_bundle_for_drive.html`. List the bundle path
+prominently in `morning_summary.md §1` so the user can drag-drop to Drive on
+waking.
 
 **Why not GitHub Pages / Vercel / Netlify?** Public by default; client data even at cohort-aggregate level should not be on a public CDN. For private mobile review, Google Drive (already logged in on user's phone, already private, single-file upload) is the simplest robust path. For team-shared review, consider IAP-protected Cloud Run (reuses the project's existing access control; documented as a v1.5 roadmap candidate).
 

@@ -2,7 +2,8 @@
 name: overnight-multi-issue-implementation
 description: |
   Run an overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1
-  review-panel finding set), or a large mixed live queue, and ships them to merged PRs by morning. Use when:
+  review-panel finding set), or a large mixed live queue, and prepares reviewed commits/PRs by morning; merge only
+  under an explicit recorded merge grant. Use when:
   (1) the user wants 6-15 related issues closed in one autonomous run, (2) the issues split naturally into two PRs (e.g., hardening + features,
   or refactor + new-functionality), (3) the user is going to sleep and won't be available to merge PR1 between
   phases, (4) each issue has clear acceptance criteria so each task can be implemented + tested + reviewed
@@ -11,7 +12,7 @@ description: |
   Specializes `superpowers:subagent-driven-development` for the "issues -> stacked PRs by morning" problem
   shape: PR2 is stacked on PR1's branch so it doesn't wait for a human PR1-merge mid-night. ALWAYS use this
   skill when the user says "implement these issues overnight", "ship #N–#M autonomously", "wake up to merged
-  PRs", "two-PR overnight plan", "triage this backlog first", "some of these might be stale", "apply the
+  PRs" (an explicit merge grant), "two-PR overnight plan", "triage this backlog first", "some of these might be stale", "apply the
   owner's rulings", "classify this live queue", or wants a stacked-PR autonomous run from an issue cluster.
   NOT for: synchronous single-PR work, polishing an existing deliverable, or generating insights from data.
 author: wan-huiyan + Claude Code

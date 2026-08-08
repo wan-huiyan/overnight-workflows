@@ -204,9 +204,12 @@ records when their task or reservation IDs happen to match.
 1. **Controller liveness** says whether a named controller session or process is
    currently supervising the run. Its records carry `run_id`, `repository_id`,
    `controller_id`, `state` (`RUNNING` or `STOPPED`), `heartbeat_at`,
-   `stopped_at`, `stop_reason`, `tool_session_id`, `pid`, and `host`. A stopped
-   controller is not a live session even when branches or pull requests from
-   its run remain open.
+   `heartbeat_expires_at`, `takeover_condition`, `stopped_at`, `stop_reason`,
+   `inspection_evidence`, `stopped_by`, `authorized_successor_ids`,
+   `tool_session_id`, `pid`, and `host`. Every `RUNNING` record has a non-null
+   heartbeat expiry, a non-empty takeover condition, and an explicit list of
+   controller IDs authorized to take over. A stopped controller is not a live
+   session even when branches or pull requests from its run remain open.
 
 ```json
 {
@@ -219,8 +222,13 @@ records when their task or reservation IDs happen to match.
   "controller_id": "controller-1",
   "state": "RUNNING",
   "heartbeat_at": "ISO-8601",
+  "heartbeat_expires_at": "ISO-8601-plus-20-minutes",
+  "takeover_condition": "authorized successor inspects host, PID, tool session, journal, leases, logs, worktree, diff, and commits",
   "stopped_at": null,
   "stop_reason": null,
+  "inspection_evidence": null,
+  "stopped_by": null,
+  "authorized_successor_ids": ["controller-successor"],
   "tool_session_id": "tool-session-or-null",
   "pid": 12345,
   "host": "runner-host"
@@ -228,8 +236,8 @@ records when their task or reservation IDs happen to match.
 ```
 
 2. **Execution lease** gives one attempt temporary permission to run a command
-   or agent. Its records carry `run_id`, `repository_id`, `lease_id`,
-   `attempt_id`, `lease_owner`, `state` (`ACTIVE` or `ENDED`),
+   or agent. Its records carry `run_id`, `repository_id`, `controller_id`,
+   `lease_id`, `attempt_id`, `lease_owner`, `state` (`ACTIVE` or `ENDED`),
    `started_at`, `heartbeat_at`, `lease_expires_at`, `takeover_condition`,
    `ended_at`, `end_reason`, `tool_session_id`, `pid`, `command`, `worktree`,
    and `branch`. Passing `lease_expires_at` starts the recorded inspection; it
@@ -243,6 +251,7 @@ records when their task or reservation IDs happen to match.
   "record_type": "execution_lease",
   "run_id": "overnight-2026-08-08",
   "repository_id": "github.com/example/project",
+  "controller_id": "controller-1",
   "lease_id": "lease-task-12-attempt-1",
   "attempt_id": "task-12-attempt-1",
   "lease_owner": "agent-7",
@@ -266,6 +275,42 @@ append an `ENDED` transition for the old lease after the required inspection,
 then create a different lease ID whose latest record is `ACTIVE`. Join later
 task transitions to the new lease ID. This leaves one unambiguous owner instead
 of making a transferred lease look simultaneously ended and active.
+
+The lease's `controller_id` is required because crash recovery must enumerate
+every lease supervised by the stale controller. It is an identity join, not a
+snapshot of controller state.
+
+### Crashed-controller takeover
+
+A passed `heartbeat_expires_at` does not change a `RUNNING` controller to
+`STOPPED` and does not grant takeover. It only permits a successor whose
+controller ID appears in the latest `RUNNING` record's
+`authorized_successor_ids` to begin this fail-closed inspection:
+
+1. Re-read the latest controller record and confirm its heartbeat is still
+   expired under the run's clock policy.
+2. Inspect the recorded host and PID, tool session, journal, every lease joined
+   by `controller_id`, logs, worktree, diff, and commits. Record a result for
+   every surface; absence or inaccessible evidence is `unknown`, not stopped.
+3. If any controller process or execution lease may still be active, leave the
+   controller `RUNNING`, set the takeover verification to `UNCHECKED`, and stop.
+4. If every surface proves that the old controller and its work are no longer
+   running, append a terminal `STOPPED` record for the old `controller_id`.
+   Repeat its run and repository identity, use a higher sequence, set
+   `stopped_at` and `stop_reason`, set `stopped_by` to the authorized successor
+   controller ID, and include complete `inspection_evidence` with named results
+   for `host`, `pid`, `tool_session`, `journal`, `leases`, `logs`, `worktree`,
+   `diff`, and `commits`, plus a `conclusion`. Each result is an object with a
+   `status` of `CLEAR`, `ACTIVE`, or `UNKNOWN` and a non-empty `detail`; every
+   status, including the conclusion, must be `CLEAR` before `STOPPED` is valid.
+5. Only after that terminal record is durable may the successor append its own
+   `RUNNING` record. Reduce the journal again and require exactly one latest
+   `RUNNING` controller for the run and repository.
+
+An intentional controller stop uses the same terminal evidence fields and may
+name its own `controller_id` as `stopped_by`. A takeover must name one of the
+prior record's authorized successors. This keeps clean shutdown and inspected
+crash recovery on one canonical schema.
 
 3. **Path reservation** records that an active branch, pull request, or named
    owner still claims exact paths. It is a collision record, not a heartbeat or
@@ -390,7 +435,10 @@ Append transitions to a durable JSONL journal. Each record should carry:
 authoritative operational records above. They may be null or empty before
 assignment. Do not snapshot controller state, tool session, process ID,
 command, heartbeat, lease expiry, reservation owner, or reservation state into
-a task transition; those copies go stale and create two competing answers.
+a task transition; those copies go stale and create two competing answers. The
+canonical task-transition field names are singular `log_path` for the durable
+execution log and `review_artifacts` for the list of complete review outputs;
+do not publish aliases for either field.
 
 Give the append-only journal one controller/integrator writer, or use atomic
 append with locking if the platform requires multiple writers. Store the
