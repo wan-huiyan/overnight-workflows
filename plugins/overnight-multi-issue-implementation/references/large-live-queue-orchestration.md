@@ -191,31 +191,94 @@ Keep four dimensions separate:
 4. `run_disposition`: `ACTIVE | TERMINAL`
 
 Do not use any of those four fields for controller health or file ownership.
-A durable runner also keeps three operational records separate:
+A durable runner also keeps three operational record types separate. They may
+share one append-only operational journal or use separate JSONL files, but task
+transitions only join to them by ID and never copy their mutable state.
+
+Every operational record carries `run_id` and `repository_id`.
+`repository_id` is the stable canonical remote identity such as
+`github.com/owner/repository`, or `local:<canonical-absolute-root>` when no
+remote exists. This prevents one run or repository from clearing another's
+records when their task or reservation IDs happen to match.
 
 1. **Controller liveness** says whether a named controller session or process is
-   currently supervising the run. Record `controller_id`, `state` (`RUNNING` or
-   `STOPPED`), `heartbeat_at`, and `stopped_at`. A stopped controller is not a
-   live session even when branches or pull requests from its run remain open.
+   currently supervising the run. Its records carry `run_id`, `repository_id`,
+   `controller_id`, `state` (`RUNNING` or `STOPPED`), `heartbeat_at`,
+   `stopped_at`, `stop_reason`, `tool_session_id`, `pid`, and `host`. A stopped
+   controller is not a live session even when branches or pull requests from
+   its run remain open.
+
+```json
+{
+  "time": "ISO-8601",
+  "sequence": 17,
+  "schema_version": 1,
+  "record_type": "controller_liveness",
+  "run_id": "overnight-2026-08-08",
+  "repository_id": "github.com/example/project",
+  "controller_id": "controller-1",
+  "state": "RUNNING",
+  "heartbeat_at": "ISO-8601",
+  "stopped_at": null,
+  "stop_reason": null,
+  "tool_session_id": "tool-session-or-null",
+  "pid": 12345,
+  "host": "runner-host"
+}
+```
+
 2. **Execution lease** gives one attempt temporary permission to run a command
-   or agent. Record `lease_id`, `attempt_id`, `lease_owner`, `state`,
-   `lease_expires_at`, and the inspection required before takeover. An expired
-   heartbeat starts recovery inspection; it is not proof the old process ended.
+   or agent. Its records carry `run_id`, `repository_id`, `lease_id`,
+   `attempt_id`, `lease_owner`, `state` (`ACTIVE`, `ENDED`, or `TRANSFERRED`),
+   `started_at`, `heartbeat_at`, `lease_expires_at`, `takeover_condition`,
+   `ended_at`, `end_reason`, `tool_session_id`, `pid`, `command`, `worktree`,
+   and `branch`. Passing `lease_expires_at` starts the recorded inspection; it
+   does not itself prove the old process ended or change the latest state.
+
+```json
+{
+  "time": "ISO-8601",
+  "sequence": 18,
+  "schema_version": 1,
+  "record_type": "execution_lease",
+  "run_id": "overnight-2026-08-08",
+  "repository_id": "github.com/example/project",
+  "lease_id": "lease-task-12-attempt-1",
+  "attempt_id": "task-12-attempt-1",
+  "lease_owner": "agent-7",
+  "state": "ACTIVE",
+  "started_at": "ISO-8601",
+  "heartbeat_at": "ISO-8601",
+  "lease_expires_at": "ISO-8601",
+  "takeover_condition": "inspect tool session, PID, log, worktree, diff, and commits",
+  "ended_at": null,
+  "end_reason": null,
+  "tool_session_id": "tool-session-or-null",
+  "pid": 12346,
+  "command": "exact-command-or-null",
+  "worktree": "/absolute/path",
+  "branch": "unique-branch"
+}
+```
+
 3. **Path reservation** records that an active branch, pull request, or named
    owner still claims exact paths. It is a collision record, not a heartbeat or
    execution lease. It may remain active after both the controller and its last
    execution lease stop.
 
 Store path-reservation transitions durably, separately from any ephemeral
-running-session board. Each standalone transition repeats at least
-`reservation_id`, `exact_paths`, `owner`, `state`, `expires_at`,
-`takeover_condition`, `released_at`, and `release_reason`:
+running-session board. Each standalone transition repeats at least `run_id`,
+`repository_id`, `reservation_id`, `exact_paths`, `owner`, `state`,
+`expires_at`, `takeover_condition`, `released_at`, and `release_reason`:
 
 ```json
 {
   "time": "ISO-8601",
+  "sequence": 19,
   "schema_version": 1,
   "record_type": "path_reservation",
+  "run_id": "overnight-2026-08-08",
+  "repository_id": "github.com/example/project",
   "reservation_id": "reservation-pr-934-data-js",
   "exact_paths": ["docs/site/assets/data.js"],
   "owner": {
@@ -233,15 +296,29 @@ running-session board. Each standalone transition repeats at least
 ```
 
 Use `ACTIVE | RELEASED | TRANSFERRED` for reservation state. A nullable expiry
-means the claim does not age out automatically. Reaching a non-null expiry
-starts the recorded inspection and takeover procedure; it does not silently
-free the path. Release only after merge plus content verification, documented
-abandonment or supersession, or a named transfer. On release, append a
-transition with the same `reservation_id`, exact paths, owner, a non-null
+and a mandatory non-empty `takeover_condition` are separate fields on every
+active reservation. `expires_at` may be null, meaning the claim does not age out
+automatically; that never permits omitting the takeover condition. Reaching a
+non-null expiry starts that recorded inspection and takeover procedure; it does
+not silently free the path. Every entry in `exact_paths` is normalized and
+relative to the root of the repository identified by `repository_id`, never an
+absolute path or a path containing `..`.
+Release only after merge plus content verification, documented abandonment or
+supersession, or a named transfer. On release, append a transition with the
+same run, repository, `reservation_id`, exact paths, owner, a non-null
 `released_at`, and a specific `release_reason`. Stopping a controller clears
 controller liveness. It does not by itself end an execution lease whose agent
 or process is still alive, and it never releases an active branch or
 pull-request path reservation.
+
+For each `(run_id, repository_id, record_type, record ID)`, the latest appended
+operational record is authoritative. Give records a monotonically increasing
+`sequence`; the highest valid sequence for that key is latest, and wall-clock
+timestamps never override it. Task records cannot override that state. If a
+referenced controller, lease, or reservation record is missing, unreadable,
+duplicates a sequence, or moves backward in sequence, mark the relevant safety
+check `UNCHECKED` and stop rather than inferring that the controller is dead,
+the lease is free, or the path is unclaimed.
 
 Do not create combined spellings such as `BLOCKED_REVIEW` in one place and
 `READY_MERGE_BLOCKED` in another. Keep the base state stable and put the detail
@@ -265,12 +342,18 @@ Append transitions to a durable JSONL journal. Each record should carry:
 ```json
 {
   "time": "ISO-8601",
+  "sequence": 24,
   "schema_version": 1,
+  "record_type": "task_transition",
+  "run_id": "overnight-2026-08-08",
+  "repository_id": "github.com/example/project",
   "source_occurrence_id": "stable-row-occurrence-id",
   "classification_state": "EXECUTABLE",
   "task_id": "stable-id",
   "attempt_id": "stable-attempt-id",
-  "agent_id": "agent-or-worker-id",
+  "controller_id": "controller-1",
+  "lease_id": "lease-task-12-attempt-1",
+  "reservation_ids": ["reservation-pr-934-data-js"],
   "task_state": "REVIEW",
   "reason_code": "NONE",
   "verification": "UNCHECKED",
@@ -280,11 +363,6 @@ Append transitions to a durable JSONL journal. Each record should carry:
   "worktree": "/absolute/path",
   "branch": "unique-branch",
   "head_sha": "full-sha",
-  "tool_session_id": "tool-session-or-null",
-  "pid": 12345,
-  "command": "exact-command-or-null",
-  "heartbeat_at": "ISO-8601-or-null",
-  "lease_expires_at": "ISO-8601-or-null",
   "retry_count": 0,
   "log_path": "/durable/path/or-null",
   "output_paths": [],
@@ -294,13 +372,19 @@ Append transitions to a durable JSONL journal. Each record should carry:
 }
 ```
 
+`controller_id`, `lease_id`, and `reservation_ids` are joins to the latest
+authoritative operational records above. They may be null or empty before
+assignment. Do not snapshot controller state, tool session, process ID,
+command, heartbeat, lease expiry, reservation owner, or reservation state into
+a task transition; those copies go stale and create two competing answers.
+
 Give the append-only journal one controller/integrator writer, or use atomic
 append with locking if the platform requires multiple writers. Store the
 journal, logs, and review reports outside disposable worker worktrees, while
-recording any committed copy separately. Use heartbeats and bounded leases for
-running agents. On expiry, inspect the journal, process state, worktree, branch,
-diff, and commits before takeover. Cap retries; repeated retries over unknown
-partial state create more ambiguity.
+recording any committed copy separately. Put heartbeats and bounded leases in
+their operational records. On expiry, inspect the journal, process state,
+worktree, branch, diff, and commits before takeover. Cap retries; repeated
+retries over unknown partial state create more ambiguity.
 
 ## 7. Dispatch and recover safely
 

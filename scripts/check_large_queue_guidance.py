@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fail when the large-queue route loses its core safety contracts."""
 
+import argparse
 from collections import Counter
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 
@@ -16,47 +17,7 @@ REFERENCE = (
     / "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md"
 )
 CODEX = ROOT / "codex/overnight-workflows/SKILL.md"
-CODEX_WORKFLOW_ROUTE = (
-    ROOT
-    / "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation.md"
-)
-CODEX_QUEUE_ROUTE = (
-    ROOT
-    / "codex/overnight-workflows/references/workflows/references/large-live-queue-orchestration.md"
-)
 INSTALL_MANIFEST = ROOT / "codex/overnight-workflows/install-manifest.json"
-
-EXPECTED_INSTALL_MAPPINGS = [
-    {
-        "canonical_source": "codex/overnight-workflows/SKILL.md",
-        "installed_path": "SKILL.md",
-    },
-    {
-        "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
-        "installed_path": "agents/openai.yaml",
-    },
-    {
-        "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
-        "installed_path": "references/workflows/overnight-multi-issue-implementation.md",
-        "navigation_stub": (
-            "codex/overnight-workflows/references/workflows/"
-            "overnight-multi-issue-implementation.md"
-        ),
-    },
-    {
-        "canonical_source": (
-            "plugins/overnight-multi-issue-implementation/references/"
-            "large-live-queue-orchestration.md"
-        ),
-        "installed_path": (
-            "references/workflows/references/large-live-queue-orchestration.md"
-        ),
-        "navigation_stub": (
-            "codex/overnight-workflows/references/workflows/references/"
-            "large-live-queue-orchestration.md"
-        ),
-    },
-]
 
 
 def require(text: str, phrase: str, where: Path, errors: list[str]) -> None:
@@ -64,7 +25,100 @@ def require(text: str, phrase: str, where: Path, errors: list[str]) -> None:
         errors.append(f"{where.relative_to(ROOT)}: missing {phrase!r}")
 
 
+def expected_install_mappings() -> list[dict[str, str]]:
+    """Derive the umbrella inventory from every top-level workflow plugin."""
+    mappings = [
+        {
+            "canonical_source": "codex/overnight-workflows/SKILL.md",
+            "installed_path": "SKILL.md",
+        },
+        {
+            "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
+            "installed_path": "agents/openai.yaml",
+        },
+    ]
+    for source in sorted(ROOT.glob("plugins/*/SKILL.md")):
+        plugin_name = source.parent.name
+        mappings.append(
+            {
+                "canonical_source": source.relative_to(ROOT).as_posix(),
+                "installed_path": f"references/workflows/{plugin_name}.md",
+                "navigation_stub": (
+                    "codex/overnight-workflows/references/workflows/"
+                    f"{plugin_name}.md"
+                ),
+            }
+        )
+    mappings.append(
+        {
+            "canonical_source": (
+                "plugins/overnight-multi-issue-implementation/references/"
+                "large-live-queue-orchestration.md"
+            ),
+            "installed_path": (
+                "references/workflows/references/"
+                "large-live-queue-orchestration.md"
+            ),
+            "navigation_stub": (
+                "codex/overnight-workflows/references/workflows/references/"
+                "large-live-queue-orchestration.md"
+            ),
+        }
+    )
+    return mappings
+
+
+def json_examples(markdown: str, errors: list[str]) -> dict[str, dict]:
+    records: dict[str, dict] = {}
+    for block in re.findall(r"```json\n(.*?)\n```", markdown, flags=re.DOTALL):
+        try:
+            value = json.loads(block)
+        except json.JSONDecodeError as exc:
+            errors.append(f"large-queue reference has invalid JSON example: {exc}")
+            continue
+        if isinstance(value, dict) and "record_type" in value:
+            records[value["record_type"]] = value
+    return records
+
+
+def check_installed_inventory(
+    installed_root: Path, mappings: list[dict[str, str]], errors: list[str]
+) -> None:
+    if not installed_root.is_dir():
+        errors.append(f"installed skill root is not a directory: {installed_root}")
+        return
+
+    expected_paths = {mapping["installed_path"] for mapping in mappings}
+    actual_paths = {
+        path.relative_to(installed_root).as_posix()
+        for path in installed_root.rglob("*")
+        if path.is_file()
+    }
+    for missing in sorted(expected_paths - actual_paths):
+        errors.append(f"installed umbrella is missing: {missing}")
+    for unexpected in sorted(actual_paths - expected_paths):
+        errors.append(f"installed umbrella has undeclared file: {unexpected}")
+
+    for mapping in mappings:
+        source = ROOT / mapping["canonical_source"]
+        installed = installed_root / mapping["installed_path"]
+        if source.is_file() and installed.is_file():
+            if source.read_bytes() != installed.read_bytes():
+                errors.append(
+                    "installed umbrella differs from canonical source: "
+                    f"{mapping['installed_path']}"
+                )
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--installed-root",
+        type=Path,
+        help="also require this installed umbrella to match the manifest and bytes",
+    )
+    args = parser.parse_args()
+
     errors: list[str] = []
     skill = SKILL.read_text(encoding="utf-8")
     reference = REFERENCE.read_text(encoding="utf-8")
@@ -94,6 +148,8 @@ def main() -> int:
         "`released_at`",
         "`release_reason`",
         "Stopping a controller clears",
+        "latest appended\noperational record is authoritative",
+        "only join to them by ID",
     ):
         require(reference, phrase, REFERENCE, errors)
 
@@ -114,6 +170,7 @@ def main() -> int:
     require(codex, "execution leases", CODEX, errors)
     require(codex, "path reservations", CODEX, errors)
 
+    mappings = expected_install_mappings()
     require(
         readme,
         "[serial large live-queue procedure](plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md)",
@@ -121,50 +178,195 @@ def main() -> int:
         errors,
     )
     require(readme, "## Core patterns\n", README, errors)
-    require(readme, "complete four-file mapping", README, errors)
+    require(readme, f"complete {len(mappings)}-file mapping", README, errors)
+    require(readme, f"all {len(mappings)} source/install SHA-256 digests", README, errors)
+    stub_count = sum("navigation_stub" in mapping for mapping in mappings)
+    require(readme, f"The {stub_count} tracked route stubs", README, errors)
+    require(readme, "explicit merge-on-green grant", README, errors)
+    require(readme, "pull-request authority is absent", README, errors)
+
+    records = json_examples(reference, errors)
+    required_fields = {
+        "controller_liveness": {
+            "time",
+            "sequence",
+            "schema_version",
+            "record_type",
+            "run_id",
+            "repository_id",
+            "controller_id",
+            "state",
+            "heartbeat_at",
+            "stopped_at",
+            "stop_reason",
+            "tool_session_id",
+            "pid",
+            "host",
+        },
+        "execution_lease": {
+            "time",
+            "sequence",
+            "schema_version",
+            "record_type",
+            "run_id",
+            "repository_id",
+            "lease_id",
+            "attempt_id",
+            "lease_owner",
+            "state",
+            "started_at",
+            "heartbeat_at",
+            "lease_expires_at",
+            "takeover_condition",
+            "ended_at",
+            "end_reason",
+            "tool_session_id",
+            "pid",
+            "command",
+            "worktree",
+            "branch",
+        },
+        "path_reservation": {
+            "time",
+            "sequence",
+            "schema_version",
+            "record_type",
+            "run_id",
+            "repository_id",
+            "reservation_id",
+            "exact_paths",
+            "owner",
+            "state",
+            "created_at",
+            "expires_at",
+            "takeover_condition",
+            "released_at",
+            "release_reason",
+        },
+        "task_transition": {
+            "time",
+            "sequence",
+            "schema_version",
+            "record_type",
+            "run_id",
+            "repository_id",
+            "task_id",
+            "controller_id",
+            "lease_id",
+            "reservation_ids",
+            "task_state",
+        },
+    }
+    for record_type, fields in required_fields.items():
+        record = records.get(record_type)
+        if record is None:
+            errors.append(f"large-queue reference is missing {record_type} JSON")
+            continue
+        missing_fields = fields - record.keys()
+        if missing_fields:
+            errors.append(
+                f"{record_type} JSON is missing fields: "
+                + ", ".join(sorted(missing_fields))
+            )
+
+    task = records.get("task_transition", {})
+    forbidden_task_snapshots = {
+        "tool_session_id",
+        "pid",
+        "command",
+        "heartbeat_at",
+        "lease_expires_at",
+        "controller_state",
+        "lease_state",
+        "reservation_state",
+        "reservation_owner",
+        "exact_paths",
+        "expires_at",
+        "takeover_condition",
+    }
+    duplicated = forbidden_task_snapshots & task.keys()
+    if duplicated:
+        errors.append(
+            "task transition duplicates operational state: "
+            + ", ".join(sorted(duplicated))
+        )
+
+    reservation = records.get("path_reservation", {})
+    if "expires_at" not in reservation:
+        errors.append("path reservation must carry nullable expires_at")
+    if not isinstance(reservation.get("takeover_condition"), str) or not reservation[
+        "takeover_condition"
+    ].strip():
+        errors.append("path reservation must carry a non-empty takeover_condition")
+    for exact_path in reservation.get("exact_paths", []):
+        parsed = PurePosixPath(exact_path)
+        if (
+            not exact_path
+            or exact_path.startswith("/")
+            or ".." in parsed.parts
+            or "\\" in exact_path
+            or parsed.as_posix() != exact_path
+        ):
+            errors.append(f"reservation path is not repository-relative: {exact_path}")
 
     # Contract example: stopping the controller and ending its execution lease
     # must not erase a still-open pull request's exact-path reservation.
-    events = [
-        {
-            "record_type": "controller_liveness",
-            "controller_id": "controller-1",
-            "state": "RUNNING",
-        },
-        {
-            "record_type": "execution_lease",
-            "lease_id": "lease-1",
-            "state": "ACTIVE",
-        },
-        {
-            "record_type": "path_reservation",
-            "reservation_id": "reservation-pr-934-data-js",
-            "exact_paths": ["docs/site/assets/data.js"],
-            "owner": {"kind": "pull_request", "id": "934"},
-            "state": "ACTIVE",
-        },
-        {
-            "record_type": "controller_liveness",
-            "controller_id": "controller-1",
-            "state": "STOPPED",
-        },
-    ]
-    controllers: dict[str, dict] = {}
-    leases: dict[str, dict] = {}
-    reservations: dict[str, dict] = {}
+    controller = records.get("controller_liveness", {})
+    lease = records.get("execution_lease", {})
+    reservation = records.get("path_reservation", {})
+    stopped_controller = {
+        **controller,
+        "sequence": 20,
+        "state": "STOPPED",
+        "stopped_at": "ISO-8601",
+        "stop_reason": "controller session ended",
+    }
+    events = [controller, lease, reservation, stopped_controller]
+    id_fields = {
+        "controller_liveness": "controller_id",
+        "execution_lease": "lease_id",
+        "path_reservation": "reservation_id",
+    }
+    latest: dict[tuple[str, str, str, str], dict] = {}
     for event in events:
-        if event["record_type"] == "controller_liveness":
-            controllers[event["controller_id"]] = event
-        elif event["record_type"] == "execution_lease":
-            leases[event["lease_id"]] = event
-        elif event["record_type"] == "path_reservation":
-            reservations[event["reservation_id"]] = event
+        record_type = event.get("record_type")
+        id_field = id_fields.get(record_type)
+        if not id_field or id_field not in event:
+            continue
+        key = (
+            event["run_id"],
+            event["repository_id"],
+            record_type,
+            event[id_field],
+        )
+        previous = latest.get(key)
+        if previous and event["sequence"] <= previous["sequence"]:
+            errors.append(f"non-increasing operational sequence for {key}")
+        latest[key] = event
 
-    if any(event["state"] == "RUNNING" for event in controllers.values()):
+    controller_key = (
+        controller.get("run_id"),
+        controller.get("repository_id"),
+        "controller_liveness",
+        controller.get("controller_id"),
+    )
+    lease_key = (
+        lease.get("run_id"),
+        lease.get("repository_id"),
+        "execution_lease",
+        lease.get("lease_id"),
+    )
+    reservation_key = (
+        reservation.get("run_id"),
+        reservation.get("repository_id"),
+        "path_reservation",
+        reservation.get("reservation_id"),
+    )
+    if latest.get(controller_key, {}).get("state") == "RUNNING":
         errors.append("stopped controller still reads as live")
-    if not any(event["state"] == "ACTIVE" for event in leases.values()):
+    if latest.get(lease_key, {}).get("state") != "ACTIVE":
         errors.append("controller stop incorrectly ended the live execution lease")
-    retained = reservations.get("reservation-pr-934-data-js")
+    retained = latest.get(reservation_key)
     if not retained or retained["state"] != "ACTIVE":
         errors.append("controller stop incorrectly released the PR path reservation")
     elif retained["exact_paths"] != ["docs/site/assets/data.js"]:
@@ -172,15 +374,25 @@ def main() -> int:
 
     # A later process inspection may end the lease. That transition still must
     # not alter the independently owned pull-request reservation.
-    leases["lease-1"] = {
-        "record_type": "execution_lease",
-        "lease_id": "lease-1",
+    latest[lease_key] = {
+        **lease,
+        "sequence": 21,
         "state": "ENDED",
+        "ended_at": "ISO-8601",
+        "end_reason": "process inspection confirmed exit",
     }
-    if any(event["state"] == "ACTIVE" for event in leases.values()):
+    if latest[lease_key]["state"] == "ACTIVE":
         errors.append("ended execution lease still reads as active")
-    if reservations["reservation-pr-934-data-js"]["state"] != "ACTIVE":
+    if latest[reservation_key]["state"] != "ACTIVE":
         errors.append("lease end incorrectly released the PR path reservation")
+
+    if task:
+        if task.get("controller_id") != controller.get("controller_id"):
+            errors.append("task transition controller_id does not join controller record")
+        if task.get("lease_id") != lease.get("lease_id"):
+            errors.append("task transition lease_id does not join lease record")
+        if reservation.get("reservation_id") not in task.get("reservation_ids", []):
+            errors.append("task transition reservation_ids do not join reservation record")
 
     try:
         manifest = json.loads(INSTALL_MANIFEST.read_text(encoding="utf-8"))
@@ -193,23 +405,36 @@ def main() -> int:
         errors.append(
             f"{INSTALL_MANIFEST.relative_to(ROOT)}: wrong installed_skill"
         )
-    if manifest.get("mappings") != EXPECTED_INSTALL_MAPPINGS:
+    if manifest.get("mappings") != mappings:
         errors.append(
             f"{INSTALL_MANIFEST.relative_to(ROOT)}: install mapping is incomplete or changed"
         )
 
-    for mapping in EXPECTED_INSTALL_MAPPINGS:
+    installed_paths = [mapping["installed_path"] for mapping in mappings]
+    canonical_sources = [mapping["canonical_source"] for mapping in mappings]
+    if len(set(installed_paths)) != len(installed_paths):
+        errors.append("install manifest repeats an installed path")
+    if len(set(canonical_sources)) != len(canonical_sources):
+        errors.append("install manifest repeats a canonical source")
+
+    for mapping in mappings:
         source = ROOT / mapping["canonical_source"]
         if not source.is_file():
             errors.append(f"missing canonical install source: {mapping['canonical_source']}")
-        installed_path = Path(mapping["installed_path"])
-        if installed_path.is_absolute() or ".." in installed_path.parts:
+        installed_path = PurePosixPath(mapping["installed_path"])
+        if mapping["installed_path"].startswith("/") or ".." in installed_path.parts:
             errors.append(f"unsafe installed path: {mapping['installed_path']}")
 
-    for route, target in (
-        (CODEX_WORKFLOW_ROUTE, SKILL),
-        (CODEX_QUEUE_ROUTE, REFERENCE),
-    ):
+        route_path = mapping.get("navigation_stub")
+        if mapping["installed_path"].startswith("references/workflows/") and not route_path:
+            errors.append(
+                f"workflow mapping has no navigation stub: {mapping['installed_path']}"
+            )
+            continue
+        if not route_path:
+            continue
+        route = ROOT / route_path
+        target = source
         if not route.is_file():
             errors.append(f"missing Codex route: {route.relative_to(ROOT)}")
             continue
@@ -222,13 +447,17 @@ def main() -> int:
                 f"{target.relative_to(ROOT)}"
             )
 
+    if args.installed_root:
+        check_installed_inventory(args.installed_root.resolve(), mappings, errors)
+
     if errors:
         for error in errors:
             print(f"ERROR: {error}")
         return 1
+    checked = " and installed bytes" if args.installed_root else ""
     print(
         "OK: large-queue routing, occurrence coverage, state, reservations, "
-        "review, and complete Codex install mapping"
+        f"review, complete Codex routes, and install contract{checked}"
     )
     return 0
 

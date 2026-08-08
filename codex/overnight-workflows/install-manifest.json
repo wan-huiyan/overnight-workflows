@@ -11,9 +11,39 @@
       "installed_path": "agents/openai.yaml"
     },
     {
+      "canonical_source": "plugins/large-redesign-parallel-branch-collision-audit/SKILL.md",
+      "installed_path": "references/workflows/large-redesign-parallel-branch-collision-audit.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/large-redesign-parallel-branch-collision-audit.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/SKILL.md",
+      "installed_path": "references/workflows/overnight-insight-discovery.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-insight-discovery.md"
+    },
+    {
       "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-client-delivery.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery.md"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean.md"
+    },
+    {
+      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
+      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern.md"
+    },
+    {
+      "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
+      "installed_path": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains.md"
     },
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
