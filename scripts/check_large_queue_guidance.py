@@ -85,8 +85,21 @@ def json_examples(markdown: str, errors: list[str]) -> dict[str, dict]:
 def check_installed_inventory(
     installed_root: Path, mappings: list[dict[str, str]], errors: list[str]
 ) -> None:
+    if installed_root.is_symlink():
+        errors.append(f"installed skill root is a symlink: {installed_root}")
+        return
     if not installed_root.is_dir():
         errors.append(f"installed skill root is not a directory: {installed_root}")
+        return
+
+    symlinks = sorted(
+        path.relative_to(installed_root).as_posix()
+        for path in installed_root.rglob("*")
+        if path.is_symlink()
+    )
+    for symlink in symlinks:
+        errors.append(f"installed umbrella contains a symlink: {symlink}")
+    if symlinks:
         return
 
     expected_paths = {mapping["installed_path"] for mapping in mappings}
@@ -154,8 +167,15 @@ def main() -> int:
         "Execution leases use no transfer state",
         "`TRANSFERRED` ends the old reservation",
         "`replacement_reservation_id`",
+        "nullable expiry, mandatory takeover condition",
     ):
         require(reference, phrase, REFERENCE, errors)
+
+    for where, text in ((SKILL, skill), (REFERENCE, reference)):
+        if "expiry or takeover condition" in text:
+            errors.append(
+                f"{where.relative_to(ROOT)}: makes mandatory reservation fields alternatives"
+            )
 
     if "set(source_ids)" in reference:
         errors.append(f"{REFERENCE.relative_to(ROOT)}: filename/set coverage returned")
@@ -471,6 +491,11 @@ def main() -> int:
 
     for mapping in mappings:
         source = ROOT / mapping["canonical_source"]
+        if source.is_symlink():
+            errors.append(
+                f"canonical install source is a symlink: {mapping['canonical_source']}"
+            )
+            continue
         if not source.is_file():
             errors.append(f"missing canonical install source: {mapping['canonical_source']}")
         installed_path = PurePosixPath(mapping["installed_path"])
@@ -500,7 +525,7 @@ def main() -> int:
             )
 
     if args.installed_root:
-        check_installed_inventory(args.installed_root.resolve(), mappings, errors)
+        check_installed_inventory(args.installed_root.expanduser(), mappings, errors)
 
     if errors:
         for error in errors:

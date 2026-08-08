@@ -555,7 +555,8 @@ small merged PR.
   absent state often defaults to "running", so it must be set explicitly.
 - **Do NOT delete an item's path reservation while its PR is still active.** It is tempting on a
   pause: it frees the files. It also invites another session to pick up half-reviewed work and land
-  it. Record the open PR, current owner, expiry or takeover condition, and next action. This is a
+  it. Record the open PR, current owner, nullable expiry, mandatory takeover condition, and next
+  action. This is a
   reservation, not proof that the original controller is still running.
 - **Take controller liveness down when the controller stops.** Nothing expires it. Release the item
   reservation after verified merge/content, explicit abandonment or supersession, or a named

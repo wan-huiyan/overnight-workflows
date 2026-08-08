@@ -499,8 +499,9 @@ For each item, in order:
     terminal outcome such as abandonment, supersession, or named transfer.
     Preserve a separately owned reservation while an active branch or pull
     request still claims the path; repeat its `reservation_id`, exact paths,
-    owner, state, expiry or takeover condition, release time and reason, and
-    next action rather than pretending the old controller is running.
+    owner, state, nullable expiry, mandatory takeover condition, release time
+    and reason, and next action rather than pretending the old controller is
+    running.
 
 Never merge two items simultaneously when both ultimately edit the same shared
 record. A clean merge result does not prove current content survived it.
