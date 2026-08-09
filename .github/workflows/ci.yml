@@ -11,10 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate marketplace + plugin structure
-        run: python3 .github/scripts/validate_plugins.py
+        run: python3 .github/scripts/validate_plugins.py --self-test
       - name: Leak gate (client/PII identifiers)
         run: bash scripts/leak_scan.sh .
       - name: Skill-description cap gate (Claude Code skill listing)
         run: python3 scripts/check_skill_descriptions.py . --no-color --triggers
       - name: Large-queue routing and state contract
         run: python3 scripts/check_large_queue_guidance.py --self-test
+      - name: Panel input and installed snapshot contract
+        run: python3 scripts/validate_panel_inputs.py --self-test
+      - name: Canonical publisher controls
+        run: |
+          python3 -m unittest scripts/test_publish_codex_install.py -v
+          python3 scripts/publish_codex_install.py self-test

@@ -25,7 +25,7 @@ An overnight request requires persistence, not broader authority. Define allowed
 - On agent loss or a yielded command, inspect its tool session, process, log, worktree, and journal before retrying. Do not duplicate a still-running test, generation job, paid call, or merge.
 - Re-check current remote state before every merge or deployment.
 - Keep PASS, FAIL, BLOCKED, and UNCHECKED distinct.
-- Commit all integrator-owned edits first, then review one immutable target SHA, merge-base SHA, head SHA, and deterministic diff digest. A later commit, rebase, target change, merge-base change, or digest change invalidates the affected verdict.
+- Commit all integrator-owned edits first, then review one literal target ref and its dispatch SHA, immutable merge-base SHA, head SHA, tree SHA, literal deterministic diff argv array, and diff digest. For installed-package review, also freeze the complete evidence inventory, generation, source commit/tree, and manifest digest. A later commit, rebase, target change, merge-base change, or digest change invalidates the affected verdict.
 - Treat worktree and branch inventories as evidence, not permission to clean another session's state.
 - Stop on ambiguous destructive action, missing authority, repeated invariant failure, or evidence that integration would overwrite newer work.
 
@@ -33,14 +33,28 @@ An overnight request requires persistence, not broader authority. Define allowed
 
 Report completed and incomplete units, commits and PRs actually observed, verification by layer, blocked or unchecked work, assumptions used, and the safest next action.
 
-Read the relevant packaged workflow at
-`references/workflows/<plugin>/SKILL.md`; each workflow's relative
-`references/`, `assets/`, and `scripts/` dependencies live beside that
-entrypoint. For a live index or mixed backlog with stale, partial, owner-gated,
-or shared-file items, read
+## Route through this umbrella
+
+Keep the seven packaged workflows as ordinary references. Select one route,
+then read its `WORKFLOW.md` and only the relative resources that route names:
+
+- large redesign with unmerged parallel branches → `references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md`;
+- new client-facing insight discovery from data → `references/workflows/overnight-insight-discovery/WORKFLOW.md`;
+- related issue cluster, stacked pull requests, or large mixed live queue → `references/workflows/overnight-multi-issue-implementation/WORKFLOW.md`;
+- polish an existing client deliverable → `references/workflows/overnight-review-client-delivery/WORKFLOW.md`;
+- harden a panel whose reviewer could not read its input → `references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md`;
+- scheduled fire-ASAP multi-track orchestration → `references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md`;
+- calibrate review tiers across a long independent pull-request chain → `references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md`.
+
+Each workflow's relative `references/`, `assets/`, and `scripts/` dependencies
+live beside it. For a
+live index or mixed backlog with stale, partial, owner-gated, or shared-file
+items, also read
 `references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md`
-before classification or dispatch. For a related issue cluster or stacked PR
-sequence, read
-`references/workflows/overnight-multi-issue-implementation/SKILL.md`. Translate
-Claude schedules, RemoteTrigger, model tiers, and workflow schemas into the
-goal, automation, wait, and agent facilities actually available.
+before classification or dispatch.
+
+A request to summarize, explain, audit, or review a plan without executing it
+does not enter an execution route. A route choice never grants commit, push,
+pull-request, merge, deploy, network, paid-call, or external-write authority.
+Translate Claude schedules, RemoteTrigger, model tiers, and workflow schemas
+into the goal, automation, wait, and agent facilities actually available.

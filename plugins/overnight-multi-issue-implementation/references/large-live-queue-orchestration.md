@@ -213,7 +213,7 @@ records when their task or reservation IDs happen to match.
 
 ```json
 {
-  "time": "ISO-8601",
+  "time": "2026-08-08T23:00:00Z",
   "sequence": 17,
   "schema_version": 1,
   "record_type": "controller_liveness",
@@ -221,15 +221,15 @@ records when their task or reservation IDs happen to match.
   "repository_id": "github.com/example/project",
   "controller_id": "controller-1",
   "state": "RUNNING",
-  "heartbeat_at": "ISO-8601",
-  "heartbeat_expires_at": "ISO-8601-plus-20-minutes",
+  "heartbeat_at": "2026-08-08T22:59:00Z",
+  "heartbeat_expires_at": "2026-08-08T23:19:00Z",
   "takeover_condition": "authorized successor inspects host, PID, tool session, journal, leases, logs, worktree, diff, and commits",
   "stopped_at": null,
   "stop_reason": null,
   "inspection_evidence": null,
   "stopped_by": null,
   "authorized_successor_ids": ["controller-successor"],
-  "tool_session_id": "tool-session-or-null",
+  "tool_session_id": "tool-session-1",
   "pid": 12345,
   "host": "runner-host"
 }
@@ -245,7 +245,7 @@ records when their task or reservation IDs happen to match.
 
 ```json
 {
-  "time": "ISO-8601",
+  "time": "2026-08-08T23:01:00Z",
   "sequence": 18,
   "schema_version": 1,
   "record_type": "execution_lease",
@@ -256,15 +256,15 @@ records when their task or reservation IDs happen to match.
   "attempt_id": "task-12-attempt-1",
   "lease_owner": "agent-7",
   "state": "ACTIVE",
-  "started_at": "ISO-8601",
-  "heartbeat_at": "ISO-8601",
-  "lease_expires_at": "ISO-8601",
+  "started_at": "2026-08-08T22:58:00Z",
+  "heartbeat_at": "2026-08-08T23:00:00Z",
+  "lease_expires_at": "2026-08-08T23:20:00Z",
   "takeover_condition": "inspect tool session, PID, log, worktree, diff, and commits",
   "ended_at": null,
   "end_reason": null,
-  "tool_session_id": "tool-session-or-null",
+  "tool_session_id": "tool-session-lease-1",
   "pid": 12346,
-  "command": "exact-command-or-null",
+  "command": "python3 scripts/run_task.py task-12",
   "worktree": "/absolute/path",
   "branch": "unique-branch"
 }
@@ -320,11 +320,12 @@ crash recovery on one canonical schema.
 Store path-reservation transitions durably, separately from any ephemeral
 running-session board. Each standalone transition repeats at least `run_id`,
 `repository_id`, `reservation_id`, `exact_paths`, `owner`, `state`,
-`expires_at`, `takeover_condition`, `released_at`, and `release_reason`:
+`expires_at`, `takeover_condition`, `released_at`, `release_reason`, and
+`release_reason_code`:
 
 ```json
 {
-  "time": "ISO-8601",
+  "time": "2026-08-08T23:02:00Z",
   "sequence": 19,
   "schema_version": 1,
   "record_type": "path_reservation",
@@ -338,11 +339,12 @@ running-session board. Each standalone transition repeats at least `run_id`,
     "branch": "example-branch"
   },
   "state": "ACTIVE",
-  "created_at": "ISO-8601",
+  "created_at": "2026-08-08T22:58:00Z",
   "expires_at": null,
   "takeover_condition": "PR merged or closed, then branch and path diff inspected",
   "released_at": null,
-  "release_reason": null
+  "release_reason": null,
+  "release_reason_code": null
 }
 ```
 
@@ -357,14 +359,16 @@ absolute path or a path containing `..`.
 Release only after merge plus content verification, documented abandonment or
 supersession, or a named transfer. On release, append a transition with the
 same run, repository, `reservation_id`, exact paths, owner, a non-null
-`released_at`, and a specific `release_reason`. Stopping a controller clears
+`released_at`, a specific `release_reason`, and one of the closed
+`release_reason_code` values `MERGED_VERIFIED | ABANDONED | SUPERSEDED`.
+Stopping a controller clears
 controller liveness. It does not by itself end an execution lease whose agent
 or process is still alive, and it never releases an active branch or
 pull-request path reservation.
 
 `TRANSFERRED` ends the old reservation. Its terminal transition carries a
 mandatory `replacement_reservation_id`, non-null `released_at`, and transfer
-reason. The replacement ID must differ from the old ID, belong to the same run
+reason with `release_reason_code: TRANSFER`. The replacement ID must differ from the old ID, belong to the same run
 and repository, cover the same exact paths, and have an `ACTIVE` highest-valid
 record before the old transition is accepted. For a partial transfer, release
 the old reservation and create separately named active reservations for the
@@ -378,6 +382,18 @@ referenced controller, lease, or reservation record is missing, unreadable,
 duplicates a sequence, or moves backward in sequence, mark the relevant safety
 check `UNCHECKED` and stop rather than inferring that the controller is dead,
 the lease is free, or the path is unclaimed.
+
+The validator enforces non-empty normalized record identities, canonical
+repository identities, positive process IDs, exact structured owners, and
+strict ISO-8601 UTC timestamps ending in `Z` with their required temporal
+order. Join arrays contain unique typed IDs. Reserved paths are unique,
+normalized repository-relative POSIX paths. A transfer is valid only when its
+same-run, same-repository, same-path, differently named replacement is already
+`ACTIVE` at a lower sequence and no later timestamp. These checks validate the
+journal record and its joins; they do not by themselves prove that an external
+process, tool session, pull request, or branch has the recorded real-world
+state. When that external inspection is unavailable or reports `ACTIVE` or
+`UNKNOWN`, preserve the record and report `UNCHECKED`.
 
 Do not create combined spellings such as `BLOCKED_REVIEW` in one place and
 `READY_MERGE_BLOCKED` in another. Keep the base state stable and put the detail
@@ -400,7 +416,7 @@ Append transitions to a durable JSONL journal. Each record should carry:
 
 ```json
 {
-  "time": "ISO-8601",
+  "time": "2026-08-08T23:05:00Z",
   "sequence": 24,
   "schema_version": 1,
   "record_type": "task_transition",
@@ -417,11 +433,11 @@ Append transitions to a durable JSONL journal. Each record should carry:
   "reason_code": "NONE",
   "verification": "UNCHECKED",
   "run_disposition": "ACTIVE",
-  "source_sha": "classification-source-sha",
-  "execution_base_sha": "worktree-base-sha",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "execution_base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "worktree": "/absolute/path",
   "branch": "unique-branch",
-  "head_sha": "full-sha",
+  "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
   "retry_count": 0,
   "log_path": "/durable/path/or-null",
   "output_paths": [],
@@ -473,12 +489,14 @@ or widely consumed constant, do not downgrade it because the diff looks small.
 
 For every review, record these separate identities:
 
-- `target_ref`: the destination ref observed at dispatch;
-- `target_sha`: that ref's immutable tip;
+- `target_ref`: the literal destination ref observed at dispatch;
+- `target_ref_sha_at_dispatch`: that ref's full immutable tip, repeated as
+  `target_sha`;
 - `merge_base_sha`: `git merge-base "$target_sha" "$head_sha"`;
 - `head_sha` and `head_tree_oid`;
-- `diff_digest_algorithm`, `diff_digest`, and the exact diff artifact path and
-  command.
+- `diff_digest_algorithm`, `diff_digest`, `diff_path`, and the literal
+  `diff_argv` array used to produce it. Do not store a shell-rendered command
+  string in place of the array.
 
 Require `merge_base_sha == target_sha` before final landing review. If it does
 not, reconcile the branch with the current target first. Materialize one
@@ -490,6 +508,18 @@ git diff --binary --full-index --no-color --no-ext-diff --no-textconv \
   "$TARGET_SHA" "$HEAD_SHA" -- > "$DIFF_PATH"
 shasum -a 256 "$DIFF_PATH"
 ```
+
+At acceptance, resolve `target_ref` again and require it still equals
+`target_ref_sha_at_dispatch`; reproduce the saved bytes by executing the
+recorded argv array without a shell, then compare the digest. For a panel that
+also reviews an installed package, snapshot that complete generation outside
+the live discovery root and record its canonical `sha256-size-path-v1`
+inventory digest, file count, total bytes, generation ID equal to that digest, source commit and
+tree, and install-manifest digest. Validate schema-2 panel input JSONL with
+with the canonical repository's `scripts/validate_panel_inputs.py --manifest
+<path>` before dispatch and again
+before acceptance. Missing fields or any ref, argv, diff, manifest, inventory,
+source, or generation drift invalidates the affected verdict.
 
 Do not substitute a three-dot-only diff; it can hide current-target content
 that a stale branch lacks. Then:

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "payload_format": "sha256-size-path-v1",
+  "plugins": {
+    "overnight-insight-discovery": {
+      "required_current_paths": [
+        "assets/tiebreaker_prompt_template.md"
+      ],
+      "releases": [
+        {
+          "version": "1.2.0",
+          "content_version": "1.9.0",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "1c511d34e48561121b8b1c8ba47c7a4cf7eb008f2b1747390c334f627dd46ec4",
+          "file_count": 29,
+          "total_bytes": 224124
+        },
+        {
+          "version": "1.2.1",
+          "content_version": "1.9.1",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "6b1600d1ad829e95525a1fd546a32e356b3305cb060a62e42c3452d183a2d674",
+          "file_count": 30,
+          "total_bytes": 227273
+        }
+      ]
+    }
+  }
+}

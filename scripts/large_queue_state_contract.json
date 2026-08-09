@@ -1,6 +1,16 @@
 {
   "schema_version": 1,
   "record_schema_version": 1,
+  "semantic_constraints": {
+    "timestamp_format": "iso8601-utc-z",
+    "sequence": "positive-globally-unique-append-order",
+    "identity": "nonempty-normalized",
+    "repository_id": "github-owner-repository-or-local-absolute-root",
+    "pid": "positive-integer-or-null",
+    "join_arrays": "unique-nonempty-string-identities",
+    "reservation_paths": "unique-normalized-repository-relative-posix",
+    "transfer": "valid-active-replacement-precedes-terminal-transfer"
+  },
   "records": {
     "controller_liveness": {
       "id_field": "controller_id",
@@ -76,7 +86,7 @@
         "time", "sequence", "schema_version", "record_type", "run_id",
         "repository_id", "reservation_id", "exact_paths", "owner", "state",
         "created_at", "expires_at", "takeover_condition", "released_at",
-        "release_reason"
+        "release_reason", "release_reason_code"
       ],
       "optional": ["replacement_reservation_id"],
       "types": {
@@ -88,20 +98,24 @@
         "expires_at": ["string", "null"], "takeover_condition": ["string"],
         "released_at": ["string", "null"],
         "release_reason": ["string", "null"],
+        "release_reason_code": ["string", "null"],
         "replacement_reservation_id": ["string", "null"]
       },
       "states": ["ACTIVE", "RELEASED", "TRANSFERRED"],
+      "enums": {
+        "release_reason_code": [null, "MERGED_VERIFIED", "ABANDONED", "SUPERSEDED", "TRANSFER"]
+      },
       "state_rules": {
         "ACTIVE": {
           "non_null": ["created_at", "takeover_condition"],
-          "null": ["released_at", "release_reason", "replacement_reservation_id"]
+          "null": ["released_at", "release_reason", "release_reason_code", "replacement_reservation_id"]
         },
         "RELEASED": {
-          "non_null": ["released_at", "release_reason"],
+          "non_null": ["released_at", "release_reason", "release_reason_code"],
           "null": ["replacement_reservation_id"]
         },
         "TRANSFERRED": {
-          "non_null": ["released_at", "release_reason", "replacement_reservation_id"]
+          "non_null": ["released_at", "release_reason", "release_reason_code", "replacement_reservation_id"]
         }
       }
     },
@@ -135,6 +149,7 @@
       "enums": {
         "classification_state": ["EXECUTABLE", "CONDITIONAL", "OWNER_BLOCKED", "AUTHORITY_BLOCKED", "STALE_DONE", "SUPERSEDED", "EXCLUDED", "UNCERTAIN"],
         "task_state": ["QUEUED", "RUNNING", "REVIEW", "READY", "BLOCKED", "FAILED", "MERGED", "SKIPPED"],
+        "reason_code": ["OWNER", "AUTHORITY", "EXISTING_PR", "COLLISION", "REVIEW", "AGENT_FAILURE", "TIME", "NONE"],
         "verification": ["PASS", "FAIL", "UNCHECKED", "NOT_APPLICABLE"],
         "run_disposition": ["ACTIVE", "TERMINAL"]
       },

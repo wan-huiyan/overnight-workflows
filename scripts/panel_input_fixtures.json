@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "omission_cases": [
+    {"name": "missing_target_ref", "path": ["repositories", "global", "target_ref"]},
+    {"name": "missing_target_ref_sha", "path": ["repositories", "global", "target_ref_sha_at_dispatch"]},
+    {"name": "missing_diff_argv", "path": ["repositories", "global", "diff_argv"]},
+    {"name": "missing_diff_digest", "path": ["repositories", "global", "diff_digest"]},
+    {"name": "missing_inventory_path", "path": ["installed", "inventory_path"]},
+    {"name": "missing_inventory_digest", "path": ["installed", "inventory_sha256"]},
+    {"name": "missing_inventory_count", "path": ["installed", "file_count"]},
+    {"name": "missing_inventory_bytes", "path": ["installed", "total_bytes"]},
+    {"name": "missing_generation", "path": ["installed", "generation_id"]},
+    {"name": "missing_source_commit", "path": ["installed", "source_commit"]},
+    {"name": "missing_source_tree", "path": ["installed", "source_tree"]},
+    {"name": "missing_manifest_digest", "path": ["installed", "install_manifest_sha256"]}
+  ],
+  "drift_cases": [
+    {"name": "target_ref_drift", "mutation": "target_ref", "expect": "target_ref no longer resolves"},
+    {"name": "diff_argv_drift", "mutation": "diff_argv", "expect": "diff_argv must equal"},
+    {"name": "diff_digest_drift", "mutation": "diff_digest", "expect": "saved diff digest differs"},
+    {"name": "inventory_digest_drift", "mutation": "inventory_digest", "expect": "inventory digest differs"},
+    {"name": "inventory_count_drift", "mutation": "inventory_count", "expect": "inventory file_count differs"},
+    {"name": "inventory_bytes_drift", "mutation": "inventory_bytes", "expect": "inventory total_bytes differs"},
+    {"name": "generation_drift", "mutation": "generation", "expect": "generation_id must be"},
+    {"name": "source_commit_drift", "mutation": "source_commit", "expect": "source_tree does not match"},
+    {"name": "source_tree_drift", "mutation": "source_tree", "expect": "source_tree does not match"},
+    {"name": "snapshot_byte_drift", "mutation": "snapshot_byte", "expect": "inventory digest differs"}
+  ]
+}

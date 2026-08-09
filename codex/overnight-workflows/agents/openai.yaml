@@ -1,4 +1,4 @@
 interface:
   display_name: "Overnight Workflows"
-  short_description: "Run durable unattended multi-stage workflows"
-  default_prompt: "Use $overnight-workflows to design this unattended workflow with recovery gates."
+  short_description: "Route durable unattended workflows safely"
+  default_prompt: "Use $overnight-workflows to route this unattended request, record separate authority grants, and design its recovery gates."

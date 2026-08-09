@@ -1,7 +1,7 @@
 {
   "name": "overnight-insight-discovery",
   "description": "Overnight autonomous B-vs-C parallel insight discovery that surfaces genuinely ah-ha findings from data, with a cohort-conditional novelty gate, an observational-analysis validity gate (composition / leak / anchor-timing / marker-vs-lever), adaptive tuning, and an agent-review-panel loop.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "wan-huiyan"
   },

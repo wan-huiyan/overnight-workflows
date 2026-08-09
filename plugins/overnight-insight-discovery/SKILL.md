@@ -16,10 +16,16 @@ description: |
   exploratory-data-analysis), single-track LLM exploration (use deep-research), or work that
   needs user input mid-stream.
 author: wan-huiyan + Claude Code
-version: 1.9.0
-date: 2026-08-06
+version: 1.9.1
+date: 2026-08-09
 
 # Changelog
+# 1.9.1 (2026-08-09 — complete tie-breaker resource and Phase F authority)
+#   Adds the required assets/tiebreaker_prompt_template.md used by the cross-model
+#   tie-breaker contract. Phase F now names only repository-local adaptable tools
+#   and opens a pull request only when that separate authority was recorded. The
+#   distributable plugin release is 1.2.1; this content counter is intentionally
+#   independent and records changes to the workflow text itself.
 # 1.9.0 (2026-08-06 — plugin-install path resolution)
 #   The Phase 0.Y toolchain pre-flight decided whether this skill was installed by
 #   testing one path, ~/.claude/skills/overnight-insight-discovery/SKILL.md. A plugin
@@ -763,6 +769,7 @@ ranked table.
 - `assets/canonical_numbers_template.md` — canonical-numbers markdown
 - `assets/morning_summary_template.md` — 7-section morning summary
 - `assets/pr_body_template.md` — PR body with DO NOT MERGE banner
+- `assets/tiebreaker_prompt_template.md` — bounded external-model tie-breaker contract
 
 ## Scripts
 
@@ -779,6 +786,12 @@ Patterns that survived the first production run are canonical here.
 
 ## Version history
 
+- **v1.9.1** (2026-08-09, plugin release 1.2.1) — Adds the required
+  `assets/tiebreaker_prompt_template.md` resource used by the cross-model
+  tie-breaker and corrects Phase F so pull-request creation is conditional on
+  a separately recorded grant. The plugin package version and this workflow
+  content version are intentionally independent counters; both change here
+  because both the distributed payload and the workflow text changed.
 - **v1.9.0** (2026-08-06, plugin-install path resolution) — The Phase 0.Y
   toolchain pre-flight decided whether this skill was installed by testing one
   path, `~/.claude/skills/overnight-insight-discovery/SKILL.md`. A plugin

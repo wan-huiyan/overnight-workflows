@@ -10,11 +10,16 @@ Checks (stdlib only, no external deps):
   5. Every plugin exposes a skill: either plugins/<name>/SKILL.md, or a nested
      plugins/<name>/skills/<skill>/SKILL.md set (multi-skill plugin).
   6. Every SKILL.md frontmatter `name:` equals its containing directory name.
-  7. If a VERSION file exists: it is non-empty; and for a single-plugin repo it must
+  7. Marketplace and plugin manifest versions match.
+  8. The release ledger binds the insight plugin's functional payload and content
+     version to its distributable release identity.
+  9. If a VERSION file exists: it is non-empty; and for a single-plugin repo it must
      equal that plugin's plugin.json version (drift guard).
 
 Exit 0 = all good; exit 1 = one or more failures (printed).
 """
+import argparse
+import hashlib
 import json
 import os
 import re
@@ -23,6 +28,9 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 errors = []
 warnings = []
+RELEASE_LEDGER = os.path.join(ROOT, "scripts", "plugin_release_ledger.json")
+PAYLOAD_FORMAT = "sha256-size-path-v1"
+INSIGHT_PLUGIN = "overnight-insight-discovery"
 
 
 def err(m): errors.append(m)
@@ -58,7 +66,156 @@ def load_json(path):
         return None
 
 
+def frontmatter_version(skill_md):
+    """Return the `version:` value from a SKILL.md frontmatter block."""
+    try:
+        with open(skill_md, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        return None, f"cannot read {skill_md}: {e}"
+    end = text.find("\n---", 3)
+    if not text.startswith("---") or end == -1:
+        return None, f"{skill_md}: missing closed YAML frontmatter"
+    match = re.search(r"^version:\s*(.+?)\s*$", text[3:end], re.MULTILINE)
+    if not match:
+        return None, f"{skill_md}: no `version:` in frontmatter"
+    return match.group(1).strip().strip('"').strip("'"), None
+
+
+def payload_identity(plugin_dir):
+    """Return the exact sha256-size-path-v1 aggregate for a plugin tree."""
+    entries = []
+    for base, dirnames, filenames in os.walk(plugin_dir, followlinks=False):
+        for name in sorted(dirnames + filenames):
+            path = os.path.join(base, name)
+            relative = os.path.relpath(path, plugin_dir).replace(os.sep, "/")
+            if os.path.islink(path):
+                raise ValueError(f"plugin payload contains symlink: {relative}")
+        for name in filenames:
+            path = os.path.join(base, name)
+            relative = os.path.relpath(path, plugin_dir).replace(os.sep, "/")
+            if "\t" in relative or "\n" in relative or "\r" in relative:
+                raise ValueError(f"plugin payload has unsafe path: {relative!r}")
+            if not os.path.isfile(path):
+                raise ValueError(f"plugin payload member is not regular: {relative}")
+            with open(path, "rb") as handle:
+                content = handle.read()
+            entries.append((relative, content))
+    entries.sort(key=lambda item: item[0].encode("utf-8"))
+    inventory = b"".join(
+        hashlib.sha256(content).hexdigest().encode("ascii")
+        + b"\t"
+        + str(len(content)).encode("ascii")
+        + b"\t"
+        + relative.encode("utf-8")
+        + b"\n"
+        for relative, content in entries
+    )
+    return {
+        "payload_sha256": hashlib.sha256(inventory).hexdigest(),
+        "file_count": len(entries),
+        "total_bytes": sum(len(content) for _, content in entries),
+    }
+
+
+def release_identity_errors(
+    plugin_ledger, actual_version, actual_content_version, actual_payload
+):
+    found = []
+    releases = plugin_ledger.get("releases") if isinstance(plugin_ledger, dict) else None
+    if not isinstance(releases, list) or len(releases) < 2:
+        return ["release ledger needs at least a fixed base and current release"]
+    versions = [release.get("version") for release in releases if isinstance(release, dict)]
+    if len(versions) != len(releases) or len(set(versions)) != len(versions):
+        found.append("release ledger versions must be present and unique")
+        return found
+    current = releases[-1]
+    prior = releases[-2]
+    if current.get("version") != actual_version:
+        found.append("current plugin version is not the release ledger's latest version")
+    if current.get("content_version") != actual_content_version:
+        found.append("current SKILL content version is not bound to the latest release")
+    for key in ("payload_sha256", "file_count", "total_bytes"):
+        if current.get(key) != actual_payload.get(key):
+            found.append(f"current plugin payload {key} differs from release ledger")
+    if prior.get("version") == current.get("version"):
+        found.append("functional payload release did not change plugin version")
+    if prior.get("content_version") == current.get("content_version"):
+        found.append("functional payload release did not change SKILL content version")
+    if prior.get("payload_sha256") == current.get("payload_sha256"):
+        found.append("release ledger does not record a functional payload change")
+    return found
+
+
+def validate_release_ledger(run_self_test=False):
+    ledger = load_json(RELEASE_LEDGER)
+    if ledger is None:
+        return
+    if ledger.get("schema_version") != 1:
+        err("release ledger must declare schema_version 1")
+    if ledger.get("payload_format") != PAYLOAD_FORMAT:
+        err(f"release ledger payload_format must be {PAYLOAD_FORMAT}")
+    plugins = ledger.get("plugins")
+    if not isinstance(plugins, dict) or set(plugins) != {INSIGHT_PLUGIN}:
+        err(f"release ledger must contain exactly {INSIGHT_PLUGIN}")
+        return
+    plugin_ledger = plugins[INSIGHT_PLUGIN]
+    required_paths = plugin_ledger.get("required_current_paths") if isinstance(plugin_ledger, dict) else None
+    if required_paths != ["assets/tiebreaker_prompt_template.md"]:
+        err("release ledger must name the required functional payload path")
+        return
+    releases = plugin_ledger.get("releases") if isinstance(plugin_ledger, dict) else None
+    if not isinstance(releases, list) or len(releases) < 2:
+        err("release ledger needs at least two releases")
+        return
+    base = releases[-2]
+    if base.get("source_commit") != "3df43c37ecdf8d62343907b49b28f0fbb1bf4338":
+        err("release ledger prior release must be tied to the fixed panel target")
+    plugin_dir = os.path.join(ROOT, "plugins", INSIGHT_PLUGIN)
+    for relative in required_paths:
+        required_path = os.path.join(plugin_dir, *relative.split("/"))
+        if os.path.islink(required_path) or not os.path.isfile(required_path):
+            err(f"required release payload is missing or unsafe: {relative}")
+    manifest = load_json(os.path.join(plugin_dir, ".claude-plugin", "plugin.json"))
+    if manifest is None:
+        return
+    content_version, content_error = frontmatter_version(os.path.join(plugin_dir, "SKILL.md"))
+    if content_error:
+        err(content_error)
+        return
+    try:
+        payload = payload_identity(plugin_dir)
+    except (OSError, ValueError) as exc:
+        err(str(exc))
+        return
+    baseline_errors = release_identity_errors(
+        plugin_ledger, manifest.get("version"), content_version, payload
+    )
+    for message in baseline_errors:
+        err(message)
+
+    if run_self_test and not baseline_errors:
+        drifted = dict(payload)
+        digest = payload["payload_sha256"]
+        drifted["payload_sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
+        if not release_identity_errors(
+            plugin_ledger, manifest.get("version"), content_version, drifted
+        ):
+            err("release ledger one-byte identity-drift negative control did not fail")
+        if not release_identity_errors(
+            plugin_ledger, base.get("version"), content_version, payload
+        ):
+            err("release ledger unchanged-version negative control did not fail")
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run release-identity negative controls",
+    )
+    args = parser.parse_args()
     mkt_path = os.path.join(ROOT, ".claude-plugin", "marketplace.json")
     if not os.path.isfile(mkt_path):
         err(".claude-plugin/marketplace.json not found")
@@ -71,6 +228,7 @@ def main():
             err(f"marketplace.json missing top-level `{key}`")
     plugins = mkt.get("plugins", [])
     registered = {}
+    marketplace_entries = {}
     for p in plugins:
         name, source = p.get("name"), p.get("source", "")
         if not name or not source:
@@ -79,6 +237,7 @@ def main():
         if name in registered:
             err(f"plugin `{name}` registered more than once in marketplace.json")
         registered[name] = source.lstrip("./")
+        marketplace_entries[name] = p
 
     plugins_dir = os.path.join(ROOT, "plugins")
     on_disk = set()
@@ -107,6 +266,11 @@ def main():
                     err(f"{pj}: name `{pjd.get('name')}` != marketplace entry `{name}`")
                 if not pjd.get("version"):
                     warn(f"{pj}: no version field")
+                elif pjd.get("version") != marketplace_entries[name].get("version"):
+                    err(
+                        f"{pj}: version `{pjd.get('version')}` != marketplace "
+                        f"version `{marketplace_entries[name].get('version')}`"
+                    )
         # skill presence: flat SKILL.md or nested skills/*/SKILL.md
         flat = os.path.join(pdir, "SKILL.md")
         skills_dir = os.path.join(pdir, "skills")
@@ -125,6 +289,8 @@ def main():
                     check_skill(sm)
         else:
             err(f"{rel}: no SKILL.md and no skills/ directory")
+
+    validate_release_ledger(args.self_test)
 
     # VERSION drift guard
     vpath = os.path.join(ROOT, "VERSION")

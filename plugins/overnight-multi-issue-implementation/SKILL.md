@@ -675,9 +675,10 @@ Before proposing merge to user:
    as the tier rubric above. Run PR1 + PR2 reviews in parallel (single message,
    multiple Agent calls). Commit every integrator-owned tracker, release-note,
    index, and handoff edit first; push only when authorized. Require a clean
-   worktree and record `target_ref`, its immutable `target_sha`,
+   worktree and record literal `target_ref`, `target_ref_sha_at_dispatch`, its
+   repeated immutable `target_sha`,
    `merge_base_sha`, `head_sha`, `head_tree_oid`, the diff artifact path,
-   SHA-256 digest, and exact command. Require `merge_base_sha == target_sha`
+   SHA-256 digest, and literal argv array. Require `merge_base_sha == target_sha`
    before review. Materialize the deterministic two-tree diff with the same
    contract used by the large-queue reference, then hash the file:
 
