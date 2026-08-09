@@ -523,12 +523,44 @@ At acceptance, resolve `target_ref` again and require it still equals
 recorded argv array without a shell, then compare the digest. For a panel that
 also reviews an installed package, snapshot that complete generation outside
 the live discovery root and record its canonical `sha256-size-path-v1`
-inventory digest, file count, total bytes, generation ID equal to that digest, source commit and
-tree, and install-manifest digest. Validate schema-2 panel input JSONL with
-with the canonical repository's `scripts/validate_panel_inputs.py --manifest
-<path>` before dispatch and again
-before acceptance. Missing fields or any ref, argv, diff, manifest, inventory,
-source, or generation drift invalidates the affected verdict.
+inventory digest, file count, total bytes, generation ID equal to that digest,
+source commit and tree, and install-manifest digest.
+
+Resolve the panel validator from the exact `SKILL.md` path in the active
+loader record; do not scan discovery roots or guess the newest cache. An
+installed umbrella carries the validator beside this workflow. A canonical
+checkout may use its repository copy only when the active skill path is exactly
+`<repository>/codex/overnight-workflows/SKILL.md`:
+
+```bash
+ACTIVE_OVERNIGHT_SKILL="/absolute/path/from-active-loader-record/SKILL.md"
+PANEL_MANIFEST="/absolute/path/panel-input.jsonl"
+if [ "$(basename "$ACTIVE_OVERNIGHT_SKILL")" != "SKILL.md" ] || \
+   [ -L "$ACTIVE_OVERNIGHT_SKILL" ] || [ ! -f "$ACTIVE_OVERNIGHT_SKILL" ]; then
+  echo "UNCHECKED: active overnight-workflows loader path is invalid" >&2
+  exit 2
+fi
+OVERNIGHT_WORKFLOWS_ROOT="$(cd "$(dirname "$ACTIVE_OVERNIGHT_SKILL")" && pwd -P)"
+BUNDLED_PANEL_VALIDATOR="$OVERNIGHT_WORKFLOWS_ROOT/references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py"
+CANONICAL_REPOSITORY="$(cd "$OVERNIGHT_WORKFLOWS_ROOT/../.." && pwd -P)"
+
+if [ -f "$BUNDLED_PANEL_VALIDATOR" ]; then
+  PANEL_VALIDATOR="$BUNDLED_PANEL_VALIDATOR"
+elif [ "$OVERNIGHT_WORKFLOWS_ROOT" = "$CANONICAL_REPOSITORY/codex/overnight-workflows" ] && \
+     [ -f "$CANONICAL_REPOSITORY/scripts/validate_panel_inputs.py" ]; then
+  PANEL_VALIDATOR="$CANONICAL_REPOSITORY/scripts/validate_panel_inputs.py"
+else
+  echo "UNCHECKED: active overnight-workflows validator is unavailable" >&2
+  exit 2
+fi
+
+python3 -B "$PANEL_VALIDATOR" --self-test --manifest "$PANEL_MANIFEST"
+```
+
+Run that schema-2 validation before dispatch and again before acceptance. A
+missing validator or dependency, a failed self-test, missing fields, or any
+ref, argv, diff, manifest, inventory, source, or generation drift invalidates
+the affected verdict.
 
 Do not substitute a three-dot-only diff; it can hide current-target content
 that a stale branch lacks. Then:

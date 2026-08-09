@@ -52,6 +52,9 @@ live index or mixed backlog with stale, partial, owner-gated, or shared-file
 items, also read
 `references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md`
 before classification or dispatch.
+That reference's mandatory panel-input gate uses its bundled read-only
+`scripts/validate_panel_inputs.py`; resolve it from this active umbrella root
+and never substitute the unbundled mutating publisher.
 
 A request to summarize, explain, audit, or review a plan without executing it
 does not enter an execution route. A route choice never grants commit, push,

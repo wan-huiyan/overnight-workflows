@@ -22,7 +22,6 @@ import time
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
-
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 SKILL = ROOT / "plugins/overnight-multi-issue-implementation/SKILL.md"
@@ -40,10 +39,19 @@ STATE_CONTRACT = ROOT / "scripts/large_queue_state_contract.json"
 STATE_FIXTURES = ROOT / "scripts/large_queue_state_fixtures.json"
 ROUTING_CASES = ROOT / "scripts/eval/overnight-workflow-routing-cases.json"
 RESOURCE_DIRS = ("references", "assets", "scripts")
-EXPECTED_INSTALL_COUNT = 38
+EXPECTED_INSTALL_COUNT = 41
 INSTALL_IDENTITY_FRAMING = "overnight-workflows-install-input-v1"
 INSTALL_INVENTORY_FORMAT = "sha256-size-path-v1"
 EXPECTED_CODEX_VERSION = "0.147.0"
+MULTI_ISSUE_PLUGIN = "overnight-multi-issue-implementation"
+PANEL_VALIDATOR_RESOURCES = (
+    "install_inventory.py",
+    "panel_input_fixtures.json",
+    "validate_panel_inputs.py",
+)
+PANEL_VALIDATOR_INSTALLED_DIRECTORY = (
+    "references/workflows/overnight-multi-issue-implementation/scripts"
+)
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
     r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?Z$"
@@ -156,10 +164,6 @@ PROJECT_LOCAL_REFERENCES = {
     (
         "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
         "scripts/run_task.py",
-    ),
-    (
-        "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
-        "scripts/validate_panel_inputs.py",
     ),
 }
 
@@ -281,6 +285,16 @@ def expected_install_mappings() -> list[dict[str, str]]:
                         ),
                     }
                 )
+        if plugin == MULTI_ISSUE_PLUGIN:
+            for resource_name in PANEL_VALIDATOR_RESOURCES:
+                mappings.append(
+                    {
+                        "canonical_source": f"scripts/{resource_name}",
+                        "installed_path": (
+                            f"{PANEL_VALIDATOR_INSTALLED_DIRECTORY}/{resource_name}"
+                        ),
+                    }
+                )
     for mapping in mappings:
         source = ROOT / mapping["canonical_source"]
         if source.is_file() and not source.is_symlink():
@@ -397,6 +411,10 @@ def check_canonical_dependency_closure(
         (ROOT / mapping["canonical_source"]).resolve(): mapping["installed_path"]
         for mapping in mappings
     }
+    installed_to_source = {
+        mapping["installed_path"]: (ROOT / mapping["canonical_source"]).resolve()
+        for mapping in mappings
+    }
     installed_files = set(source_to_installed.values())
     for mapping in mappings:
         source = ROOT / mapping["canonical_source"]
@@ -464,25 +482,36 @@ def check_canonical_dependency_closure(
         for target in package_textual_targets(text):
             if (relative_source, target) in PROJECT_LOCAL_REFERENCES:
                 continue
-            canonical_target = (canonical_package_root / target).resolve()
-            if not canonical_target.is_file():
-                errors.append(
-                    f"canonical textual dependency is missing: "
-                    f"{relative_source} -> {target}"
-                )
+            logical_target = (
+                target
+                if target.startswith("references/workflows/")
+                else f"{installed_package_root}/{target}"
+            )
+            canonical_package_target = (canonical_package_root / target).resolve()
+            if canonical_package_target.is_file():
+                expected_target = source_to_installed.get(canonical_package_target)
+                if expected_target is None:
+                    errors.append(
+                        f"canonical textual dependency is not in install manifest: "
+                        f"{relative_source} -> {target}"
+                    )
+                elif expected_target != logical_target:
+                    errors.append(
+                        f"installed textual dependency changes target: "
+                        f"{mapping['installed_path']} -> {target}; "
+                        f"expected {expected_target}, got {logical_target}"
+                    )
                 continue
-            expected_target = source_to_installed.get(canonical_target)
-            logical_target = f"{installed_package_root}/{target}"
-            if expected_target is None:
+            canonical_target = installed_to_source.get(logical_target)
+            if canonical_target is None:
                 errors.append(
                     f"canonical textual dependency is not in install manifest: "
                     f"{relative_source} -> {target}"
                 )
-            elif expected_target != logical_target:
+            elif not canonical_target.is_file():
                 errors.append(
-                    f"installed textual dependency changes target: "
-                    f"{mapping['installed_path']} -> {target}; "
-                    f"expected {expected_target}, got {logical_target}"
+                    f"canonical textual dependency is missing: "
+                    f"{relative_source} -> {target}"
                 )
 
 
@@ -528,11 +557,69 @@ def check_disk_markdown_dependencies(
                     target,
                 ) in PROJECT_LOCAL_REFERENCES:
                     continue
-                if not (plugin_root / target).is_file():
+                installed_target = (
+                    installed_root / target
+                    if target.startswith("references/workflows/")
+                    else plugin_root / target
+                )
+                if not installed_target.is_file():
                     errors.append(
                         f"installed textual dependency is missing: "
                         f"{relative} -> {target}"
                     )
+
+
+def check_installed_panel_validator(
+    installed_root: Path, errors: list[str]
+) -> None:
+    """Run the bundled read-only validator without writing bytecode into the skill."""
+    scripts_root = installed_root.joinpath(
+        *PurePosixPath(PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts
+    )
+    publisher = scripts_root / "publish_codex_install.py"
+    if publisher.exists() or publisher.is_symlink():
+        errors.append("installed umbrella must not contain the mutating publisher")
+    missing = [
+        resource
+        for resource in PANEL_VALIDATOR_RESOURCES
+        if not (scripts_root / resource).is_file()
+        or (scripts_root / resource).is_symlink()
+    ]
+    if missing:
+        errors.append(
+            "installed panel validator is missing required resources: "
+            + ",".join(missing)
+        )
+        return
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(scripts_root / "validate_panel_inputs.py"),
+                "--self-test",
+            ],
+            cwd=str(scripts_root),
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        errors.append(f"installed panel validator self-test could not run: {exc}")
+        return
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        errors.append(
+            "installed panel validator self-test failed"
+            + (f": {detail[:1000]}" if detail else "")
+        )
+    if list(installed_root.rglob("__pycache__")):
+        errors.append("installed panel validator self-test wrote bytecode into the package")
 
 
 def check_installed_inventory(
@@ -586,6 +673,8 @@ def check_installed_inventory(
         if installed_identity != canonical_identity:
             errors.append("installed umbrella aggregate identity differs from canonical")
     check_disk_markdown_dependencies(installed_root, expected_paths, errors)
+    if len(errors) == starting_error_count:
+        check_installed_panel_validator(installed_root, errors)
 
 
 def value_type(value: Any) -> str:
@@ -2032,6 +2121,64 @@ def run_install_negative_controls(
             errors.append("self-test baseline install failed: " + " | ".join(baseline))
             return
 
+        validator_scripts = installed_root.joinpath(
+            *PurePosixPath(PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts
+        )
+        if (validator_scripts / "publish_codex_install.py").exists():
+            errors.append("self-test baseline installed the mutating publisher")
+            return
+        for resource_name in PANEL_VALIDATOR_RESOURCES:
+            resource = validator_scripts / resource_name
+            canonical = ROOT / "scripts" / resource_name
+            canonical_before = canonical.read_bytes()
+            original = resource.read_bytes()
+            original_mode = stat.S_IMODE(os.lstat(resource).st_mode)
+
+            resource.unlink()
+            missing_errors: list[str] = []
+            check_installed_inventory(installed_root, mappings, missing_errors)
+            if not any(
+                "installed umbrella is missing" in item and resource_name in item
+                for item in missing_errors
+            ):
+                errors.append(
+                    f"missing installed panel resource control did not fail: {resource_name}"
+                )
+            runtime_missing_errors: list[str] = []
+            check_installed_panel_validator(installed_root, runtime_missing_errors)
+            if not runtime_missing_errors:
+                errors.append(
+                    f"missing panel validator dependency still executed: {resource_name}"
+                )
+            shutil.copy2(canonical, resource)
+
+            drifted = bytes([original[0] ^ 1]) + original[1:]
+            os.chmod(resource, original_mode | stat.S_IWUSR, follow_symlinks=False)
+            resource.write_bytes(drifted)
+            os.chmod(resource, original_mode, follow_symlinks=False)
+            drift_errors: list[str] = []
+            check_installed_inventory(installed_root, mappings, drift_errors)
+            if not any(
+                "differs from canonical source" in item and resource_name in item
+                for item in drift_errors
+            ):
+                errors.append(
+                    f"one-byte installed panel resource drift did not fail: {resource_name}"
+                )
+            runtime_drift_errors: list[str] = []
+            check_installed_panel_validator(installed_root, runtime_drift_errors)
+            if not runtime_drift_errors:
+                errors.append(
+                    f"one-byte panel validator dependency drift still executed: {resource_name}"
+                )
+            os.chmod(resource, original_mode | stat.S_IWUSR, follow_symlinks=False)
+            resource.write_bytes(original)
+            os.chmod(resource, original_mode, follow_symlinks=False)
+            if canonical.read_bytes() != canonical_before:
+                errors.append(
+                    f"installed panel resource control mutated canonical source: {resource_name}"
+                )
+
         required = installed_root / (
             "references/workflows/overnight-insight-discovery/assets/"
             "tiebreaker_prompt_template.md"
@@ -2245,12 +2392,17 @@ def named_self_test_outcomes(
             "install.missing_markdown_reference",
             "install.missing_markdown_autolink",
             "install.nested_skill_exposure",
+            "install.panel_validator.self_test",
+            "install.panel_validator.mutating_publisher_absent",
             "install.symlink",
             "routing.unrelated_prompt",
             "routing.wrong_route",
             "routing.execution_authority",
         }
     )
+    for resource_name in PANEL_VALIDATOR_RESOURCES:
+        names.add(f"install.panel_validator.missing.{resource_name}")
+        names.add(f"install.panel_validator.one_byte_drift.{resource_name}")
     for case in routing_cases.get("positive", []):
         if isinstance(case, dict) and isinstance(case.get("name"), str):
             names.add(f"routing.positive.{case['name']}")
@@ -2367,6 +2519,10 @@ def main() -> int:
         "`target_ref_sha_at_dispatch`",
         "`diff_argv`",
         "`sha256-size-path-v1`",
+        "ACTIVE_OVERNIGHT_SKILL",
+        "BUNDLED_PANEL_VALIDATOR",
+        "--self-test --manifest",
+        "before dispatch and again before acceptance",
     ):
         require(reference, phrase, REFERENCE, errors)
     for where, text in ((SKILL, skill), (REFERENCE, reference)):
@@ -2456,6 +2612,26 @@ def main() -> int:
 
     installed_paths = [mapping["installed_path"] for mapping in mappings]
     canonical_sources = [mapping["canonical_source"] for mapping in mappings]
+    expected_panel_resources = {
+        f"{PANEL_VALIDATOR_INSTALLED_DIRECTORY}/{resource_name}"
+        for resource_name in PANEL_VALIDATOR_RESOURCES
+    }
+    actual_panel_resources = {
+        mapping["installed_path"]
+        for mapping in mappings
+        if mapping["installed_path"].startswith(
+            PANEL_VALIDATOR_INSTALLED_DIRECTORY + "/"
+        )
+    }
+    if actual_panel_resources != expected_panel_resources:
+        errors.append(
+            "installed panel validator must contain exactly its read-only three-file closure"
+        )
+    if any(
+        PurePosixPath(path).name == "publish_codex_install.py"
+        for path in installed_paths
+    ):
+        errors.append("install manifest must exclude the mutating publisher")
     if len(set(installed_paths)) != len(installed_paths):
         errors.append("install manifest repeats an installed path")
     if len(set(canonical_sources)) != len(canonical_sources):

@@ -15,7 +15,10 @@ import sys
 import tempfile
 from typing import Any, Optional
 
-from publish_codex_install import INVENTORY_FORMAT, PublicationError, build_inventory
+if __package__:
+    from .install_inventory import INVENTORY_FORMAT, PublicationError, build_inventory
+else:
+    from install_inventory import INVENTORY_FORMAT, PublicationError, build_inventory
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts/panel_input_fixtures.json"

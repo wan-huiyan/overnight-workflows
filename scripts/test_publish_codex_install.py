@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -20,8 +21,10 @@ from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import install_inventory as inventory_codec  # noqa: E402
 import publish_codex_install as publisher  # noqa: E402
 import check_large_queue_guidance as guidance  # noqa: E402
+import validate_panel_inputs as panel_validator  # noqa: E402
 
 
 def run(command: list[str], cwd: Path) -> str:
@@ -377,6 +380,38 @@ class PublisherHarness:
 
 
 class InventoryTests(unittest.TestCase):
+    def test_publisher_and_panel_validator_share_exact_codec_objects(self) -> None:
+        for name in (
+            "INVENTORY_FORMAT",
+            "PublicationError",
+            "InventoryEntry",
+            "Inventory",
+            "serialize_inventory",
+            "parse_inventory",
+            "build_inventory",
+        ):
+            with self.subTest(consumer="publisher", name=name):
+                self.assertIs(getattr(publisher, name), getattr(inventory_codec, name))
+        for name in ("INVENTORY_FORMAT", "PublicationError", "build_inventory"):
+            with self.subTest(consumer="panel validator", name=name):
+                self.assertIs(getattr(panel_validator, name), getattr(inventory_codec, name))
+
+        with self.assertRaises(inventory_codec.PublicationError) as raised:
+            publisher.parse_inventory(b"not-canonical")
+        self.assertIs(type(raised.exception), inventory_codec.PublicationError)
+
+    def test_namespace_import_consumers_share_the_namespace_codec(self) -> None:
+        namespace_codec = importlib.import_module("scripts.install_inventory")
+        namespace_publisher = importlib.import_module("scripts.publish_codex_install")
+        namespace_panel = importlib.import_module("scripts.validate_panel_inputs")
+        self.assertIs(
+            namespace_publisher.PublicationError,
+            namespace_codec.PublicationError,
+        )
+        self.assertIs(namespace_publisher.build_inventory, namespace_codec.build_inventory)
+        self.assertIs(namespace_panel.PublicationError, namespace_codec.PublicationError)
+        self.assertIs(namespace_panel.build_inventory, namespace_codec.build_inventory)
+
     def test_inventory_codec_name_matches_checker_and_committed_manifest(self) -> None:
         manifest = json.loads(
             (
@@ -622,13 +657,17 @@ class PublicationTests(unittest.TestCase):
             canonical_root = Path(__file__).resolve().parents[1]
             repository = root / "repository"
             repository.mkdir()
-            tracked = subprocess.run(
-                ["git", "ls-files", "-z"],
-                cwd=canonical_root,
-                check=True,
-                stdout=subprocess.PIPE,
-            ).stdout.split(b"\0")
-            for encoded_path in tracked:
+            tracked = set(
+                subprocess.run(
+                    ["git", "ls-files", "-z"],
+                    cwd=canonical_root,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout.split(b"\0")
+            )
+            # The extraction is testable before its new module is staged.
+            tracked.add(b"scripts/install_inventory.py")
+            for encoded_path in sorted(tracked):
                 if not encoded_path:
                     continue
                 relative = Path(os.fsdecode(encoded_path))

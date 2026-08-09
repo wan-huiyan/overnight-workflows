@@ -63,9 +63,9 @@
           "version": "1.5.0",
           "content_version": "1.5.0",
           "source_commit": "working-tree-release",
-          "payload_sha256": "d90a351fb96216f0fb7a764dee9e2f7d273aba8597dbffafee2df1ce3f57d361",
+          "payload_sha256": "707872552a7e6a33899e59115911e4dd1412435d92d1cfd2b842210bf32bd9c1",
           "file_count": 3,
-          "total_bytes": 92942
+          "total_bytes": 94421
         }
       ]
     },

@@ -4,7 +4,7 @@
   "layout": "per-workflow-package",
   "input_identity": {
     "format": "overnight-workflows-install-input-v1",
-    "digest": "4d501eb3ebd5b1910833f1d3b3ac8ca85d7f582e57ba975861ef702cb7a64e13"
+    "digest": "f5347a614141e6c53990d02713e71b38937363ea2e931d3cc582b59e7ec02c9a"
   },
   "evidence_inventory_format": "sha256-size-path-v1",
   "loader_contract": {
@@ -17,7 +17,7 @@
     {
       "canonical_source": "codex/overnight-workflows/SKILL.md",
       "installed_path": "SKILL.md",
-      "source_sha256": "e979e088276165ffce6e530161ccb4095e0ec8a2968df1ec31364b6d034d69d4"
+      "source_sha256": "2f6f17c097dc754d0f9131b534db299191491bb0fb7230a9ce9694ef8f334180"
     },
     {
       "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
@@ -185,7 +185,22 @@
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
-      "source_sha256": "4a44accd82a5d7bcbf2c102816fa264d28f9162890a02e399f82d86890c52d39"
+      "source_sha256": "4cfbd8f270afb590b22e845db07814c397736100e5285ebc35e41a8f21c52d78"
+    },
+    {
+      "canonical_source": "scripts/install_inventory.py",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/install_inventory.py",
+      "source_sha256": "ba011e75986235655cc957f0ce7ad6ecedd40843c3cb822976ffbd0606dfd6af"
+    },
+    {
+      "canonical_source": "scripts/panel_input_fixtures.json",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/panel_input_fixtures.json",
+      "source_sha256": "727cc75282823c83555a47145a253ca9a2ba81c036a3fc429a9eeed4538b39d6"
+    },
+    {
+      "canonical_source": "scripts/validate_panel_inputs.py",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py",
+      "source_sha256": "6b4bd91be108258fa52e6b04b535170de5b40235073e947271887c5a98d14597"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
