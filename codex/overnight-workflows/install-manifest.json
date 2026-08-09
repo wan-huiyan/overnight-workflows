@@ -4,7 +4,7 @@
   "layout": "per-workflow-package",
   "input_identity": {
     "format": "overnight-workflows-install-input-v1",
-    "digest": "f5347a614141e6c53990d02713e71b38937363ea2e931d3cc582b59e7ec02c9a"
+    "digest": "b52044e8e256c0b3264ef17f4bf90209daf6ea8821b451835d2b8a65dc2862a2"
   },
   "evidence_inventory_format": "sha256-size-path-v1",
   "loader_contract": {
@@ -17,7 +17,7 @@
     {
       "canonical_source": "codex/overnight-workflows/SKILL.md",
       "installed_path": "SKILL.md",
-      "source_sha256": "2f6f17c097dc754d0f9131b534db299191491bb0fb7230a9ce9694ef8f334180"
+      "source_sha256": "e88e46ba2f0ea5241141b8397c0d9fac7e7ec877023f19845514da0ca8037535"
     },
     {
       "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
@@ -195,18 +195,28 @@
     {
       "canonical_source": "scripts/panel_input_fixtures.json",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/panel_input_fixtures.json",
-      "source_sha256": "727cc75282823c83555a47145a253ca9a2ba81c036a3fc429a9eeed4538b39d6"
+      "source_sha256": "4a4ff2a4f21fc3bf13c08988520b3ccfe3be064bf3748d5c0fc651978b708602"
     },
     {
       "canonical_source": "scripts/validate_panel_inputs.py",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py",
-      "source_sha256": "6b4bd91be108258fa52e6b04b535170de5b40235073e947271887c5a98d14597"
+      "source_sha256": "061edd8f596c5ad0dc487da8a6f6ba6bd8adc1490075ef684794c86a3ea298a0"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
       "installed_path": "references/workflows/overnight-review-client-delivery/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery/WORKFLOW.md",
-      "source_sha256": "4cb33e1e288820807dc6fd67bc7bba35c25d6a97680eb1f4bee778f7d6baa64b"
+      "source_sha256": "f98e54a6ec4d27db3195a57e993ecb261b2a995933e96a6627ff2f172a8176f1"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/scripts/action_authority.py",
+      "installed_path": "references/workflows/overnight-review-client-delivery/scripts/action_authority.py",
+      "source_sha256": "b9ec134926fb7419eefacc754c9155d3d8d5797fbea554b138ac6acabfd0bea5"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/scripts/final_byte_review.py",
+      "installed_path": "references/workflows/overnight-review-client-delivery/scripts/final_byte_review.py",
+      "source_sha256": "02e3216cb38ff7b9787ab48f91a729b45d2f16df4c9a51c8d6b73a5e0b49cc24"
     },
     {
       "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
@@ -218,7 +228,12 @@
       "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
       "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
-      "source_sha256": "7d629117d956fbc8b2e15a5bece002750035725d419350471ddb44749ccfe5ce"
+      "source_sha256": "9d1a4011c15f65494ac34653579630058a66de1bddfd0b6ee64bfb5e979ae4f8"
+    },
+    {
+      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+      "source_sha256": "a1faea1cc6a3b6cd0c5c2bd1c8cec2e264e765c30349f526d48c12ccd5f31138"
     },
     {
       "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",

@@ -20,6 +20,14 @@ jobs:
         run: python3 scripts/check_large_queue_guidance.py --self-test --ci-loader-gate
       - name: Panel input and installed snapshot contract
         run: python3 scripts/validate_panel_inputs.py --self-test
+      - name: Canonical finalization-manifest contract
+        run: python3 -m unittest scripts/test_finalization_manifest.py -v
+      - name: Client final-byte review gate
+        run: python3 -m unittest scripts/test_final_byte_review.py -v
+      - name: Client action authority gate
+        run: python3 -m unittest scripts/test_client_delivery_action_authority.py -v
+      - name: Schedule-poll state machine
+        run: python3 -m unittest scripts/test_schedule_poll_orchestrator.py -v
       - name: Canonical publisher controls
         run: |
           python3 -m unittest scripts/test_publish_codex_install.py -v

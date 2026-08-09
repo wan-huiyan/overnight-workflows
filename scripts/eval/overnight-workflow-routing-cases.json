@@ -32,7 +32,33 @@
       "prompt_contract": ["existing client report overnight", "reviewed delivery package"],
       "umbrella_clause": "polish an existing client deliverable",
       "installed_workflow": "references/workflows/overnight-review-client-delivery/WORKFLOW.md",
-      "required_markers": ["client delivery", "review panel"]
+      "required_markers": ["client delivery", "review panel"],
+      "authority_markers": [
+        "Routing never grants execution authority.",
+        "With only local-work authority",
+        "Commit only with a commit grant.",
+        "Push only with push, network, and external-write",
+        "MISSING_AUTHORITY"
+      ],
+      "ordered_markers": [
+        [
+          "After Phase A and every advisory-driven fix are complete",
+          "Dispatch an independent reviewer who did not author or fix the deliverables."
+        ],
+        [
+          "Dispatch an independent reviewer who did not author or fix the deliverables.",
+          "Enter Phase C only while the final reviewer report still matches the frozen"
+        ]
+      ],
+      "required_safety_markers": [
+        "ADVISORY_NON_GATING",
+        "FINAL_REVIEW_PENDING",
+        "Any later byte change invalidates the final review."
+      ],
+      "forbidden_markers": [
+        "The branch should be pushed to origin with a PR opened.",
+        "Push immediately after every commit"
+      ]
     },
     {
       "name": "blocked_reviewer",
@@ -48,7 +74,31 @@
       "prompt_contract": ["scheduled triggers", "fire-ASAP multi-track overnight run"],
       "umbrella_clause": "scheduled fire-ASAP multi-track orchestration",
       "installed_workflow": "references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
-      "required_markers": ["Fire-ASAP", "scheduled"]
+      "required_markers": ["Fire-ASAP", "scheduled"],
+      "authority_markers": [
+        "Routing here grants no execution authority.",
+        "Commit, push, pull-request creation,",
+        "Local consolidation and pull-request creation are",
+        "MISSING_AUTHORITY"
+      ],
+      "ordered_markers": [
+        [
+          "Routing here grants no execution authority.",
+          "### Use the installed state-machine helper"
+        ]
+      ],
+      "required_safety_markers": [
+        "scripts/poll_orchestrator.py",
+        "CONSOLIDATION_CLAIMED",
+        "RESUME_CONSOLIDATION_CLAIM",
+        "schedule_external_action_authority",
+        "the helper itself never consolidates, commits, pushes, schedules, spends, or"
+      ],
+      "forbidden_markers": [
+        "Path(\"state/orchestrator_poll_log.jsonl\").write_text",
+        "run_consolidation_and_pr()",
+        "json.dump(status, open(\"state/status.json\", \"w\"))"
+      ]
     },
     {
       "name": "review_tier_calibration",

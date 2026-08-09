@@ -31,6 +31,7 @@ errors = []
 warnings = []
 RELEASE_LEDGER = os.path.join(ROOT, "scripts", "plugin_release_ledger.json")
 PAYLOAD_FORMAT = "sha256-size-path-v1"
+GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 INSIGHT_PLUGIN = "overnight-insight-discovery"
 PUBLISHED_BASE = "3df43c37ecdf8d62343907b49b28f0fbb1bf4338"
 ROUTED_PLUGINS = {
@@ -180,6 +181,81 @@ def payload_identity_at_commit(plugin_name, commit):
     return identity_from_entries(entries)
 
 
+def release_identity_at_commit(plugin_name, commit):
+    """Reproduce one complete plugin release identity from immutable Git bytes."""
+    manifest = json.loads(
+        git_bytes(
+            "show", f"{commit}:plugins/{plugin_name}/.claude-plugin/plugin.json"
+        ).decode("utf-8")
+    )
+    skill_text = git_bytes(
+        "show", f"{commit}:plugins/{plugin_name}/SKILL.md"
+    ).decode("utf-8")
+    frontmatter_end = skill_text.find("\n---", 3)
+    frontmatter_match = (
+        re.search(
+            r"^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$",
+            skill_text[3:frontmatter_end],
+            re.MULTILINE,
+        )
+        if frontmatter_end != -1
+        else None
+    )
+    markdown_match = re.search(
+        r"^> Content version \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*",
+        skill_text[frontmatter_end + 4 :] if frontmatter_end != -1 else "",
+        re.MULTILINE,
+    )
+    version_match = frontmatter_match or markdown_match
+    if version_match is None:
+        raise ValueError(f"committed SKILL has no content version: {plugin_name}@{commit}")
+    return {
+        "version": manifest.get("version"),
+        "content_version": version_match.group(1),
+        **payload_identity_at_commit(plugin_name, commit),
+    }
+
+
+def immutable_release_errors(plugin_name, release, *, is_current):
+    found = []
+    if not isinstance(release, dict) or set(release) != {
+        "version",
+        "content_version",
+        "source_commit",
+        "payload_sha256",
+        "file_count",
+        "total_bytes",
+    }:
+        return ["release row has missing or undeclared fields"]
+    commit = release.get("source_commit")
+    if commit == "working-tree-release":
+        if not is_current:
+            found.append("only the current release may use working-tree-release")
+        return found
+    if not isinstance(commit, str) or not GIT_COMMIT.fullmatch(commit):
+        return ["release source_commit must be an immutable full Git SHA"]
+    try:
+        reproduced = release_identity_at_commit(plugin_name, commit)
+    except (
+        OSError,
+        ValueError,
+        UnicodeError,
+        json.JSONDecodeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return [f"cannot reproduce immutable release {commit}: {exc}"]
+    for field in (
+        "version",
+        "content_version",
+        "payload_sha256",
+        "file_count",
+        "total_bytes",
+    ):
+        if release.get(field) != reproduced.get(field):
+            found.append(f"immutable release {commit} {field} differs from Git bytes")
+    return found
+
+
 def base_release_errors(base, version, skill_version, payload):
     found = []
     if base.get("source_commit") != PUBLISHED_BASE:
@@ -240,6 +316,11 @@ def validate_release_ledger(run_self_test=False):
         "overnight-multi-issue-implementation": [
             "references/large-live-queue-orchestration.md"
         ],
+        "overnight-review-client-delivery": [
+            "scripts/action_authority.py",
+            "scripts/final_byte_review.py",
+        ],
+        "schedule-poll-orchestrator-pattern": ["scripts/poll_orchestrator.py"],
     }
     for plugin_name in sorted(ROUTED_PLUGINS):
         plugin_ledger = plugins[plugin_name]
@@ -252,8 +333,8 @@ def validate_release_ledger(run_self_test=False):
             err(f"{plugin_name}: release ledger has wrong required payload paths")
             continue
         releases = plugin_ledger.get("releases")
-        if not isinstance(releases, list) or len(releases) != 2:
-            err(f"{plugin_name}: release ledger needs exactly published base and current")
+        if not isinstance(releases, list) or len(releases) < 2:
+            err(f"{plugin_name}: release ledger needs a published base and current release")
             continue
         base = releases[0]
         plugin_dir = os.path.join(ROOT, "plugins", plugin_name)
@@ -273,43 +354,33 @@ def validate_release_ledger(run_self_test=False):
             continue
         try:
             payload = payload_identity(plugin_dir)
-            base_payload = payload_identity_at_commit(plugin_name, PUBLISHED_BASE)
-            base_manifest = json.loads(
-                git_bytes(
-                    "show",
-                    f"{PUBLISHED_BASE}:plugins/{plugin_name}/.claude-plugin/plugin.json",
-                ).decode("utf-8")
-            )
-            base_skill_path = os.path.join(ROOT, "plugins", plugin_name, "SKILL.md")
-            base_skill_text = git_bytes(
-                "show", f"{PUBLISHED_BASE}:plugins/{plugin_name}/SKILL.md"
-            ).decode("utf-8")
-            frontmatter_end = base_skill_text.find("\n---", 3)
-            version_match = re.search(
-                r"^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$",
-                base_skill_text[3:frontmatter_end],
-                re.MULTILINE,
-            )
-            if frontmatter_end == -1 or not version_match:
-                raise ValueError(f"published SKILL has no content version: {base_skill_path}")
-            base_content_version = version_match.group(1)
+            base_identity = release_identity_at_commit(plugin_name, PUBLISHED_BASE)
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
             err(f"{plugin_name}: cannot reproduce published base identity: {exc}")
             continue
 
         base_errors = base_release_errors(
             base,
-            base_manifest.get("version"),
-            base_content_version,
-            base_payload,
+            base_identity["version"],
+            base_identity["content_version"],
+            base_identity,
         )
         baseline_errors = release_identity_errors(
             plugin_ledger, manifest.get("version"), current_content_version, payload
         )
         for message in base_errors + baseline_errors:
             err(f"{plugin_name}: {message}")
+        immutable_errors = []
+        for index, release in enumerate(releases):
+            immutable_errors.extend(
+                immutable_release_errors(
+                    plugin_name, release, is_current=index == len(releases) - 1
+                )
+            )
+        for message in immutable_errors:
+            err(f"{plugin_name}: {message}")
 
-        if run_self_test and not (base_errors or baseline_errors):
+        if run_self_test and not (base_errors or baseline_errors or immutable_errors):
             drifted = dict(payload)
             digest = payload["payload_sha256"]
             drifted["payload_sha256"] = (
@@ -336,11 +407,35 @@ def validate_release_ledger(run_self_test=False):
             )
             if not base_release_errors(
                 drifted_base,
-                base_manifest.get("version"),
-                base_content_version,
-                base_payload,
+                base_identity["version"],
+                base_identity["content_version"],
+                base_identity,
             ):
                 err(f"{plugin_name}: published-base drift control did not fail")
+            immutable_rows = [
+                release
+                for release in releases
+                if release.get("source_commit") != "working-tree-release"
+            ]
+            if immutable_rows:
+                drifted_middle = dict(immutable_rows[-1])
+                middle_digest = drifted_middle["payload_sha256"]
+                drifted_middle["payload_sha256"] = (
+                    ("0" if middle_digest[0] != "0" else "1") + middle_digest[1:]
+                )
+                if not immutable_release_errors(
+                    plugin_name,
+                    drifted_middle,
+                    is_current=drifted_middle is releases[-1],
+                ):
+                    err(f"{plugin_name}: immutable middle-release drift control did not fail")
+            if len(releases) > 1:
+                invalid_sentinel = dict(releases[0])
+                invalid_sentinel["source_commit"] = "working-tree-release"
+                if not immutable_release_errors(
+                    plugin_name, invalid_sentinel, is_current=False
+                ):
+                    err(f"{plugin_name}: historical working-tree sentinel control did not fail")
 
 
 def main():

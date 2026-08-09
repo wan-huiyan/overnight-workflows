@@ -7,7 +7,7 @@ applies to its always-resident skill listing.
 
 ## What runs automatically
 
-**CI** (`.github/workflows/ci.yml`) runs seven checks on every PR and push:
+**CI** (`.github/workflows/ci.yml`) runs eleven checks on every PR and push:
 
 1. `.github/scripts/validate_plugins.py --self-test` — marketplace/plugin
    structure plus the payload/version release ledger and its negative controls.
@@ -18,8 +18,16 @@ applies to its always-resident skill listing.
    recovery, exact routing contract, and installed-package negative controls.
 5. `scripts/validate_panel_inputs.py --self-test` — immutable diff and installed
    evidence-snapshot omission/drift controls.
-6. `scripts/test_publish_codex_install.py` — focused publisher unit tests.
-7. `scripts/publish_codex_install.py self-test` — deterministic fake-exchange
+6. `scripts/test_finalization_manifest.py` — canonical JSONL grammar, safe
+   append/seal behavior, historical controller rows, and mutation controls.
+7. `scripts/test_final_byte_review.py` — immutable renderable snapshots, independent
+   final approval, cycle binding, and byte-drift invalidation.
+8. `scripts/test_client_delivery_action_authority.py` — point-of-action deny and
+   exact-grant controls for commit, push, PR, merge, deploy, paid, and external writes.
+9. `scripts/test_schedule_poll_orchestrator.py` — idempotent poll claims,
+   crash repair, hard-ceiling, authority, concurrency, and unsafe-file controls.
+10. `scripts/test_publish_codex_install.py` — focused publisher unit tests.
+11. `scripts/publish_codex_install.py self-test` — deterministic fake-exchange
    publication, rollback, concurrency, drift, and capability controls.
 
 ## The skill-description cap gate

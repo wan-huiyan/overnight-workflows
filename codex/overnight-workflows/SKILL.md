@@ -59,6 +59,8 @@ and never substitute the unbundled mutating publisher.
 A request to summarize, explain, audit, or review a plan without executing it
 does not enter an execution route. A route choice never grants commit, push,
 pull-request, merge, deploy, network, paid-call, or external-write authority.
+No routed child may broaden those grants; at each action it must either cite the
+separately recorded grant or stop with a durable `MISSING_AUTHORITY` handoff.
 Translate Claude schedules, RemoteTrigger, model tiers, and workflow schemas
 into the goal, automation, wait, and agent facilities actually available.
 

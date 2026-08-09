@@ -22,6 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import install_inventory as inventory_codec  # noqa: E402
+import finalization_manifest as finalization  # noqa: E402
 import publish_codex_install as publisher  # noqa: E402
 import check_large_queue_guidance as guidance  # noqa: E402
 import validate_panel_inputs as panel_validator  # noqa: E402
@@ -200,6 +201,7 @@ class PublisherHarness:
         paths = publisher._operation_paths(self.state, operation)
         outputs: dict[str, Path] = {}
         for phase in publisher.LIVE_INVENTORY_PHASE_ORDER:
+            self.seal_phase(operation, phase)
             output = self.evidence_parent / operation / f"{phase}.json"
             publisher.report_live_inventory(
                 state_root=self.state,
@@ -212,6 +214,149 @@ class PublisherHarness:
             if phase == through:
                 break
         return outputs
+
+    def seal_phase(self, operation: str, phase: str) -> dict[str, object]:
+        _, state = publisher._load_state(self.state, operation)
+        terminal = state.get("finalization_manifest_terminal")
+        if not isinstance(terminal, dict) or not isinstance(terminal.get("path"), str):
+            raise AssertionError("fixture operation lacks terminal finalization manifest")
+        manifest_path = Path(terminal["path"])
+        records = [
+            json.loads(line)
+            for line in manifest_path.read_text(encoding="utf-8").splitlines()
+        ]
+        writer = records[0]["writer_controller_id"]
+        review_id = f"review-{operation}"
+        raw_inventory_path = manifest_path.parent / f"{operation}-raw-input.inventory"
+        raw_root = manifest_path.parent / "raw-inputs"
+        raw_root.mkdir(exist_ok=True)
+        raw_member = raw_root / f"{operation}.txt"
+        raw_member.write_bytes(f"raw-input-{operation}".encode())
+        raw_inventory_path.write_text(
+            f"{hashlib.sha256(raw_member.read_bytes()).hexdigest()}\t"
+            f"{len(raw_member.read_bytes())}\t{operation}.txt\n",
+            encoding="utf-8",
+        )
+        raw_digest = hashlib.sha256(raw_inventory_path.read_bytes()).hexdigest()
+        finalization.append_finalization_record(
+            manifest_path,
+            record_type="raw_input_registered",
+            writer_controller_id=writer,
+            payload={
+                "review_id": review_id,
+                "review_boundary": "postpublication-installed-snapshot",
+                "inventory_path": str(raw_inventory_path),
+                "raw_input_inventory_sha256": raw_digest,
+                "raw_input_max_files": 1000,
+                "raw_input_max_total_bytes": 100000000,
+                "raw_input_actual_files": 1,
+                "raw_input_actual_total_bytes": len(raw_member.read_bytes()),
+                "state": "REGISTERED",
+                "next_action": "dispatch panel",
+            },
+        )
+        if phase != "dispatch":
+            for record_type, role, suffix in (
+                ("review_report_registered", "reviewer-1", "report"),
+                ("challenge_response_registered", "reviewer-1", "challenge"),
+                ("judge_verdict_registered", "judge-1", "judge"),
+            ):
+                if any(
+                    record.get("record_type") == record_type
+                    and record.get("review_id") == review_id
+                    for record in records
+                ):
+                    continue
+                artifact_path = manifest_path.parent / f"{operation}-{suffix}.md"
+                if record_type == "judge_verdict_registered":
+                    current_records = [
+                        json.loads(line)
+                        for line in manifest_path.read_text(encoding="utf-8").splitlines()
+                    ]
+                    dispatch = next(
+                        record
+                        for record in current_records
+                        if record["record_type"] == "manifest_prefix_registered"
+                        and record["review_id"] == review_id
+                        and record["phase"] == "dispatch"
+                    )
+                    artifact_path = manifest_path.parent / f"{operation}-{suffix}.json"
+                    artifact_path.write_text(
+                        json.dumps(
+                            {
+                                "schema_version": 1,
+                                "record_type": finalization.JUDGE_RECEIPT_TYPE,
+                                "review_id": review_id,
+                                "raw_input_inventory_sha256": raw_digest,
+                                "dispatch_manifest_prefix_sha256": dispatch[
+                                    "manifest_prefix_sha256"
+                                ],
+                                **finalization.judgment_input_identity(current_records),
+                                "judge_role": role,
+                                "verdict": "ACCEPT",
+                                "recorded_at": "2026-08-09T00:00:03Z",
+                                "findings_unresolved": 0,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    artifact_path.write_bytes(f"{operation}-{suffix}".encode())
+                payload = {
+                    "review_id": review_id,
+                    "path": str(artifact_path),
+                    "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                    "state": "RECEIVED",
+                    "next_action": "continue panel",
+                }
+                if record_type == "review_report_registered":
+                    payload["reviewer_role"] = role
+                elif record_type == "challenge_response_registered":
+                    payload["participant_role"] = role
+                else:
+                    payload["judge_role"] = role
+                    payload["verdict"] = "ACCEPT"
+                finalization.append_finalization_record(
+                    manifest_path,
+                    record_type=record_type,
+                    writer_controller_id=writer,
+                    payload=payload,
+                )
+        if phase == "acceptance":
+            finalization.append_finalization_record(
+                manifest_path,
+                record_type="review_summary",
+                writer_controller_id=writer,
+                payload={
+                    "review_id": review_id,
+                    "raw_input_inventory_sha256": raw_digest,
+                    "independent_reports_expected": 1,
+                    "independent_reports_received": 1,
+                    "challenge_participants_expected": 1,
+                    "challenge_participants_received": 1,
+                    "findings_received": 1,
+                    "findings_answered": 1,
+                    "findings_unresolved": 0,
+                    "judge_reports_expected": 1,
+                    "judge_reports_received": 1,
+                    "state": "REVIEW_COMPLETE",
+                    "next_action": "accept installation",
+                },
+            )
+        evidence = manifest_path.parent / f"{operation}-panel-prefixes"
+        evidence.mkdir(exist_ok=True)
+        return finalization.seal_manifest_prefix(
+            manifest_path,
+            writer_controller_id=writer,
+            review_id=review_id,
+            phase=phase,
+            raw_input_inventory_sha256=raw_digest,
+            prefix_output=evidence / f"manifest-prefix.{phase}.jsonl",
+            receipt_output=evidence / f"manifest-prefix.{phase}.json",
+        )
 
     def prepare(self, operation: str, **overrides: object) -> dict[str, object]:
         arguments: dict[str, object] = {
@@ -238,10 +383,25 @@ class PublisherHarness:
         }
         if finalization_manifest is not None:
             _, state = publisher._load_state(self.state, operation)
+            prepare_path = Path(state["prepare_receipt"]["path"])
+            finalization.append_finalization_record(
+                finalization_manifest,
+                record_type="prepare_receipt_registered",
+                writer_controller_id=f"controller-{operation}",
+                payload={
+                    "operation_id": operation,
+                    "generation_id": state["generation_id"],
+                    "receipt_path": str(prepare_path),
+                    "receipt_sha256": state["prepare_receipt"]["sha256"],
+                    "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+                    "state": "PREPARED",
+                    "next_action": "reserve when separately authorized",
+                },
+            )
             arguments.update(
                 {
                     "lock_path": self.state / "package.lock",
-                    "prepare_receipt": Path(state["prepare_receipt"]["path"]),
+                    "prepare_receipt": prepare_path,
                     "finalization_manifest": finalization_manifest,
                 }
             )
@@ -252,20 +412,12 @@ class PublisherHarness:
     def finalization_manifest(self, operation: str) -> Path:
         path = self.root / f"controller/{operation}-finalization.jsonl"
         path.parent.mkdir(exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "sequence": 1,
-                    "recorded_at": "2026-08-09T00:00:00Z",
-                    "record_type": "controller_started",
-                    "finalization_id": f"finalization-{operation}",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n",
-            encoding="utf-8",
+        finalization.initialize_manifest(
+            path,
+            finalization_id=f"finalization-{operation}",
+            writer_controller_id=f"controller-{operation}",
+            state="PREPARING",
+            recorded_at="2026-08-09T00:00:00Z",
         )
         return path
 
@@ -627,6 +779,7 @@ class PublicationTests(unittest.TestCase):
             finalization_manifest=manifest,
             checker_runner=publisher._fake_checker,
         )
+        harness.seal_phase(operation, "dispatch")
         return manifest, publisher._operation_paths(harness.state, operation)
 
     def test_prepare_uses_immutable_commit_and_independent_snapshot(self) -> None:
@@ -667,6 +820,16 @@ class PublicationTests(unittest.TestCase):
             )
             # The extraction is testable before its new module is staged.
             tracked.add(b"scripts/install_inventory.py")
+            manifest_source = json.loads(
+                (
+                    canonical_root
+                    / "codex/overnight-workflows/install-manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            tracked.update(
+                mapping["canonical_source"].encode("utf-8")
+                for mapping in manifest_source["mappings"]
+            )
             for encoded_path in sorted(tracked):
                 if not encoded_path:
                     continue
@@ -1521,9 +1684,18 @@ class PublicationTests(unittest.TestCase):
         records = [json.loads(line) for line in manifest.read_text().splitlines()]
         self.assertEqual(
             [
-                "controller_started",
+                "manifest_header",
+                "prepare_receipt_registered",
                 "installed_publication_reservation_intent",
                 "installed_publication_terminal",
+                "raw_input_registered",
+                "manifest_prefix_registered",
+                "review_report_registered",
+                "challenge_response_registered",
+                "judge_verdict_registered",
+                "manifest_prefix_registered",
+                "review_summary",
+                "manifest_prefix_registered",
                 "installed_publication_accepted",
             ],
             [record["record_type"] for record in records],
@@ -1600,6 +1772,7 @@ class PublicationTests(unittest.TestCase):
             finalization_manifest=manifest,
             checker_runner=publisher._fake_checker,
         )
+        harness.seal_phase(operation, "dispatch")
         with self.assertRaisesRegex(publisher.PublicationError, "fixed operation-independent"):
             publisher.report_live_inventory(
                 state_root=harness.state,
@@ -1666,6 +1839,7 @@ class PublicationTests(unittest.TestCase):
             record_type="external_dispatch_note",
             payload={"note": "bounded manifest suffix between phases"},
         )
+        harness.seal_phase(operation, "judgment")
         judgment_path = harness.evidence_parent / operation / "judgment.json"
         judgment = publisher.report_live_inventory(
             state_root=harness.state,
@@ -1674,6 +1848,7 @@ class PublicationTests(unittest.TestCase):
             output=judgment_path,
             lock_path=lock,
         )
+        harness.seal_phase(operation, "acceptance")
         acceptance_path = harness.evidence_parent / operation / "acceptance.json"
         acceptance = publisher.report_live_inventory(
             state_root=harness.state,
@@ -2508,6 +2683,7 @@ class PublicationTests(unittest.TestCase):
             checker_runner=publisher._fake_checker,
         )
         paths = publisher._operation_paths(harness.state, operation)
+        harness.seal_phase(operation, "dispatch")
         output = harness.evidence_parent / operation / "dispatch-drift.json"
         original_write = publisher._write_new_file
 
@@ -3630,6 +3806,40 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(state_before, paths["state"].read_bytes())
         self.assertFalse(paths["reservation"].exists())
 
+    def test_reserve_rejects_manifest_grammar_mutation_before_publisher_state_change(
+        self,
+    ) -> None:
+        temporary, harness = self.make_harness()
+        self.addCleanup(temporary.cleanup)
+        operation = "manifest-grammar-mutation"
+        harness.prepare(operation)
+        manifest = harness.finalization_manifest(operation)
+        records = [
+            json.loads(line)
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+        ]
+        records[0]["schema_version"] = 2
+        manifest.write_text(
+            "".join(
+                json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+        paths, state = publisher._load_state(harness.state, operation)
+        state_before = paths["state"].read_bytes()
+        prepare_path = Path(state["prepare_receipt"]["path"])
+        prepare_before = prepare_path.read_bytes()
+        manifest_before = manifest.read_bytes()
+
+        with self.assertRaisesRegex(publisher.PublicationError, "schema drift"):
+            harness.reserve(operation, finalization_manifest=manifest)
+
+        self.assertEqual(state_before, paths["state"].read_bytes())
+        self.assertEqual(prepare_before, prepare_path.read_bytes())
+        self.assertEqual(manifest_before, manifest.read_bytes())
+        self.assertFalse(paths["reservation"].exists())
+
     def test_malformed_lock_takeover_and_ambiguous_recovery_are_refused_without_deletion(self) -> None:
         temporary, harness = self.make_harness()
         self.addCleanup(temporary.cleanup)
@@ -3788,20 +3998,12 @@ class CommandTests(unittest.TestCase):
             reader_record = harness.maintenance(operation)
             manifest = harness.root / "controller/finalization-evidence.jsonl"
             manifest.parent.mkdir()
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "sequence": 1,
-                        "recorded_at": "2026-08-09T00:00:00Z",
-                        "record_type": "controller_started",
-                        "finalization_id": "finalization-test-1",
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
-                + "\n",
-                encoding="utf-8",
+            finalization.initialize_manifest(
+                manifest,
+                finalization_id="finalization-test-1",
+                writer_controller_id="controller-test-1",
+                state="PREPARING",
+                recorded_at="2026-08-09T00:00:00Z",
             )
             lock = harness.state / "package.lock"
             output = io.StringIO()
@@ -3831,6 +4033,21 @@ class CommandTests(unittest.TestCase):
                             str(prepare_receipt),
                         ]
                     ),
+                )
+                _, prepared_state = publisher._load_state(harness.state, operation)
+                finalization.append_finalization_record(
+                    manifest,
+                    record_type="prepare_receipt_registered",
+                    writer_controller_id="controller-test-1",
+                    payload={
+                        "operation_id": operation,
+                        "generation_id": prepared_state["generation_id"],
+                        "receipt_path": str(prepare_receipt),
+                        "receipt_sha256": prepared_state["prepare_receipt"]["sha256"],
+                        "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+                        "state": "PREPARED",
+                        "next_action": "reserve when separately authorized",
+                    },
                 )
                 self.assertEqual(
                     0,
@@ -3892,6 +4109,7 @@ class CommandTests(unittest.TestCase):
                 self.assertTrue(lock.is_file())
                 phase_outputs: dict[str, Path] = {}
                 for phase in ("dispatch", "judgment", "acceptance"):
+                    harness.seal_phase(operation, phase)
                     phase_output = evidence / f"{phase}-live.json"
                     phase_outputs[phase] = phase_output
                     self.assertEqual(
@@ -3938,12 +4156,23 @@ class CommandTests(unittest.TestCase):
                 json.loads(line)
                 for line in manifest.read_text(encoding="utf-8").splitlines()
             ]
-            self.assertEqual([1, 2, 3, 4], [record["sequence"] for record in records])
+            self.assertEqual(
+                list(range(1, 14)), [record["sequence"] for record in records]
+            )
             self.assertEqual(
                 [
-                    "controller_started",
+                    "manifest_header",
+                    "prepare_receipt_registered",
                     "installed_publication_reservation_intent",
                     "installed_publication_terminal",
+                    "raw_input_registered",
+                    "manifest_prefix_registered",
+                    "review_report_registered",
+                    "challenge_response_registered",
+                    "judge_verdict_registered",
+                    "manifest_prefix_registered",
+                    "review_summary",
+                    "manifest_prefix_registered",
                     "installed_publication_accepted",
                 ],
                 [record["record_type"] for record in records],

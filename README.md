@@ -100,7 +100,7 @@ cp -R overnight-workflows/plugins/overnight-multi-issue-implementation ~/.claude
 
 ### Canonical Codex umbrella
 
-The complete 41-file mapping is recorded in
+The complete 44-file mapping is recorded in
 [`codex/overnight-workflows/install-manifest.json`](codex/overnight-workflows/install-manifest.json).
 The groups are:
 
@@ -108,16 +108,17 @@ The groups are:
 |---|---:|---|
 | Codex router and interface metadata | 2 | `SKILL.md`, `agents/openai.yaml` |
 | Routed workflow documents | 7 | `references/workflows/<plugin>/WORKFLOW.md` |
-| Workflow support resources | 32 | `references/workflows/<plugin>/{references,assets,scripts}/...` |
+| Workflow support resources | 35 | `references/workflows/<plugin>/{references,assets,scripts}/...` |
 
-Twenty-nine support resources are derived mechanically from every file under
+Thirty-two support resources are derived mechanically from every file under
 each plugin's `references/`, `assets/`, and `scripts/` directories. The other
 three are the read-only panel validator, its fixtures, and its small shared
 inventory codec, installed beside the multi-issue workflow; the mutating
-publisher is deliberately excluded. Plugin manifests under `.claude-plugin/`
-are also excluded. Per-workflow directories prevent name collisions and
-preserve relative dependencies. Copy all 41 canonical sources to their exact
-installed paths, compare all 41 source/install SHA-256 digests, and validate
+publisher and controller-side finalization-manifest writer are deliberately
+excluded. Plugin manifests under `.claude-plugin/` are also excluded.
+Per-workflow directories prevent name collisions and preserve relative
+dependencies. Copy all 44 canonical sources to their exact installed paths,
+compare all 44 source/install SHA-256 digests, and validate
 that every local Markdown dependency resolves in both layouts.
 
 The 7 tracked navigation stubs live at
@@ -200,13 +201,26 @@ rejects a reader record. Receipts bind both source commits/trees, both exact
 identities, the named live mutation outcome, the recovery authorization, and
 the ordered renewal and per-exchange attestation histories.
 
+`scripts/finalization_manifest.py` is the one grammar, validator, and locked
+appender for controller and publisher finalization records. It requires exact
+schema-1 rows, a single canonical header, contiguous sequences, stable
+finalization/writer identities, strict UTC timestamps, exact record-specific
+fields, and one final LF. Unknown types, undeclared fields, duplicate
+identities, partial rows, links, and changed inodes fail closed. The controller
+must use its `init`, `append`, and `seal-prefix` commands instead of building
+JSONL directly. The publisher imports the same parser and appender.
+
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
 active, exactly one inventory chain must run in order: `dispatch`, then
 `judgment`, then `acceptance`. Each schema-2 receipt records the exact live
 `sha256-size-path-v1` inventory and binds the preceding receipt plus the prior
-and current bounded finalization-manifest prefixes. Skipped, reordered, or
-duplicate artifacts fail. An exact same-path replay of an already committed
+and current bounded finalization-manifest prefixes. Before each inventory
+phase, `seal-prefix` writes create-once prefix and receipt files, then appends a
+`manifest_prefix_registered` row that binds the review ID and sealed raw-input
+inventory digest. The publisher requires that registration to be the current
+last row and revalidates its files and bytes. Skipped, reordered, duplicate, or
+cross-review artifacts fail. An exact same-path replay of an already committed
 phase returns its existing receipt; a crash retry may reuse only the same phase
 and exact output path recorded by the durable pending intent. Only an explicit
 `accept` command with the complete chain's acceptance receipt, reviewer
@@ -214,7 +228,10 @@ identity, reason, and unchanged acceptance prefix appends panel acceptance and
 releases the reservation.
 
 ```bash
+python3 scripts/finalization_manifest.py init --manifest /abs/finalization.jsonl --finalization-id FINALIZATION --writer-controller-id CONTROLLER
+python3 scripts/finalization_manifest.py seal-prefix --manifest /abs/finalization.jsonl --writer-controller-id CONTROLLER --review-id REVIEW --phase dispatch --raw-input-inventory-sha256 RAW_SHA256 --prefix-output /abs/evidence/dispatch-prefix.jsonl --receipt-output /abs/evidence/dispatch-prefix.json
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase dispatch --output /abs/evidence/dispatch-live.json
+# Repeat seal-prefix and inventory with distinct outputs for judgment, then acceptance.
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase judgment --output /abs/evidence/judgment-live.json
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase acceptance --output /abs/evidence/acceptance-live.json
 python3 scripts/publish_codex_install.py accept --operation OP --state-root /abs/state --lock /abs/state/package.lock --finalization-manifest /abs/finalization.jsonl --acceptance-inventory-receipt /abs/evidence/acceptance-live.json --accepted-by REVIEWER --acceptance-reason "panel accepted"
@@ -230,16 +247,26 @@ quiescence or maintenance authorization. This is a safe temporary-directory
 control, not a claim about concurrent readers of a live installation. Run:
 
 ```bash
+python3 -m unittest scripts/test_finalization_manifest.py -v
 python3 -m unittest scripts/test_publish_codex_install.py -v
 python3 scripts/publish_codex_install.py self-test
 ```
 
-Panel dispatches use schema-2 `panel_input` records. Every repository input
+Panel dispatches use exact schema-2 `panel_input` records with review boundary
+`prepublication-source-and-staged-snapshot`. Every repository input
 includes `target_ref`, its full `target_ref_sha_at_dispatch`, the literal
 deterministic `git diff` argv array, immutable target/merge-base/head/tree IDs,
 and the saved diff digest. The installed evidence snapshot includes the exact
 inventory digest/count/bytes, generation ID equal to that digest, source
-commit/tree, and install manifest digest.
+commit/tree, and install manifest digest. The `prepare` join must reproduce the
+exact receipt and state bytes, their operation/source/manifest/generation
+identities, state `PREPARED`, and mutation outcome
+`NO_LIVE_MUTATION_PREPARED`; staged validation must be the immutable-source
+checker invocation with zero exit, empty stderr, and all named outcomes
+`PASS`. Scope is exact: source guidance is `NOT_REVIEWED`, the live
+installation is `UNCHANGED_PREDECESSOR`, later publication, review, and
+acceptance stages are `NOT_RUN`, and reader/model checks are `UNCHECKED`. A
+record cannot claim live publication in this boundary.
 The canonical `scripts/validate_panel_inputs.py` and the exact copy bundled
 under the installed multi-issue workflow reproduce those joins and reject
 omissions or drift. Resolve the installed copy from the active umbrella
@@ -314,6 +341,26 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-09** — `overnight-review-client-delivery` → **v1.0.2** and
+  `schedule-poll-orchestrator-pattern` → **v1.0.3**: routing is explicitly
+  non-authorizing, and commit, push, pull-request, merge, deploy, network,
+  paid-call, and other external-write grants remain separate at the action
+  point. Client delivery now requires an independent review of the frozen
+  final bytes after all edits; any later byte change invalidates that approval.
+  Schedule-poll replaces its prose sketch with a locked, atomic, idempotent
+  state-machine helper, stable trigger and operation IDs, crash repair, a hard
+  ceiling, and a separately authorized pull-request claim. A single executable
+  finalization-manifest grammar/appender now serves controller and publisher,
+  with create-once phase-prefix receipts registered before each publisher
+  inventory. The panel-input validator accepts only the exact prepublication
+  source-and-staged boundary and reproduces its prepare/state/checker joins and
+  scope. The Codex umbrella closure is now **44 files**, including the
+  schedule-poll and client-delivery gate helpers while continuing to exclude
+  mutating publication tools; focused finalization, final-byte, action-authority,
+  and schedule mutation suites are CI gates. The release
+  ledger pins the preceding candidate payloads to commit `40361a7f` and binds
+  both new patch payloads. Bundle `VERSION` remains **1.5.0** because the bundle
+  is still unreleased. These repository changes do not publish a live package.
 - **2026-08-09** — `overnight-insight-discovery` plugin → **v1.2.1** and its
   independent workflow-content counter → **v1.9.1**: includes the required
   cross-model tie-breaker template and makes Phase F pull-request creation

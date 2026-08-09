@@ -6,6 +6,7 @@ from collections import Counter
 import copy
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -39,7 +40,7 @@ STATE_CONTRACT = ROOT / "scripts/large_queue_state_contract.json"
 STATE_FIXTURES = ROOT / "scripts/large_queue_state_fixtures.json"
 ROUTING_CASES = ROOT / "scripts/eval/overnight-workflow-routing-cases.json"
 RESOURCE_DIRS = ("references", "assets", "scripts")
-EXPECTED_INSTALL_COUNT = 41
+EXPECTED_INSTALL_COUNT = 44
 INSTALL_IDENTITY_FRAMING = "overnight-workflows-install-input-v1"
 INSTALL_INVENTORY_FORMAT = "sha256-size-path-v1"
 EXPECTED_CODEX_VERSION = "0.147.0"
@@ -222,6 +223,66 @@ REQUIRED_ROUTING_CASES = {
         "clause": "calibrate review tiers across a long independent pull-request chain",
         "prompt_contract": ["review intensity", "independent pull requests overnight"],
     },
+}
+REQUIRED_ROUTE_SEMANTICS = {
+    "client_delivery": {
+        "authority_markers": [
+            "Routing never grants execution authority.",
+            "With only local-work authority",
+            "Commit only with a commit grant.",
+            "Push only with push, network, and external-write",
+            "MISSING_AUTHORITY",
+        ],
+        "ordered_markers": [
+            [
+                "After Phase A and every advisory-driven fix are complete",
+                "Dispatch an independent reviewer who did not author or fix the deliverables.",
+            ],
+            [
+                "Dispatch an independent reviewer who did not author or fix the deliverables.",
+                "Enter Phase C only while the final reviewer report still matches the frozen",
+            ],
+        ],
+        "required_safety_markers": [
+            "ADVISORY_NON_GATING",
+            "FINAL_REVIEW_PENDING",
+            "Any later byte change invalidates the final review.",
+        ],
+        "forbidden_markers": [
+            "The branch should be pushed to origin with a PR opened.",
+            "Push immediately after every commit",
+        ],
+    },
+    "scheduled_poll": {
+        "authority_markers": [
+            "Routing here grants no execution authority.",
+            "Commit, push, pull-request creation,",
+            "Local consolidation and pull-request creation are",
+            "MISSING_AUTHORITY",
+        ],
+        "ordered_markers": [
+            [
+                "Routing here grants no execution authority.",
+                "### Use the installed state-machine helper",
+            ]
+        ],
+        "required_safety_markers": [
+            "scripts/poll_orchestrator.py",
+            "CONSOLIDATION_CLAIMED",
+            "RESUME_CONSOLIDATION_CLAIM",
+            "schedule_external_action_authority",
+            "the helper itself never consolidates, commits, pushes, schedules, spends, or",
+        ],
+        "forbidden_markers": [
+            'Path("state/orchestrator_poll_log.jsonl").write_text',
+            "run_consolidation_and_pr()",
+            'json.dump(status, open("state/status.json", "w"))',
+        ],
+    },
+}
+UNCONDITIONAL_ACTION_PATTERNS = {
+    "direct git push": re.compile(r"(?im)^\s*(?:[-*]\s*)?git\s+push(?:\s|$)"),
+    "direct pull-request call": re.compile(r"(?im)\bcreate_pull_request\s*\("),
 }
 
 
@@ -1759,6 +1820,12 @@ def check_routing_cases(
         prompt = case.get("prompt")
         route = case.get("installed_workflow")
         markers = case.get("required_markers")
+        semantic_fields = (
+            "authority_markers",
+            "ordered_markers",
+            "required_safety_markers",
+            "forbidden_markers",
+        )
         prompt_contract = case.get("prompt_contract")
         umbrella_clause = case.get("umbrella_clause")
         if not isinstance(name, str) or not name:
@@ -1792,6 +1859,14 @@ def check_routing_cases(
                 errors.append(f"{label} has the wrong umbrella clause for prompt class {name}")
             if prompt_contract != expected_case["prompt_contract"]:
                 errors.append(f"{label} has the wrong prompt contract for prompt class {name}")
+            expected_semantics = REQUIRED_ROUTE_SEMANTICS.get(name, {})
+            declared_semantics = {
+                field: case[field] for field in semantic_fields if field in case
+            }
+            if declared_semantics != expected_semantics:
+                errors.append(
+                    f"{label} has the wrong exact authority/review semantics contract"
+                )
         mapping = expected_routes.get(route)
         if mapping is None:
             errors.append(f"{label} names an unknown workflow route: {route}")
@@ -1824,6 +1899,42 @@ def check_routing_cases(
             if marker not in source_text:
                 errors.append(
                     f"{label} marker {marker!r} is absent from its canonical workflow"
+                )
+        for marker in case.get("authority_markers", []):
+            if marker not in source_text:
+                errors.append(
+                    f"{label} authority marker {marker!r} is absent from its workflow"
+                )
+        for marker in case.get("required_safety_markers", []):
+            if marker not in source_text:
+                errors.append(
+                    f"{label} safety marker {marker!r} is absent from its workflow"
+                )
+        for pair in case.get("ordered_markers", []):
+            if (
+                not isinstance(pair, list)
+                or len(pair) != 2
+                or any(not isinstance(marker, str) or not marker for marker in pair)
+            ):
+                errors.append(f"{label} ordered marker contract is malformed")
+                continue
+            before, after = pair
+            before_index = source_text.find(before)
+            after_index = source_text.find(after)
+            if before_index < 0 or after_index < 0 or before_index >= after_index:
+                errors.append(
+                    f"{label} ordered workflow markers are absent or reversed: "
+                    f"{before!r} -> {after!r}"
+                )
+        for marker in case.get("forbidden_markers", []):
+            if marker in source_text:
+                errors.append(
+                    f"{label} forbidden unconditional-action marker is present: {marker!r}"
+                )
+        for instruction, pattern in UNCONDITIONAL_ACTION_PATTERNS.items():
+            if pattern.search(source_text):
+                errors.append(
+                    f"{label} forbidden unconditional action is present: {instruction}"
                 )
     if len(names) != len(set(names)):
         errors.append("routing positive case names must be unique")
@@ -1905,6 +2016,539 @@ def run_routing_negative_controls(
     check_routing_cases(granted, mappings, codex, found)
     if not any("explicitly deny execution" in item for item in found):
         errors.append("execution-authority routing negative control did not fail")
+
+    def mutated_route_errors(
+        case_name: str, *, remove: Optional[str] = None, append: Optional[str] = None
+    ) -> list[str]:
+        with tempfile.TemporaryDirectory(prefix="routing-contract-") as raw:
+            workflow_root = Path(raw).resolve()
+            selected_route = REQUIRED_ROUTING_CASES[case_name]["route"]
+            for mapping in mappings:
+                if "navigation_stub" not in mapping:
+                    continue
+                destination = workflow_root / mapping["installed_path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source = ROOT / mapping["canonical_source"]
+                destination.write_bytes(source.read_bytes())
+            selected = workflow_root / selected_route
+            text = selected.read_text(encoding="utf-8")
+            if remove is not None:
+                if remove not in text:
+                    return [f"negative-control setup marker absent: {remove!r}"]
+                text = text.replace(remove, "REMOVED_BY_NEGATIVE_CONTROL")
+            if append is not None:
+                text += "\n" + append + "\n"
+            selected.write_text(text, encoding="utf-8")
+            observed: list[str] = []
+            check_routing_cases(
+                cases,
+                mappings,
+                codex,
+                observed,
+                workflow_root=workflow_root,
+            )
+            return observed
+
+    found = mutated_route_errors(
+        "client_delivery",
+        remove=REQUIRED_ROUTE_SEMANTICS["client_delivery"]["authority_markers"][0],
+    )
+    if not any("authority marker" in item for item in found):
+        errors.append("routed-child authority negative control did not fail")
+
+    found = mutated_route_errors(
+        "client_delivery",
+        remove=REQUIRED_ROUTE_SEMANTICS["client_delivery"]["required_safety_markers"][1],
+    )
+    if not any("safety marker" in item for item in found):
+        errors.append("final-byte review negative control did not fail")
+
+    found = mutated_route_errors(
+        "scheduled_poll",
+        remove=REQUIRED_ROUTE_SEMANTICS["scheduled_poll"]["required_safety_markers"][1],
+    )
+    if not any("safety marker" in item for item in found):
+        errors.append("schedule consolidation-latch negative control did not fail")
+
+    found = mutated_route_errors(
+        "scheduled_poll", append="run_consolidation_and_pr()"
+    )
+    if not any("forbidden unconditional-action marker" in item for item in found):
+        errors.append("schedule unconditional-action negative control did not fail")
+
+    for injected in ("git push origin HEAD", "create_pull_request()"):
+        found = mutated_route_errors("client_delivery", append=injected)
+        if not any("forbidden unconditional action" in item for item in found):
+            errors.append(
+                f"client unconditional-action negative control did not fail for {injected!r}"
+            )
+
+
+def _load_routed_helper(path: Path, label: str) -> Any:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{label} is not a regular routed helper: {path}")
+    module_name = "overnight_route_" + hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    specification = importlib.util.spec_from_file_location(module_name, path)
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"{label} cannot be imported: {path}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def run_loaded_authority_controls(
+    installed_root: Path, cases: dict[str, Any], errors: list[str]
+) -> None:
+    """Execute both routed authority helpers with an action-call recorder."""
+    positives = {
+        case.get("name"): case
+        for case in cases.get("positive", [])
+        if isinstance(case, dict) and isinstance(case.get("name"), str)
+    }
+    try:
+        client_route = positives["client_delivery"]["installed_workflow"]
+        schedule_route = positives["scheduled_poll"]["installed_workflow"]
+        client_workflow = installed_root.joinpath(*PurePosixPath(client_route).parts)
+        schedule_workflow = installed_root.joinpath(*PurePosixPath(schedule_route).parts)
+        client = _load_routed_helper(
+            client_workflow.parent / "scripts/action_authority.py",
+            "client-delivery authority helper",
+        )
+        schedule = _load_routed_helper(
+            schedule_workflow.parent / "scripts/poll_orchestrator.py",
+            "schedule-poll authority helper",
+        )
+    except (KeyError, OSError, RuntimeError) as exc:
+        errors.append(f"loaded authority route resolution failed: {exc}")
+        return
+
+    def write_receipt(
+        path: Path,
+        *,
+        record_type: str,
+        identity_field: str,
+        identity: str,
+        grant_fields: set[str],
+        granted: set[str],
+    ) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": record_type,
+                    identity_field: identity,
+                    "authorized_by": "loader-authority-owner",
+                    "recorded_at": "2026-08-09T00:00:00Z",
+                    "grants": {
+                        grant: grant in granted for grant in grant_fields
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def assert_gate_accounting(
+        label: str,
+        calls: list[str],
+        guarded_results: list[dict[str, Any]],
+    ) -> None:
+        expected: list[str] = []
+        for result in guarded_results:
+            if set(result) != {"action", "result", "called"}:
+                raise RuntimeError(f"{label} guard returned an undeclared result shape")
+            if not isinstance(result["action"], str) or not isinstance(
+                result["called"], bool
+            ):
+                raise RuntimeError(f"{label} guard returned malformed call accounting")
+            if result["called"]:
+                if result["result"] != "AUTHORIZED":
+                    raise RuntimeError(f"{label} guard called an unauthorized action")
+                expected.append(result["action"])
+            elif result["result"] != "MISSING_AUTHORITY":
+                raise RuntimeError(f"{label} guard suppressed an authorized action")
+        if calls != expected:
+            raise RuntimeError(
+                f"{label} detected an unconditional action outside the loaded gate: "
+                f"expected {expected}, observed {calls}"
+            )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="loaded-authority-controls-") as raw:
+            root = Path(raw).resolve()
+
+            # The client-delivery route enters its Phase C action points through
+            # the loaded helper. A Boolean inspection is not counted as a call.
+            client_calls: list[str] = []
+            client_guarded: list[dict[str, Any]] = []
+            for action in client.ACTION_REQUIREMENTS:
+                decision = client.decide(
+                    review_id="loaded-review",
+                    action=action,
+                    decision_output=root / f"client-denied-{action}.json",
+                )
+                if decision["result"] != "MISSING_AUTHORITY":
+                    raise RuntimeError(f"client action {action} did not fail closed")
+                client_guarded.append(
+                    client.run_guarded_action(
+                        decision=decision["decision"],
+                        action=action,
+                        callback=client_calls.append,
+                    )
+                )
+            assert_gate_accounting("client Phase C denied path", client_calls, client_guarded)
+            if client_calls:
+                raise RuntimeError(
+                    f"denied client Phase C called external actions: {client_calls}"
+                )
+
+            for action, requirements in client.ACTION_REQUIREMENTS.items():
+                receipt = root / f"client-authority-{action}.json"
+                write_receipt(
+                    receipt,
+                    record_type=client.AUTHORITY_TYPE,
+                    identity_field="review_id",
+                    identity="loaded-review",
+                    grant_fields=set(client.GRANT_FIELDS),
+                    granted=set(requirements),
+                )
+                decision = client.decide(
+                    review_id="loaded-review",
+                    action=action,
+                    authority_receipt=receipt,
+                    decision_output=root / f"client-allowed-{action}.json",
+                )
+                if not decision["decision"]["callable"]:
+                    raise RuntimeError(f"client exact grants did not authorize {action}")
+                before = list(client_calls)
+                guarded = client.run_guarded_action(
+                    decision=decision["decision"],
+                    action=action,
+                    callback=client_calls.append,
+                )
+                client_guarded.append(guarded)
+                if client_calls != before + [action] or not guarded["called"]:
+                    raise RuntimeError(
+                        f"client Phase C gate did not call only exact action {action}"
+                    )
+                for removed in requirements:
+                    partial = root / f"client-partial-{action}-{removed}.json"
+                    write_receipt(
+                        partial,
+                        record_type=client.AUTHORITY_TYPE,
+                        identity_field="review_id",
+                        identity="loaded-review",
+                        grant_fields=set(client.GRANT_FIELDS),
+                        granted=set(requirements) - {removed},
+                    )
+                    denied = client.decide(
+                        review_id="loaded-review",
+                        action=action,
+                        authority_receipt=partial,
+                        decision_output=root
+                        / f"client-partial-decision-{action}-{removed}.json",
+                    )
+                    if denied["decision"]["callable"]:
+                        raise RuntimeError(
+                            f"client {action} ignored missing grant {removed}"
+                        )
+                    before = list(client_calls)
+                    guarded = client.run_guarded_action(
+                        decision=denied["decision"],
+                        action=action,
+                        callback=client_calls.append,
+                    )
+                    client_guarded.append(guarded)
+                    if client_calls != before or guarded["called"]:
+                        raise RuntimeError(
+                            f"client Phase C gate called {action} without {removed}"
+                        )
+            assert_gate_accounting("client Phase C", client_calls, client_guarded)
+            if client_calls != list(client.ACTION_REQUIREMENTS):
+                raise RuntimeError(
+                    "client Phase C recorder did not call each authorized action exactly once"
+                )
+
+            # Falsifiable negative: a caller that invokes the callback without
+            # the loaded gate creates a counter entry with no guarded result.
+            negative_calls: list[str] = []
+            negative_guarded: list[dict[str, Any]] = []
+            denied = client.decide(
+                review_id="loaded-negative",
+                action="push",
+                decision_output=root / "client-unconditional-negative.json",
+            )
+            negative_guarded.append(
+                client.run_guarded_action(
+                    decision=denied["decision"],
+                    action="push",
+                    callback=negative_calls.append,
+                )
+            )
+            assert_gate_accounting(
+                "client unconditional-caller baseline", negative_calls, negative_guarded
+            )
+            negative_calls.append("push")
+            try:
+                assert_gate_accounting(
+                    "client unconditional-caller negative",
+                    negative_calls,
+                    negative_guarded,
+                )
+            except RuntimeError as exc:
+                if "outside the loaded gate" not in str(exc):
+                    raise
+            else:
+                raise RuntimeError("unconditional-caller negative did not fail")
+
+            schedule_calls: list[str] = []
+            schedule_guarded: list[dict[str, Any]] = []
+            for action in schedule.ACTION_REQUIREMENTS:
+                decision = schedule.decide_external_action(
+                    run_id="loaded-run",
+                    action=action,
+                    decision_output=root / f"schedule-denied-{action}.json",
+                )
+                if decision["result"] != "MISSING_AUTHORITY":
+                    raise RuntimeError(f"schedule action {action} did not fail closed")
+                schedule_guarded.append(
+                    schedule.run_guarded_action(
+                        decision=decision["decision"],
+                        action=action,
+                        callback=schedule_calls.append,
+                    )
+                )
+            assert_gate_accounting(
+                "schedule denied path", schedule_calls, schedule_guarded
+            )
+            if schedule_calls:
+                raise RuntimeError(
+                    f"denied schedule route called external actions: {schedule_calls}"
+                )
+
+            for action, requirements in schedule.ACTION_REQUIREMENTS.items():
+                receipt = root / f"schedule-authority-{action}.json"
+                write_receipt(
+                    receipt,
+                    record_type=schedule.AUTHORITY_TYPE,
+                    identity_field="run_id",
+                    identity="loaded-run",
+                    grant_fields=set(schedule.GRANT_FIELDS),
+                    granted=set(requirements),
+                )
+                allowed = schedule.decide_external_action(
+                    run_id="loaded-run",
+                    action=action,
+                    authority_receipt_path=receipt,
+                    decision_output=root / f"schedule-allowed-{action}.json",
+                )
+                if not allowed["decision"]["callable"]:
+                    raise RuntimeError(f"schedule exact grants did not authorize {action}")
+                before = list(schedule_calls)
+                guarded = schedule.run_guarded_action(
+                    decision=allowed["decision"],
+                    action=action,
+                    callback=schedule_calls.append,
+                )
+                schedule_guarded.append(guarded)
+                if schedule_calls != before + [action] or not guarded["called"]:
+                    raise RuntimeError(
+                        f"schedule gate did not call only exact action {action}"
+                    )
+                for removed in requirements:
+                    partial = root / f"schedule-partial-{action}-{removed}.json"
+                    write_receipt(
+                        partial,
+                        record_type=schedule.AUTHORITY_TYPE,
+                        identity_field="run_id",
+                        identity="loaded-run",
+                        grant_fields=set(schedule.GRANT_FIELDS),
+                        granted=set(requirements) - {removed},
+                    )
+                    denied = schedule.decide_external_action(
+                        run_id="loaded-run",
+                        action=action,
+                        authority_receipt_path=partial,
+                        decision_output=root
+                        / f"schedule-partial-decision-{action}-{removed}.json",
+                    )
+                    if denied["decision"]["callable"]:
+                        raise RuntimeError(
+                            f"schedule {action} ignored missing grant {removed}"
+                        )
+                    before = list(schedule_calls)
+                    guarded = schedule.run_guarded_action(
+                        decision=denied["decision"],
+                        action=action,
+                        callback=schedule_calls.append,
+                    )
+                    schedule_guarded.append(guarded)
+                    if schedule_calls != before or guarded["called"]:
+                        raise RuntimeError(
+                            f"schedule gate called {action} without {removed}"
+                        )
+            assert_gate_accounting("schedule external actions", schedule_calls, schedule_guarded)
+            if schedule_calls != list(schedule.ACTION_REQUIREMENTS):
+                raise RuntimeError(
+                    "schedule recorder did not call each authorized action exactly once"
+                )
+
+            status = root / "all-terminal-status.json"
+            journal = root / "all-terminal-journal.jsonl"
+            schedule.initialize(
+                status_path=status,
+                journal_path=journal,
+                run_id="terminal-run",
+                dispatch_epoch=100,
+                hard_ceiling_seconds=100,
+                poll_interval_seconds=30,
+                tracks=["track-a", "track-b"],
+                now=100,
+            )
+            for index, track in enumerate(("track-a", "track-b"), 1):
+                schedule.mark_track(
+                    status_path=status,
+                    journal_path=journal,
+                    run_id="terminal-run",
+                    track=track,
+                    phase="complete",
+                    reason="loaded route control complete",
+                    evidence_path=None,
+                    evidence_sha256=None,
+                    now=100 + index,
+                )
+            terminal = schedule.poll(
+                status_path=status,
+                journal_path=journal,
+                run_id="terminal-run",
+                trigger_id="terminal-trigger",
+                now=110,
+            )
+            if terminal["action"] != "CONSOLIDATION_CLAIMED":
+                raise RuntimeError("all-terminal schedule route did not claim local work")
+            consolidated = root / "consolidated.txt"
+            consolidated.write_text("local consolidation\n", encoding="utf-8")
+            schedule.complete_consolidation(
+                status_path=status,
+                journal_path=journal,
+                run_id="terminal-run",
+                operation_id=terminal["operation_id"],
+                evidence_path=consolidated,
+                evidence_sha256=hashlib.sha256(consolidated.read_bytes()).hexdigest(),
+                now=111,
+            )
+            denied_pr = schedule.claim_pull_request(
+                status_path=status,
+                journal_path=journal,
+                run_id="terminal-run",
+                decision_output=root / "terminal-pr-decision.json",
+                now=112,
+            )
+            if denied_pr["action"] != "MISSING_AUTHORITY" or denied_pr["decision"][
+                "callable"
+            ]:
+                raise RuntimeError("all-terminal route made a denied PR callable")
+            terminal_pr_calls: list[str] = []
+            terminal_guarded = [
+                schedule.run_guarded_action(
+                    decision=denied_pr["decision"],
+                    action="pull-request",
+                    callback=terminal_pr_calls.append,
+                )
+            ]
+            assert_gate_accounting(
+                "all-terminal denied PR", terminal_pr_calls, terminal_guarded
+            )
+            if terminal_pr_calls:
+                raise RuntimeError("all-terminal route invoked a denied PR callback")
+
+            ceiling_status = root / "ceiling-status.json"
+            ceiling_journal = root / "ceiling-journal.jsonl"
+            schedule.initialize(
+                status_path=ceiling_status,
+                journal_path=ceiling_journal,
+                run_id="ceiling-run",
+                dispatch_epoch=100,
+                hard_ceiling_seconds=100,
+                poll_interval_seconds=30,
+                tracks=["track-a", "track-b"],
+                now=100,
+            )
+            ceiling = schedule.poll(
+                status_path=ceiling_status,
+                journal_path=ceiling_journal,
+                run_id="ceiling-run",
+                trigger_id="ceiling-trigger",
+                now=200,
+            )
+            if ceiling["action"] != "CONSOLIDATION_CLAIMED" or set(
+                ceiling["phases"].values()
+            ) != {"tapped_out"}:
+                raise RuntimeError("hard-ceiling route did not latch local consolidation")
+            ceiling_consolidated = root / "ceiling-consolidated.txt"
+            ceiling_consolidated.write_text(
+                "hard-ceiling local consolidation\n", encoding="utf-8"
+            )
+            ceiling_completion = schedule.complete_consolidation(
+                status_path=ceiling_status,
+                journal_path=ceiling_journal,
+                run_id="ceiling-run",
+                operation_id=ceiling["operation_id"],
+                evidence_path=ceiling_consolidated,
+                evidence_sha256=hashlib.sha256(
+                    ceiling_consolidated.read_bytes()
+                ).hexdigest(),
+                now=201,
+            )
+            if ceiling_completion["action"] != "LOCAL_COMPLETE_EXTERNAL_ACTIONS_NOT_AUTHORIZED":
+                raise RuntimeError("hard-ceiling route did not complete local consolidation")
+            ceiling_denied_pr = schedule.claim_pull_request(
+                status_path=ceiling_status,
+                journal_path=ceiling_journal,
+                run_id="ceiling-run",
+                decision_output=root / "ceiling-pr-decision.json",
+                now=202,
+            )
+            if (
+                ceiling_denied_pr["action"] != "MISSING_AUTHORITY"
+                or ceiling_denied_pr["decision"]["callable"]
+            ):
+                raise RuntimeError("hard-ceiling route made a denied PR callable")
+            ceiling_pr_calls: list[str] = []
+            ceiling_guarded = [
+                schedule.run_guarded_action(
+                    decision=ceiling_denied_pr["decision"],
+                    action="pull-request",
+                    callback=ceiling_pr_calls.append,
+                )
+            ]
+            assert_gate_accounting(
+                "hard-ceiling denied PR", ceiling_pr_calls, ceiling_guarded
+            )
+            if ceiling_pr_calls:
+                raise RuntimeError("hard-ceiling route invoked a denied PR callback")
+            ceiling_state = schedule.inspect(
+                status_path=ceiling_status, run_id="ceiling-run"
+            )["state"]
+            if (
+                ceiling_state["consolidation"]["state"] != "COMPLETE"
+                or ceiling_state["pull_request"]["state"] != "NOT_CLAIMED"
+            ):
+                raise RuntimeError(
+                    "hard-ceiling route did not preserve completed local work and denied PR"
+                )
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        errors.append(f"loaded authority behavioral controls failed: {exc}")
+
+
+def run_materialized_authority_controls(
+    mappings: list[dict[str, str]], cases: dict[str, Any], errors: list[str]
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="authority-route-install-") as raw:
+        installed_root = Path(raw).resolve() / "overnight-workflows"
+        materialize_install(installed_root, mappings)
+        run_loaded_authority_controls(installed_root, cases, errors)
 
 
 def _loader_skills_for_root(codex_bin: Path, codex_home: Path, root: Path) -> list[dict[str, Any]]:
@@ -2081,6 +2725,15 @@ def run_real_loader_controls(
                 f"real loader retrieval contract: {error}"
                 for error in loaded_route_errors
             )
+            if not loaded_route_errors:
+                loaded_authority_errors: list[str] = []
+                run_loaded_authority_controls(
+                    installed_root, routing_cases, loaded_authority_errors
+                )
+                errors.extend(
+                    f"real loader authority contract: {error}"
+                    for error in loaded_authority_errors
+                )
 
     with tempfile.TemporaryDirectory(prefix="overnight-loader-negative-") as temp:
         codex_home = Path(temp)
@@ -2398,6 +3051,15 @@ def named_self_test_outcomes(
             "routing.unrelated_prompt",
             "routing.wrong_route",
             "routing.execution_authority",
+            "routing.child_authority",
+            "routing.final_byte_review",
+            "routing.schedule_consolidation_latch",
+            "routing.schedule_unconditional_action",
+            "routing.authority.loaded_client_deny_and_exact_grants",
+            "routing.authority.loaded_unconditional_caller_negative",
+            "routing.authority.loaded_schedule_deny_and_exact_grants",
+            "routing.authority.loaded_schedule_all_terminal",
+            "routing.authority.loaded_schedule_hard_ceiling",
         }
     )
     for resource_name in PANEL_VALIDATOR_RESOURCES:
@@ -2414,7 +3076,14 @@ def named_self_test_outcomes(
             if loader_executed:
                 names.add(f"loader.retrieval.negative.{case['name']}")
     if loader_executed:
-        names.update({"loader.umbrella_only", "loader.recursive_child_exposure"})
+        names.update(
+            {
+                "loader.umbrella_only",
+                "loader.recursive_child_exposure",
+                "loader.authority.client_action_recorder",
+                "loader.authority.schedule_terminal_routes",
+            }
+        )
     return {name: "PASS" for name in sorted(names)}
 
 
@@ -2669,6 +3338,7 @@ def main() -> int:
     if args.self_test:
         run_install_negative_controls(mappings, errors)
         run_routing_negative_controls(routing_cases, mappings, codex, errors)
+        run_materialized_authority_controls(mappings, routing_cases, errors)
         run_fixture_inventory_negative_controls(fixtures, errors)
     if args.installed_root:
         check_installed_inventory(args.installed_root.expanduser(), mappings, errors)

@@ -16,7 +16,7 @@
         {
           "version": "1.0.1",
           "content_version": "1.0.1",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "1dba5771630b8c3418dfe4604b167952566b1c31c521d94f88af366a28349ca7",
           "file_count": 2,
           "total_bytes": 10030
@@ -39,7 +39,7 @@
         {
           "version": "1.2.1",
           "content_version": "1.9.1",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "c5d77c0d030196339624342d85dcf5ea2e627aa565e0818ccfdeeb842fc686d8",
           "file_count": 30,
           "total_bytes": 211517
@@ -62,7 +62,7 @@
         {
           "version": "1.5.0",
           "content_version": "1.5.0",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "707872552a7e6a33899e59115911e4dd1412435d92d1cfd2b842210bf32bd9c1",
           "file_count": 3,
           "total_bytes": 94421
@@ -70,7 +70,10 @@
       ]
     },
     "overnight-review-client-delivery": {
-      "required_current_paths": [],
+      "required_current_paths": [
+        "scripts/action_authority.py",
+        "scripts/final_byte_review.py"
+      ],
       "releases": [
         {
           "version": "1.0.0",
@@ -83,10 +86,18 @@
         {
           "version": "1.0.1",
           "content_version": "1.0.1",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "7bde48fbd8ea6d069d4f10f2f916176be0c9c8a3089d0a3207e7d921b50f8c5e",
           "file_count": 2,
           "total_bytes": 21749
+        },
+        {
+          "version": "1.0.2",
+          "content_version": "1.0.2",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "897e9b7e1c5e047acf2c0c1dc42ed18379753219e090cd4e5d926050b1dd3965",
+          "file_count": 4,
+          "total_bytes": 80961
         }
       ]
     },
@@ -104,7 +115,7 @@
         {
           "version": "1.0.2",
           "content_version": "1.0.1",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "17b5ad7559fac1d2133ce939c5af88b59ad73affb0e01251b53926c04f8ea3f5",
           "file_count": 2,
           "total_bytes": 10063
@@ -112,7 +123,9 @@
       ]
     },
     "schedule-poll-orchestrator-pattern": {
-      "required_current_paths": [],
+      "required_current_paths": [
+        "scripts/poll_orchestrator.py"
+      ],
       "releases": [
         {
           "version": "1.0.1",
@@ -125,10 +138,18 @@
         {
           "version": "1.0.2",
           "content_version": "1.0.2",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "38c980fb11447b1e6f449dd1912831099455f0cfeeebe7496181b3a2e21cdff7",
           "file_count": 2,
           "total_bytes": 11365
+        },
+        {
+          "version": "1.0.3",
+          "content_version": "1.0.3",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "68f0fab2ed57f55e9914bd7f0a3a206024c5eb1e1cb654eb8df8145f2ace10bd",
+          "file_count": 3,
+          "total_bytes": 98918
         }
       ]
     },
@@ -146,7 +167,7 @@
         {
           "version": "1.0.1",
           "content_version": "1.0.2",
-          "source_commit": "working-tree-release",
+          "source_commit": "40361a7fe44f5086cd73efac87c975cac2c612fa",
           "payload_sha256": "7eb7006e9117c0dff3e32c254a55d6bac433f4d6a4d1dd2e74a881919ee04f43",
           "file_count": 2,
           "total_bytes": 13793

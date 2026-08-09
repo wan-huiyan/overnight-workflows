@@ -31,6 +31,13 @@ import tempfile
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 if __package__:
+    from .finalization_manifest import (
+        append_finalization_record as _append_finalization_record,
+        finalization_manifest_prefix as _finalization_manifest_prefix,
+        latest_phase_registration as _latest_phase_registration,
+        parse_finalization_jsonl as _parse_finalization_jsonl,
+        validate_manifest as _validate_finalization_manifest,
+    )
     from .install_inventory import (
         INVENTORY_FORMAT,
         Inventory,
@@ -43,6 +50,13 @@ if __package__:
         serialize_inventory,
     )
 else:
+    from finalization_manifest import (
+        append_finalization_record as _append_finalization_record,
+        finalization_manifest_prefix as _finalization_manifest_prefix,
+        latest_phase_registration as _latest_phase_registration,
+        parse_finalization_jsonl as _parse_finalization_jsonl,
+        validate_manifest as _validate_finalization_manifest,
+    )
     from install_inventory import (
         INVENTORY_FORMAT,
         Inventory,
@@ -1284,149 +1298,6 @@ def _validate_maintenance_receipt(
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
-def _parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
-    if not data or not data.endswith(b"\n"):
-        raise PublicationError(f"finalization manifest must be non-empty JSONL ending in LF: {path}")
-    records: List[Dict[str, Any]] = []
-    previous_sequence: Optional[int] = None
-    finalization_id: Optional[str] = None
-    for line_number, raw_line in enumerate(data[:-1].split(b"\n"), 1):
-        if not raw_line:
-            raise PublicationError(f"finalization manifest has an empty row at {line_number}")
-        try:
-            value = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise PublicationError(
-                f"finalization manifest row {line_number} is invalid JSON: {exc}"
-            ) from exc
-        if not isinstance(value, dict):
-            raise PublicationError(f"finalization manifest row {line_number} is not an object")
-        sequence = value.get("sequence")
-        if (
-            not isinstance(sequence, int)
-            or isinstance(sequence, bool)
-            or (previous_sequence is not None and sequence <= previous_sequence)
-        ):
-            raise PublicationError(
-                f"finalization manifest sequence is not strictly increasing at row {line_number}"
-            )
-        previous_sequence = sequence
-        record_finalization_id = value.get("finalization_id")
-        if not isinstance(record_finalization_id, str) or not record_finalization_id.strip():
-            raise PublicationError(
-                f"finalization manifest row {line_number} lacks finalization_id"
-            )
-        if finalization_id is None:
-            finalization_id = record_finalization_id
-        elif record_finalization_id != finalization_id:
-            raise PublicationError("finalization manifest mixes finalization IDs")
-        for field in ("schema_version", "recorded_at", "record_type"):
-            if field not in value:
-                raise PublicationError(
-                    f"finalization manifest row {line_number} lacks {field}"
-                )
-        records.append(value)
-    return records
-
-
-def _finalization_manifest_prefix(
-    path: Path,
-    *,
-    through_sequence: Optional[int] = None,
-    required_prefix: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Bind a JSONL prefix and optionally prove an earlier prefix is unchanged."""
-    path = _safe_absolute(path, label="finalization evidence manifest", must_exist=True)
-    observed = os.lstat(path)
-    if not stat.S_ISREG(observed.st_mode):
-        raise PublicationError("finalization manifest is not a regular file")
-    if observed.st_nlink != 1:
-        raise PublicationError("finalization manifest must have exactly one hard link")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
-            or opened.st_nlink != 1
-        ):
-            raise PublicationError("finalization manifest changed before prefix read")
-        fcntl.flock(descriptor, fcntl.LOCK_SH)
-        if os.fstat(descriptor).st_nlink != 1:
-            raise PublicationError("finalization manifest gained a hard link before prefix read")
-        chunks: List[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        after = os.fstat(descriptor)
-        data = b"".join(chunks)
-        if (
-            (opened.st_dev, opened.st_ino, opened.st_size)
-            != (after.st_dev, after.st_ino, after.st_size)
-            or after.st_nlink != 1
-            or len(data) != after.st_size
-        ):
-            raise PublicationError("finalization manifest changed during prefix read")
-        records = _parse_finalization_jsonl(data, path)
-        prefix_data = data
-        prefix_records = records
-        if through_sequence is not None:
-            matching_indexes = [
-                index
-                for index, record in enumerate(records)
-                if record.get("sequence") == through_sequence
-            ]
-            if len(matching_indexes) != 1:
-                raise PublicationError(
-                    "finalization manifest lacks the requested bounded sequence"
-                )
-            line_count = matching_indexes[0] + 1
-            prefix_data = b"".join(data.splitlines(keepends=True)[:line_count])
-            prefix_records = records[:line_count]
-        observed_prefix = {
-            "path": str(path),
-            "prefix_bytes": len(prefix_data),
-            "prefix_sha256": hashlib.sha256(prefix_data).hexdigest(),
-            "record_count": len(prefix_records),
-            "last_sequence": prefix_records[-1]["sequence"],
-            "last_record_type": prefix_records[-1]["record_type"],
-            "finalization_id": prefix_records[-1]["finalization_id"],
-        }
-        if required_prefix is not None:
-            required = dict(required_prefix)
-            required_bytes = required.get("prefix_bytes")
-            if (
-                set(required) != set(observed_prefix)
-                or not isinstance(required_bytes, int)
-                or isinstance(required_bytes, bool)
-                or required_bytes <= 0
-                or required_bytes > len(data)
-            ):
-                raise PublicationError("required finalization-manifest prefix is malformed")
-            required_data = data[:required_bytes]
-            required_records = _parse_finalization_jsonl(required_data, path)
-            actual_required = {
-                "path": str(path),
-                "prefix_bytes": len(required_data),
-                "prefix_sha256": hashlib.sha256(required_data).hexdigest(),
-                "record_count": len(required_records),
-                "last_sequence": required_records[-1]["sequence"],
-                "last_record_type": required_records[-1]["record_type"],
-                "finalization_id": required_records[-1]["finalization_id"],
-            }
-            if actual_required != required:
-                raise PublicationError(
-                    "finalization manifest no longer extends the required durable prefix"
-                )
-        return observed_prefix
-    finally:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
-
-
 def _validate_finalization_manifest_path(
     path: Path, *, state_root: Path, state: Mapping[str, Any]
 ) -> Path:
@@ -1448,178 +1319,8 @@ def _validate_finalization_manifest_path(
             raise PublicationError(
                 f"finalization manifest must be outside the protected {label}"
             )
+    _validate_finalization_manifest(path)
     return path
-
-
-def _append_finalization_record(
-    manifest_path: Path,
-    *,
-    record_type: str,
-    payload: Mapping[str, Any],
-    expected_prefix: Optional[Mapping[str, Any]] = None,
-    required_ancestor_prefix: Optional[Mapping[str, Any]] = None,
-    predecessor_payload_field: Optional[str] = None,
-) -> Dict[str, Any]:
-    if expected_prefix is not None and required_ancestor_prefix is not None:
-        raise PublicationError(
-            "finalization append cannot require both exact and ancestor prefixes"
-        )
-    if predecessor_payload_field is not None and required_ancestor_prefix is None:
-        raise PublicationError(
-            "a predecessor payload binding requires an ancestor prefix"
-        )
-    if predecessor_payload_field is not None and predecessor_payload_field in payload:
-        raise PublicationError("predecessor payload field is reserved by the appender")
-    observed = os.lstat(manifest_path)
-    if not stat.S_ISREG(observed.st_mode):
-        raise PublicationError("finalization manifest is not a regular file")
-    if observed.st_nlink != 1:
-        raise PublicationError("finalization manifest must have exactly one hard link")
-    flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(manifest_path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
-            or opened.st_nlink != 1
-        ):
-            raise PublicationError("finalization manifest changed before it was opened")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        if os.fstat(descriptor).st_nlink != 1:
-            raise PublicationError("finalization manifest gained a hard link before append")
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        chunks: List[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        original = b"".join(chunks)
-        if os.fstat(descriptor).st_nlink != 1:
-            raise PublicationError("finalization manifest gained a hard link during append")
-        records = _parse_finalization_jsonl(original, manifest_path)
-
-        def prefix_identity(
-            prefix_data: bytes, prefix_records: Sequence[Mapping[str, Any]]
-        ) -> Dict[str, Any]:
-            if not prefix_records:
-                raise PublicationError("finalization prefix has no records")
-            return {
-                "path": str(manifest_path),
-                "prefix_bytes": len(prefix_data),
-                "prefix_sha256": hashlib.sha256(prefix_data).hexdigest(),
-                "record_count": len(prefix_records),
-                "last_sequence": prefix_records[-1]["sequence"],
-                "last_record_type": prefix_records[-1]["record_type"],
-                "finalization_id": prefix_records[-1]["finalization_id"],
-            }
-
-        def require_ancestor(prefix_data: bytes) -> None:
-            if required_ancestor_prefix is None:
-                return
-            required = dict(required_ancestor_prefix)
-            byte_count = required.get("prefix_bytes")
-            if (
-                not isinstance(byte_count, int)
-                or isinstance(byte_count, bool)
-                or byte_count <= 0
-                or byte_count > len(prefix_data)
-            ):
-                raise PublicationError("required ancestor prefix is malformed")
-            ancestor_data = prefix_data[:byte_count]
-            ancestor_records = _parse_finalization_jsonl(ancestor_data, manifest_path)
-            if prefix_identity(ancestor_data, ancestor_records) != required:
-                raise PublicationError(
-                    "finalization manifest no longer extends the observed ancestor prefix"
-                )
-
-        finalization_id = records[0]["finalization_id"]
-        operation_id = payload.get("operation_id")
-        generation_id = payload.get("generation_id")
-        manifest_lines = original.splitlines(keepends=True)
-        for existing_index, existing in enumerate(records):
-            if (
-                existing.get("record_type") == record_type
-                and existing.get("operation_id") == operation_id
-                and existing.get("generation_id") == generation_id
-            ):
-                preceding_data = b"".join(manifest_lines[:existing_index])
-                preceding_records = records[:existing_index]
-                actual_preceding = prefix_identity(preceding_data, preceding_records)
-                effective_payload = dict(payload)
-                if predecessor_payload_field is not None:
-                    effective_payload[predecessor_payload_field] = actual_preceding
-                for key, value in effective_payload.items():
-                    if existing.get(key) != value:
-                        raise PublicationError(
-                            "existing finalization record conflicts with this operation"
-                        )
-                if expected_prefix is not None:
-                    if actual_preceding != dict(expected_prefix):
-                        raise PublicationError(
-                            "existing finalization record does not immediately extend "
-                            "the required bounded prefix"
-                        )
-                require_ancestor(preceding_data)
-                through_record = b"".join(manifest_lines[: existing_index + 1])
-                return {
-                    "record": existing,
-                    "manifest_sha256": hashlib.sha256(through_record).hexdigest(),
-                    "manifest_prefix_bytes": len(through_record),
-                    "appended": False,
-                }
-        observed_prefix = prefix_identity(original, records)
-        if expected_prefix is not None:
-            if observed_prefix != dict(expected_prefix):
-                raise PublicationError(
-                    "finalization manifest changed after the bounded prefix was observed"
-                )
-        require_ancestor(original)
-        effective_payload = dict(payload)
-        if predecessor_payload_field is not None:
-            effective_payload[predecessor_payload_field] = observed_prefix
-        reserved = {
-            "schema_version",
-            "sequence",
-            "recorded_at",
-            "record_type",
-            "finalization_id",
-        }
-        if reserved & effective_payload.keys():
-            raise PublicationError("finalization record payload overrides journal fields")
-        record = {
-            "schema_version": 1,
-            "sequence": records[-1]["sequence"] + 1,
-            "recorded_at": _utc_now(),
-            "record_type": record_type,
-            "finalization_id": finalization_id,
-            **effective_payload,
-        }
-        encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(
-            "utf-8"
-        )
-        if os.fstat(descriptor).st_nlink != 1:
-            raise PublicationError("finalization manifest gained a hard link before append")
-        view = memoryview(encoded)
-        while view:
-            written = os.write(descriptor, view)
-            view = view[written:]
-        os.fsync(descriptor)
-        if os.fstat(descriptor).st_nlink != 1:
-            raise PublicationError("finalization manifest gained a hard link during append")
-        combined = original + encoded
-        return {
-            "record": record,
-            "manifest_sha256": hashlib.sha256(combined).hexdigest(),
-            "manifest_prefix_bytes": len(combined),
-            "appended": True,
-        }
-    finally:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        finally:
-            os.close(descriptor)
 
 
 def _validate_prepare_receipt_argument(
@@ -3971,6 +3672,8 @@ def _live_inventory_report_identity(
         "record_type": "live_inventory_observation",
         "phase": receipt.get("phase"),
         "chain_position": receipt.get("chain_position"),
+        "review_id": receipt.get("review_id"),
+        "raw_input_inventory_sha256": receipt.get("raw_input_inventory_sha256"),
         "path": str(receipt_path),
         "sha256": hashlib.sha256(raw).hexdigest(),
         "inventory_path": live_inventory.get("path"),
@@ -4044,6 +3747,9 @@ def _validate_live_inventory_receipt(
             "prior_finalization_manifest_prefix",
             "current_finalization_manifest_prefix",
             "finalization_manifest_prefix",
+            "manifest_prefix_registration",
+            "review_id",
+            "raw_input_inventory_sha256",
             "mutation_outcome",
         },
         label=f"{phase} live inventory receipt",
@@ -4083,18 +3789,36 @@ def _validate_live_inventory_receipt(
         )
     _parse_utc_timestamp(receipt.get("observed_at"), label=f"{phase}.observed_at")
     current_prefix = receipt.get("current_finalization_manifest_prefix")
+    registration = receipt.get("manifest_prefix_registration")
     if (
         not isinstance(current_prefix, dict)
         or receipt.get("finalization_manifest_prefix") != current_prefix
         or current_prefix.get("path") != str(manifest_path)
+        or not isinstance(registration, dict)
+        or registration.get("record_type") != "manifest_prefix_registered"
+        or registration.get("phase") != phase
+        or registration.get("review_id") != receipt.get("review_id")
+        or registration.get("raw_input_inventory_sha256")
+        != receipt.get("raw_input_inventory_sha256")
+        or not HEX_64_RE.fullmatch(
+            str(receipt.get("raw_input_inventory_sha256"))
+        )
     ):
         raise PublicationError(
             f"{phase} live inventory receipt lacks its exact current manifest prefix"
         )
     current_sequence = current_prefix.get("last_sequence")
+    manifest_data = _read_regular_bytes(
+        manifest_path, label="finalization manifest for inventory receipt"
+    )
+    manifest_records = _parse_finalization_jsonl(manifest_data, manifest_path)
     if (
         not isinstance(current_sequence, int)
         or isinstance(current_sequence, bool)
+        or current_sequence <= 0
+        or current_sequence > len(manifest_records)
+        or manifest_records[current_sequence - 1] != registration
+        or current_prefix.get("last_record_type") != "manifest_prefix_registered"
         or _finalization_manifest_prefix(
             manifest_path,
             through_sequence=current_sequence,
@@ -4155,6 +3879,8 @@ def _load_live_inventory_report_chain(
         terminal_receipt_identity
     )
     expected_prior_prefix: Mapping[str, Any] = terminal_prefix
+    expected_review_id: Optional[str] = None
+    expected_raw_input_digest: Optional[str] = None
     loaded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     seen_paths: Set[str] = set()
     for index, report_identity in enumerate(reports):
@@ -4179,6 +3905,17 @@ def _load_live_inventory_report_chain(
         if observed_identity != report_identity:
             raise PublicationError(
                 f"{expected_phase} live inventory journal identity drifted"
+            )
+        if expected_review_id is None:
+            expected_review_id = receipt["review_id"]
+            expected_raw_input_digest = receipt["raw_input_inventory_sha256"]
+        elif (
+            receipt.get("review_id") != expected_review_id
+            or receipt.get("raw_input_inventory_sha256")
+            != expected_raw_input_digest
+        ):
+            raise PublicationError(
+                "live inventory receipt chain changes panel review or raw-input digest"
             )
         loaded.append((receipt, observed_identity))
         expected_predecessor = observed_identity
@@ -4286,6 +4023,33 @@ def report_live_inventory(
                     "pending live inventory phase is bound to a different phase or output"
                 )
 
+        if pending_receipt is None:
+            phase_registration = _latest_phase_registration(
+                manifest_path, phase=phase
+            )
+        else:
+            phase_registration = pending_receipt.get("manifest_prefix_registration")
+            if (
+                not isinstance(phase_registration, dict)
+                or phase_registration.get("record_type")
+                != "manifest_prefix_registered"
+                or phase_registration.get("phase") != phase
+            ):
+                raise PublicationError(
+                    "pending live inventory phase lacks its registered manifest prefix"
+                )
+        if chain:
+            first_receipt = chain[0][0]
+            if (
+                phase_registration.get("review_id")
+                != first_receipt.get("review_id")
+                or phase_registration.get("raw_input_inventory_sha256")
+                != first_receipt.get("raw_input_inventory_sha256")
+            ):
+                raise PublicationError(
+                    "manifest-prefix registration changes the panel review or raw-input digest"
+                )
+
         if chain:
             prior_receipt, predecessor_identity = chain[-1]
             prior_prefix = prior_receipt["current_finalization_manifest_prefix"]
@@ -4320,6 +4084,15 @@ def report_live_inventory(
         else:
             manifest_prefix = _finalization_manifest_prefix(
                 manifest_path, required_prefix=prior_prefix
+            )
+        if (
+            manifest_prefix.get("last_record_type")
+            != "manifest_prefix_registered"
+            or manifest_prefix.get("last_sequence")
+            != phase_registration.get("sequence")
+        ):
+            raise PublicationError(
+                f"{phase} inventory requires the registered seal to be the final manifest row"
             )
         terminal_state, live_paths, expected_inventory = _terminal_live_identity(state)
         live = build_inventory(Path(str(state["install_root"])), live_paths)
@@ -4361,6 +4134,11 @@ def report_live_inventory(
             "prior_finalization_manifest_prefix": prior_prefix,
             "current_finalization_manifest_prefix": manifest_prefix,
             "finalization_manifest_prefix": manifest_prefix,
+            "manifest_prefix_registration": phase_registration,
+            "review_id": phase_registration["review_id"],
+            "raw_input_inventory_sha256": phase_registration[
+                "raw_input_inventory_sha256"
+            ],
             "mutation_outcome": state["mutation_outcome"],
         }
         encoded = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")

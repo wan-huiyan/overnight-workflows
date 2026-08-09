@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "omission_cases": [
+    {"name": "missing_global_repository", "path": ["repositories", "global"]},
+    {"name": "missing_doodlerun_repository", "path": ["repositories", "doodlerun"]},
     {"name": "missing_target_ref", "path": ["repositories", "global", "target_ref"]},
     {"name": "missing_target_ref_sha", "path": ["repositories", "global", "target_ref_sha_at_dispatch"]},
     {"name": "missing_diff_argv", "path": ["repositories", "global", "diff_argv"]},
@@ -12,7 +14,25 @@
     {"name": "missing_generation", "path": ["installed", "generation_id"]},
     {"name": "missing_source_commit", "path": ["installed", "source_commit"]},
     {"name": "missing_source_tree", "path": ["installed", "source_tree"]},
-    {"name": "missing_manifest_digest", "path": ["installed", "install_manifest_sha256"]}
+    {"name": "missing_manifest_digest", "path": ["installed", "install_manifest_sha256"]},
+    {"name": "missing_review_boundary", "path": ["review_boundary"]},
+    {"name": "missing_prepare", "path": ["prepare"]},
+    {"name": "missing_scope", "path": ["scope"]},
+    {"name": "missing_prepare_operation_id", "path": ["prepare", "operation_id"]},
+    {"name": "missing_prepare_receipt_path", "path": ["prepare", "receipt_path"]},
+    {"name": "missing_prepare_receipt_sha256", "path": ["prepare", "receipt_sha256"]},
+    {"name": "missing_prepare_state_path", "path": ["prepare", "state_path"]},
+    {"name": "missing_prepare_state_sha256", "path": ["prepare", "state_sha256"]},
+    {"name": "missing_prepare_mutation_outcome", "path": ["prepare", "mutation_outcome"]},
+    {"name": "missing_scope_source_guidance_status", "path": ["scope", "source_guidance_status_before_review"]},
+    {"name": "missing_scope_live_installation", "path": ["scope", "live_installation"]},
+    {"name": "missing_scope_reader_quiescence", "path": ["scope", "reader_quiescence"]},
+    {"name": "missing_scope_reserve", "path": ["scope", "reserve"]},
+    {"name": "missing_scope_publish", "path": ["scope", "publish"]},
+    {"name": "missing_scope_final_fact_review", "path": ["scope", "final_fact_review"]},
+    {"name": "missing_scope_postpublication_panel", "path": ["scope", "postpublication_panel"]},
+    {"name": "missing_scope_accept", "path": ["scope", "accept"]},
+    {"name": "missing_scope_implicit_model_selection", "path": ["scope", "implicit_model_selection"]}
   ],
   "drift_cases": [
     {"name": "target_ref_drift", "mutation": "target_ref", "expect": "target_ref no longer resolves"},
@@ -29,6 +49,91 @@
     {"name": "generation_drift", "mutation": "generation", "expect": "generation_id must be"},
     {"name": "source_commit_drift", "mutation": "source_commit", "expect": "source_tree does not match"},
     {"name": "source_tree_drift", "mutation": "source_tree", "expect": "source_tree does not match"},
-    {"name": "snapshot_byte_drift", "mutation": "snapshot_byte", "expect": "inventory digest differs"}
+    {"name": "snapshot_byte_drift", "mutation": "snapshot_byte", "expect": "inventory digest differs"},
+    {"name": "installed_repository_join_drift", "mutation": "installed_repository_join", "expect": "must match exactly one reviewed repository"}
+  ],
+  "boundary_cases": [
+    {
+      "name": "postpublication_boundary",
+      "path": ["review_boundary"],
+      "value": "postpublication-installed-and-finalized",
+      "expect": "review_boundary must be one of"
+    }
+  ],
+  "prepare_cases": [
+    {"name": "fabricated_live_mutated_missing_files", "mutation": "fabricated_prepare", "target": "record", "expect": "prepare.mutation_outcome must be NO_LIVE_MUTATION_PREPARED"},
+    {"name": "prepare_operation_drift", "mutation": "set", "target": "record", "path": ["prepare", "operation_id"], "value": "different-operation", "expect": "receipt operation_id differs"},
+    {"name": "prepare_receipt_path_drift", "mutation": "set", "target": "record", "path": ["prepare", "receipt_path"], "value": "/does-not-exist/prepare.json", "expect": "cannot read prepare receipt"},
+    {"name": "prepare_receipt_digest_drift", "mutation": "set", "target": "record", "path": ["prepare", "receipt_sha256"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "prepare receipt digest differs"},
+    {"name": "prepare_state_path_drift", "mutation": "set", "target": "record", "path": ["prepare", "state_path"], "value": "/does-not-exist/state.json", "expect": "cannot read prepare state"},
+    {"name": "prepare_state_digest_drift", "mutation": "set", "target": "record", "path": ["prepare", "state_sha256"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "prepare state digest differs"},
+    {"name": "prepare_mutation_outcome_drift", "mutation": "set", "target": "record", "path": ["prepare", "mutation_outcome"], "value": "LIVE_MUTATED", "expect": "prepare.mutation_outcome must be NO_LIVE_MUTATION_PREPARED"},
+    {"name": "receipt_source_repository_drift", "mutation": "set", "target": "receipt", "path": ["source", "repository"], "value": "/different/repository", "expect": "source.repository differs"},
+    {"name": "receipt_source_commit_drift", "mutation": "set", "target": "receipt", "path": ["source", "commit"], "value": "0000000000000000000000000000000000000000", "expect": "source.commit differs"},
+    {"name": "receipt_source_tree_drift", "mutation": "set", "target": "receipt", "path": ["source", "tree"], "value": "0000000000000000000000000000000000000000", "expect": "source.tree differs"},
+    {"name": "receipt_manifest_path_drift", "mutation": "set", "target": "receipt", "path": ["source", "manifest_path"], "value": "different/manifest.json", "expect": "source.manifest_path differs"},
+    {"name": "receipt_manifest_digest_drift", "mutation": "set", "target": "receipt", "path": ["source", "manifest_sha256"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "source.manifest_sha256 differs"},
+    {"name": "receipt_generation_drift", "mutation": "set", "target": "receipt", "path": ["generation_id"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "receipt generation_id differs"},
+    {"name": "receipt_mutation_outcome_drift", "mutation": "set", "target": "receipt", "path": ["mutation_outcome"], "value": "LIVE_MUTATED", "expect": "receipt mutation_outcome must be NO_LIVE_MUTATION_PREPARED"},
+    {"name": "state_operation_drift", "mutation": "set", "target": "state", "path": ["operation_id"], "value": "different-operation", "expect": "state operation_id differs"},
+    {"name": "state_status_drift", "mutation": "set", "target": "state", "path": ["status"], "value": "RESERVED", "expect": "state status must be PREPARED"},
+    {"name": "state_source_repository_drift", "mutation": "set", "target": "state", "path": ["source_repository"], "value": "/different/repository", "expect": "state source_repository differs"},
+    {"name": "state_source_commit_drift", "mutation": "set", "target": "state", "path": ["source_commit"], "value": "0000000000000000000000000000000000000000", "expect": "state source_commit differs"},
+    {"name": "state_source_tree_drift", "mutation": "set", "target": "state", "path": ["source_tree"], "value": "0000000000000000000000000000000000000000", "expect": "state source_tree differs"},
+    {"name": "state_manifest_path_drift", "mutation": "set", "target": "state", "path": ["manifest_path"], "value": "different/manifest.json", "expect": "state manifest_path differs"},
+    {"name": "state_manifest_digest_drift", "mutation": "set", "target": "state", "path": ["manifest_sha256"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "state manifest_sha256 differs"},
+    {"name": "state_generation_drift", "mutation": "set", "target": "state", "path": ["generation_id"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "state generation_id differs"},
+    {"name": "staged_checker_argv_drift", "mutation": "drop_self_test", "target": "staged", "expect": "staged_validation.argv must be"},
+    {"name": "staged_checker_digest_drift", "mutation": "set", "target": "staged", "path": ["checker_sha256"], "value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "checker digest differs"},
+    {"name": "staged_checker_exit_failure", "mutation": "set", "target": "staged", "path": ["exit_status"], "value": 1, "expect": "exit_status must be integer zero"},
+    {"name": "staged_checker_stderr_nonempty", "mutation": "set", "target": "staged", "path": ["stderr"], "value": "failed", "expect": "stderr must be empty"},
+    {"name": "staged_checker_result_failure", "mutation": "set", "target": "staged", "path": ["result", "status"], "value": "FAIL", "expect": "result must be a schema-1 PASS result"},
+    {"name": "staged_checker_outcome_failure", "mutation": "set", "target": "staged", "path": ["named_mutation_outcomes", "contract.self_test"], "value": "FAIL", "expect": "named_mutation_outcomes must be a nonempty all-PASS object"},
+    {"name": "staged_checker_source_drift", "mutation": "checker_source_drift", "target": "staged", "expect": "staged checker differs from source_commit"},
+    {"name": "staged_checker_dropped_outcome", "mutation": "drop_outcome", "target": "staged", "expect": "fresh staged checker named outcomes differ"},
+    {"name": "staged_checker_fake_launcher", "mutation": "fake_launcher", "target": "staged", "expect": "must resolve to the current trusted interpreter"},
+    {"name": "undeclared_prepare_receipt_status", "mutation": "set", "target": "receipt", "path": ["live_publication_status"], "value": "PUBLISHED", "expect": "prepare receipt has undeclared fields"},
+    {"name": "undeclared_prepare_state_status", "mutation": "set", "target": "state", "path": ["live_publication_status"], "value": "PUBLISHED", "expect": "prepare state has undeclared fields"}
+  ],
+  "scope_cases": [
+    {
+      "name": "fabricated_publication_and_acceptance_complete",
+      "changes": [
+        {"path": ["scope", "publish"], "value": "COMPLETE"},
+        {"path": ["scope", "final_fact_review"], "value": "COMPLETE"},
+        {"path": ["scope", "postpublication_panel"], "value": "COMPLETE"},
+        {"path": ["scope", "accept"], "value": "COMPLETE"}
+      ],
+      "expect": "scope.publish must be NOT_RUN"
+    },
+    {"name": "source_guidance_reviewed", "path": ["scope", "source_guidance_status_before_review"], "value": "REVIEWED", "expect": "scope.source_guidance_status_before_review must be NOT_REVIEWED"},
+    {"name": "live_installation_published", "path": ["scope", "live_installation"], "value": "PUBLISHED", "expect": "scope.live_installation must be UNCHANGED_PREDECESSOR"},
+    {"name": "reader_quiescence_complete", "path": ["scope", "reader_quiescence"], "value": "COMPLETE", "expect": "scope.reader_quiescence must be UNCHECKED"},
+    {"name": "reserve_complete", "path": ["scope", "reserve"], "value": "COMPLETE", "expect": "scope.reserve must be NOT_RUN"},
+    {"name": "publish_complete", "path": ["scope", "publish"], "value": "COMPLETE", "expect": "scope.publish must be NOT_RUN"},
+    {"name": "final_fact_review_complete", "path": ["scope", "final_fact_review"], "value": "COMPLETE", "expect": "scope.final_fact_review must be NOT_RUN"},
+    {"name": "postpublication_panel_complete", "path": ["scope", "postpublication_panel"], "value": "COMPLETE", "expect": "scope.postpublication_panel must be NOT_RUN"},
+    {"name": "accept_complete", "path": ["scope", "accept"], "value": "COMPLETE", "expect": "scope.accept must be NOT_RUN"},
+    {"name": "implicit_model_selection_complete", "path": ["scope", "implicit_model_selection"], "value": "COMPLETE", "expect": "scope.implicit_model_selection must be UNCHECKED"}
+  ],
+  "undeclared_cases": [
+    {"name": "undeclared_top_level", "path": [], "field": "unexpected", "value": true, "expect": "panel input has undeclared fields"},
+    {"name": "undeclared_repository_field", "path": ["repositories", "global"], "field": "unexpected", "value": true, "expect": "repositories.global has undeclared fields"},
+    {"name": "undeclared_installed_field", "path": ["installed"], "field": "unexpected", "value": true, "expect": "installed has undeclared fields"},
+    {"name": "undeclared_prepare_field", "path": ["prepare"], "field": "unexpected", "value": true, "expect": "prepare has undeclared fields"},
+    {"name": "undeclared_scope_field", "path": ["scope"], "field": "unexpected", "value": true, "expect": "scope has undeclared fields"}
+  ],
+  "file_safety_cases": [
+    {"name": "manifest_symlink", "target": "manifest", "kind": "symlink", "expect": "regular non-symlink single-link file"},
+    {"name": "manifest_hardlink", "target": "manifest", "kind": "hardlink", "expect": "regular non-symlink single-link file"},
+    {"name": "manifest_size_race", "target": "manifest", "kind": "size_race", "expect": "changed identity or size while being read"},
+    {"name": "manifest_missing_final_lf", "target": "manifest", "kind": "missing_final_lf", "expect": "exactly one final LF"},
+    {"name": "manifest_blank_row", "target": "manifest", "kind": "blank_row", "expect": "exactly one final LF"},
+    {"name": "manifest_extra_row", "target": "manifest", "kind": "extra_row", "expect": "exactly one panel_input row"},
+    {"name": "receipt_symlink", "target": "receipt", "kind": "symlink", "expect": "regular non-symlink single-link file"},
+    {"name": "receipt_hardlink", "target": "receipt", "kind": "hardlink", "expect": "regular non-symlink single-link file"},
+    {"name": "receipt_size_race", "target": "receipt", "kind": "size_race", "expect": "changed identity or size while being read"},
+    {"name": "state_symlink", "target": "state", "kind": "symlink", "expect": "regular non-symlink single-link file"},
+    {"name": "state_hardlink", "target": "state", "kind": "hardlink", "expect": "regular non-symlink single-link file"}
   ]
 }
