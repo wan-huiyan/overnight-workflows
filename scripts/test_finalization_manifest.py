@@ -641,6 +641,61 @@ class FinalizationManifestTests(unittest.TestCase):
         }
         return payload, inventory.digest
 
+    def required_validation(
+        self,
+        root: Path,
+        *,
+        review_id: str = "review-test",
+        status: str = "PASS",
+    ) -> tuple[dict[str, object], Path]:
+        path = root / "claim-map-validation.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "result_schema": "readiness-claim-map-validation-v1",
+                    "review_id": review_id,
+                    "identity_coverage_status": status,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return (
+            {
+                "artifact_kind": "readiness-claim-map-validation",
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "status_field": "identity_coverage_status",
+                "required_status": "PASS",
+            },
+            path,
+        )
+
+    def append_required_validation_artifact(
+        self,
+        path: Path,
+        requirement: dict[str, object],
+        *,
+        review_id: str = "review-test",
+        state: str = "PASS",
+    ) -> None:
+        manifest.append_finalization_record(
+            path,
+            record_type="artifact_registered",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": review_id,
+                "artifact_kind": requirement["artifact_kind"],
+                "path": requirement["path"],
+                "sha256": requirement["sha256"],
+                "state": state,
+                "next_action": "dispatch source review",
+            },
+        )
+
     def make_frozen_legacy_sealed_manifest(self, root: Path) -> Path:
         """Reframe one valid three-phase v2 lifecycle as archived v1 bytes."""
 
@@ -795,6 +850,25 @@ class FinalizationManifestTests(unittest.TestCase):
             )
             self.assertEqual(2, manifest.validate_manifest(path)["record_count"])
 
+            invalid_requirement = copy.deepcopy(payload)
+            invalid_requirement["required_pre_dispatch_validation"] = {
+                "artifact_kind": "validation",
+                "path": str(root / "validation.json"),
+                "sha256": "8" * 64,
+                "status_field": "status",
+                "required_status": "FAIL",
+            }
+            invalid_path = self.make_manifest(root, "invalid-requirement.jsonl")
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "required_status must equal PASS"
+            ):
+                manifest.append_finalization_record(
+                    invalid_path,
+                    record_type="source_review_input_registered",
+                    writer_controller_id="controller-test",
+                    payload=invalid_requirement,
+                )
+
             project_specific = copy.deepcopy(self.records(path))
             source = project_specific[1]
             source.pop("repository_heads")
@@ -823,13 +897,29 @@ class FinalizationManifestTests(unittest.TestCase):
             payload, raw_digest = self.source_review_evidence(
                 evidence_root, panel_record, repository_heads
             )
-            path = self.make_manifest(root, "schema3-finalization.jsonl")
+            requirement, validation_path = self.required_validation(evidence_root)
+            payload["required_pre_dispatch_validation"] = requirement
+            path = self.make_manifest(evidence_root, "schema3-finalization.jsonl")
             manifest.append_finalization_record(
                 path,
                 record_type="source_review_input_registered",
                 writer_controller_id="controller-test",
                 payload=payload,
             )
+            before_registration = path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "required PASS artifact registration"
+            ):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before_registration, path.read_bytes())
+            self.append_required_validation_artifact(path, requirement)
+            registered = path.read_bytes()
+            validation_bytes = validation_path.read_bytes()
+            validation_path.write_bytes(validation_bytes + b"drift")
+            with self.assertRaisesRegex(manifest.PublicationError, "digest drifted"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(registered, path.read_bytes())
+            validation_path.write_bytes(validation_bytes)
             sealed = self.seal(path, "dispatch", raw_digest)
             self.assertEqual("dispatch", sealed["record"]["phase"])
             self.assertEqual(manifest.MANIFEST_SCHEMA, manifest.validate_manifest(path)["manifest_schema"])
@@ -857,6 +947,110 @@ class FinalizationManifestTests(unittest.TestCase):
             ):
                 self.seal(archived_attempt, "dispatch", archived_digest)
             self.assertEqual(before, archived_attempt.read_bytes())
+
+    def test_declared_pre_dispatch_validation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-required-gate-") as raw:
+            root = Path(raw).resolve()
+            panel_record = self.make_real_schema3_panel(root)
+            roles = panel_record["repository_roles"]
+            repositories = panel_record["repositories"]
+            assert isinstance(roles, dict) and isinstance(repositories, dict)
+            repository_heads = {
+                role: {
+                    "repository_key": repository_key,
+                    "head_sha": repositories[repository_key]["head_sha"],
+                }
+                for role, repository_key in roles.items()
+            }
+
+            def make_case(
+                name: str,
+                *,
+                receipt_review_id: str = "review-test",
+                status: str = "PASS",
+                registration_review_id: str = "review-test",
+                registration_state: str = "PASS",
+            ) -> tuple[Path, str, dict[str, object]]:
+                case = root / name
+                payload, digest = self.source_review_evidence(
+                    case, panel_record, repository_heads
+                )
+                requirement, _ = self.required_validation(
+                    case, review_id=receipt_review_id, status=status
+                )
+                payload["required_pre_dispatch_validation"] = requirement
+                path = self.make_manifest(case)
+                manifest.append_finalization_record(
+                    path,
+                    record_type="source_review_input_registered",
+                    writer_controller_id="controller-test",
+                    payload=payload,
+                )
+                self.append_required_validation_artifact(
+                    path,
+                    requirement,
+                    review_id=registration_review_id,
+                    state=registration_state,
+                )
+                return path, digest, requirement
+
+            wrong_registration, digest, _ = make_case(
+                "wrong-registration", registration_review_id="other-review"
+            )
+            before = wrong_registration.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "required PASS artifact registration"
+            ):
+                self.seal(wrong_registration, "dispatch", digest)
+            self.assertEqual(before, wrong_registration.read_bytes())
+
+            nonpass_registration, digest, _ = make_case(
+                "nonpass-registration", registration_state="FAIL"
+            )
+            before = nonpass_registration.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "required PASS artifact registration"
+            ):
+                self.seal(nonpass_registration, "dispatch", digest)
+            self.assertEqual(before, nonpass_registration.read_bytes())
+
+            failed_receipt, digest, _ = make_case("failed-receipt", status="FAIL")
+            before = failed_receipt.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "not PASS for this review"
+            ):
+                self.seal(failed_receipt, "dispatch", digest)
+            self.assertEqual(before, failed_receipt.read_bytes())
+
+            wrong_receipt, digest, _ = make_case(
+                "wrong-receipt", receipt_review_id="other-review"
+            )
+            before = wrong_receipt.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "not PASS for this review"
+            ):
+                self.seal(wrong_receipt, "dispatch", digest)
+            self.assertEqual(before, wrong_receipt.read_bytes())
+
+            invalidated, digest, requirement = make_case("invalidated")
+            manifest.append_finalization_record(
+                invalidated,
+                record_type="artifact_invalidation",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": requirement["artifact_kind"],
+                    "path": requirement["path"],
+                    "prior_sha256": requirement["sha256"],
+                    "reason": "source evidence changed",
+                    "state": "INVALIDATED",
+                    "next_action": "rebuild validation",
+                },
+            )
+            before = invalidated.read_bytes()
+            with self.assertRaisesRegex(manifest.PublicationError, "was invalidated"):
+                self.seal(invalidated, "dispatch", digest)
+            self.assertEqual(before, invalidated.read_bytes())
 
     def test_legacy_project_manifest_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-legacy-") as raw:

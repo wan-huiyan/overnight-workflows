@@ -1,7 +1,7 @@
 {
   "name": "overnight-multi-issue-implementation",
   "description": "Overnight autonomous implementation for either 6–15 related GitHub issues or a large mixed live queue. Covers stacked PRs, stale and partial classification, owner and authority gates, shared-file ownership, durable recovery, immutable base/head review, and serial integration. Sister to overnight-review-client-delivery and overnight-insight-discovery.",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "author": {
     "name": "wan-huiyan"
   },

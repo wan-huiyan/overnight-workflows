@@ -555,6 +555,36 @@ finalization `source_review_input_registered` row. Do not create new schema-2
 panel rows; schema-2 panel input is a read-only legacy format and cannot supply
 the generic role-to-head join.
 
+When repository rules require a validation receipt before reviewers may see the
+source, the same source-review row must declare its exact generic gate:
+
+```json
+{
+  "required_pre_dispatch_validation": {
+    "artifact_kind": "readiness-claim-map-validation",
+    "path": "/absolute/review/claim-map-validation.json",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status_field": "identity_coverage_status",
+    "required_status": "PASS"
+  }
+}
+```
+
+Append an `artifact_registered` row with the same review ID, artifact kind,
+absolute path, and SHA-256, and literal `state: "PASS"`. The registered JSON
+artifact must itself contain that review ID and the configured top-level status
+field with value `PASS`. The canonical generic-v2 `dispatch` seal rereads the
+file and rejects a missing registration, changed bytes, a non-PASS state or
+receipt, another review ID, or an invalidation row. Run any receipt-specific
+create-once verifier immediately before sealing as well; the generic gate binds
+its result but does not replace its domain checks.
+
+An archived generic-v2 source row without
+`required_pre_dispatch_validation` keeps its original ungated meaning. A new
+review whose repository rules require a gate must declare it; omission is not a
+way to bypass that rule. Reviews with no required pre-dispatch validation may
+omit the field explicitly under this compatibility rule.
+
 Resolve the panel validator from the exact `SKILL.md` path in the active
 loader record; do not scan discovery roots or guess the newest cache. An
 installed umbrella carries the validator beside this workflow. A canonical

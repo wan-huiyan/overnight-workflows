@@ -72,6 +72,24 @@ PANEL_SCHEMA3_README_MARKERS = (
     "semantic roles to repository keys",
     "derive finalization `repository_heads` mechanically from that validated map",
 )
+PRE_DISPATCH_VALIDATION_ROUTE_MARKERS = (
+    "the same source-review row must declare its exact generic gate",
+    '"required_pre_dispatch_validation"',
+    'literal `state: "PASS"`',
+    "rejects a missing registration, changed bytes, a non-PASS state or receipt, "
+    "another review ID, or an invalidation row",
+    "An archived generic-v2 source row without `required_pre_dispatch_validation` "
+    "keeps its original ungated meaning",
+)
+PRE_DISPATCH_VALIDATION_README_MARKERS = (
+    "A source review may also declare one exact "
+    "`required_pre_dispatch_validation`",
+    "an `artifact_registered` row must bind the same artifact and review with "
+    "state `PASS`",
+    "rejects absence, byte drift, invalidation, non-PASS status, or a different "
+    "review ID",
+    "retain their explicit ungated compatibility meaning",
+)
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
     r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?Z$"
@@ -324,6 +342,16 @@ def check_panel_schema3_guidance(
     for marker in PANEL_SCHEMA3_README_MARKERS:
         if marker not in normalized_readme:
             errors.append(f"panel schema-3 README guidance is missing {marker!r}")
+    for marker in PRE_DISPATCH_VALIDATION_ROUTE_MARKERS:
+        if marker not in normalized_reference:
+            errors.append(
+                f"pre-dispatch validation route guidance is missing {marker!r}"
+            )
+    for marker in PRE_DISPATCH_VALIDATION_README_MARKERS:
+        if marker not in normalized_readme:
+            errors.append(
+                f"pre-dispatch validation README guidance is missing {marker!r}"
+            )
     for stale in (
         "Panel dispatches use exact schema-2 `panel_input` records",
         "Run that schema-2 validation before dispatch",
@@ -351,6 +379,27 @@ def run_panel_schema3_guidance_negative_control(
     check_panel_schema3_guidance(mutated, readme, observed)
     if not any("panel schema-3 route guidance is missing" in item for item in observed):
         errors.append("panel schema-3 regression negative control did not fail")
+
+
+def run_pre_dispatch_validation_guidance_negative_control(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Prove removal of the mechanical dispatch gate is observable."""
+    marker = PRE_DISPATCH_VALIDATION_ROUTE_MARKERS[0]
+    normalized_reference = " ".join(reference.split())
+    if marker not in normalized_reference:
+        errors.append("pre-dispatch validation control setup marker is absent")
+        return
+    mutated = normalized_reference.replace(marker, "a prose note may mention a gate", 1)
+    observed: list[str] = []
+    check_panel_schema3_guidance(mutated, readme, observed)
+    if not any(
+        "pre-dispatch validation route guidance is missing" in item
+        for item in observed
+    ):
+        errors.append("pre-dispatch validation negative control did not fail")
 
 
 def read_json(path: Path, errors: list[str]) -> dict[str, Any]:
@@ -3116,6 +3165,7 @@ def named_self_test_outcomes(
             "routing.child_authority",
             "routing.final_byte_review",
             "guidance.panel_schema3_regression",
+            "guidance.pre_dispatch_validation_regression",
             "routing.schedule_consolidation_latch",
             "routing.schedule_unconditional_action",
             "routing.authority.loaded_client_deny_and_exact_grants",
@@ -3403,6 +3453,9 @@ def main() -> int:
         run_install_negative_controls(mappings, errors)
         run_routing_negative_controls(routing_cases, mappings, codex, errors)
         run_panel_schema3_guidance_negative_control(reference, readme, errors)
+        run_pre_dispatch_validation_guidance_negative_control(
+            reference, readme, errors
+        )
         run_materialized_authority_controls(mappings, routing_cases, errors)
         run_fixture_inventory_negative_controls(fixtures, errors)
     if args.installed_root:

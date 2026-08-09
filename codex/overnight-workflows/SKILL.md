@@ -26,6 +26,7 @@ An overnight request requires persistence, not broader authority. Define allowed
 - Re-check current remote state before every merge or deployment.
 - Keep PASS, FAIL, BLOCKED, and UNCHECKED distinct.
 - Commit all integrator-owned edits first, then review one literal target ref and its dispatch SHA, immutable merge-base SHA, head SHA, tree SHA, literal deterministic diff argv array, and diff digest. For installed-package review, also freeze the complete evidence inventory, generation, source commit/tree, and manifest digest. A later commit, rebase, target change, merge-base change, or digest change invalidates the affected verdict.
+- When repository rules require a validation artifact before source review, declare its kind, absolute path, SHA-256, status field, and required `PASS` status in the generic-v2 source-review input. Register that exact artifact for the same review with state `PASS`; the dispatch seal must re-read it and fail on absence, drift, invalidation, non-PASS status, or review mismatch.
 - Treat worktree and branch inventories as evidence, not permission to clean another session's state.
 - Stop on ambiguous destructive action, missing authority, repeated invariant failure, or evidence that integration would overwrite newer work.
 

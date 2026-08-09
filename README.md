@@ -209,9 +209,17 @@ fields, and one final LF. Unknown types, undeclared fields, duplicate
 identities, partial rows, links, and changed inodes fail closed. The controller
 must use its `init`, `append`, and `seal-prefix` commands instead of building
 JSONL directly. New source-review rows bind an arbitrary, exact repository-role
-map instead of project names. The publisher imports the same parser and
-appender. The prior project-specific schema-1 grammar remains available only
-to reproduce archived manifests; it cannot be appended or sealed.
+map instead of project names. A source review may also declare one exact
+`required_pre_dispatch_validation` with its artifact kind, absolute path,
+SHA-256, top-level status field, and required `PASS` value. Before the dispatch
+seal, an `artifact_registered` row must bind the same artifact and review with
+state `PASS`; the writer rereads the JSON and rejects absence, byte drift,
+invalidation, non-PASS status, or a different review ID. Generic-v2 source rows
+that omit the optional field retain their explicit ungated compatibility
+meaning; omission must not bypass a repository-required gate. The publisher
+imports the same parser and appender. The prior project-specific schema-1
+grammar remains available only to reproduce archived manifests; it cannot be
+appended or sealed.
 
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
@@ -352,6 +360,14 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.2**:
+  a source-review input can require one exact pre-dispatch validation artifact.
+  The generic-v2 dispatch seal now joins that declaration to a same-review
+  `artifact_registered` PASS row, rereads the JSON receipt, and fails on a
+  missing, changed, invalidated, non-PASS, or cross-review artifact. Existing
+  generic-v2 reviews that declare no gate keep their prior behavior, and frozen
+  legacy-v1 evidence remains read-only. The source-only 44-file package is not
+  published by this change; bundle `VERSION` remains **1.5.0**.
 - **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.1**:
   new review producers use generic schema-3 panel inputs with an exact
   one-to-one repository-role map and mechanically derived generic-v2

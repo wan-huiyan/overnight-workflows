@@ -16,7 +16,7 @@ description: |
   owner's rulings", "classify this live queue", or wants a stacked-PR autonomous run from an issue cluster.
   NOT for: synchronous single-PR work, polishing an existing deliverable, or generating insights from data.
 author: wan-huiyan + Claude Code
-version: 1.5.1
+version: 1.5.2
 date: 2026-08-09
 ---
 

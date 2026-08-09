@@ -116,6 +116,14 @@ ENVELOPE_FIELDS = {
     "writer_controller_id",
 }
 
+PRE_DISPATCH_VALIDATION_FIELDS = {
+    "artifact_kind",
+    "path",
+    "sha256",
+    "status_field",
+    "required_status",
+}
+
 
 @dataclass(frozen=True)
 class RecordSchema:
@@ -147,6 +155,7 @@ RECORD_SCHEMAS: Dict[str, RecordSchema] = {
             "expected_judges received_judges live_installation_status "
             "source_guidance_status state next_action"
         ),
+        optional=_fields("required_pre_dispatch_validation"),
         identity_fields=("review_id",),
     ),
     "source_review_independent_reports_received": RecordSchema(
@@ -464,6 +473,22 @@ def _validate_repository_heads(value: Any, label: str) -> None:
         raise PublicationError(f"{label} must declare the installed_source role")
 
 
+def _validate_pre_dispatch_validation_requirement(value: Any, label: str) -> None:
+    if not isinstance(value, dict) or set(value) != PRE_DISPATCH_VALIDATION_FIELDS:
+        raise PublicationError(
+            f"{label} must have exact artifact kind, path, digest, and status fields"
+        )
+    _require_identity(value.get("artifact_kind"), f"{label} artifact_kind")
+    path = value.get("path")
+    if not isinstance(path, str):
+        raise PublicationError(f"{label} path must be absolute")
+    _safe_absolute(Path(path), label=f"{label} path")
+    _require_sha256(value.get("sha256"), f"{label} sha256")
+    _require_identity(value.get("status_field"), f"{label} status_field")
+    if value.get("required_status") != "PASS":
+        raise PublicationError(f"{label} required_status must equal PASS")
+
+
 def _validate_record_payload(
     record: Mapping[str, Any],
     row: int,
@@ -546,6 +571,11 @@ def _validate_record_payload(
                 record.get("repository_heads"),
                 f"finalization row {row} repository_heads",
             )
+            if "required_pre_dispatch_validation" in record:
+                _validate_pre_dispatch_validation_requirement(
+                    record["required_pre_dispatch_validation"],
+                    f"finalization row {row} required_pre_dispatch_validation",
+                )
         else:
             for field in ("global_head_sha", "doodlerun_head_sha"):
                 if (
@@ -949,6 +979,65 @@ def _verify_artifact_record(record: Mapping[str, Any], label: str) -> bytes:
     if "lines" in record and record.get("lines") != len(data.splitlines()):
         raise PublicationError(f"{label} recorded line count drifted")
     return data
+
+
+def _verify_required_pre_dispatch_validation(
+    records: Sequence[Mapping[str, Any]],
+    source_input: Mapping[str, Any],
+) -> None:
+    requirement = source_input.get("required_pre_dispatch_validation")
+    if requirement is None:
+        return
+    if not isinstance(requirement, dict):
+        raise PublicationError("required pre-dispatch validation is malformed")
+    review_id = source_input.get("review_id")
+    artifact_kind = requirement.get("artifact_kind")
+    path = requirement.get("path")
+    digest = requirement.get("sha256")
+    registration = _matching_record(
+        records,
+        "artifact_registered",
+        review_id=review_id,
+        artifact_kind=artifact_kind,
+        path=path,
+        sha256=digest,
+        state="PASS",
+    )
+    if registration is None:
+        raise PublicationError(
+            "manifest-prefix dispatch lacks its required PASS artifact registration"
+        )
+    invalidation = _matching_record(
+        records,
+        "artifact_invalidation",
+        review_id=review_id,
+        artifact_kind=artifact_kind,
+        path=path,
+        prior_sha256=digest,
+    )
+    if invalidation is not None:
+        raise PublicationError(
+            "manifest-prefix dispatch required validation artifact was invalidated"
+        )
+    data = _verify_artifact_record(
+        registration, "required pre-dispatch validation artifact"
+    )
+    try:
+        receipt = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(
+            "required pre-dispatch validation artifact is invalid JSON"
+        ) from exc
+    status_field = requirement.get("status_field")
+    required_status = requirement.get("required_status")
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("review_id") != review_id
+        or receipt.get(status_field) != required_status
+    ):
+        raise PublicationError(
+            "required pre-dispatch validation artifact is not PASS for this review"
+        )
 
 
 def judgment_input_identity(
@@ -1410,6 +1499,7 @@ def _require_review_phase_prerequisites(
         )
     if historical_input is not None:
         _verify_source_raw_input(historical_input)
+        _verify_required_pre_dispatch_validation(records, historical_input)
     if generic_input is not None:
         _verify_generic_raw_input(generic_input)
     if phase == "dispatch":
