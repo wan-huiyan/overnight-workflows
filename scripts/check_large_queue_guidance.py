@@ -13,6 +13,7 @@ import posixpath
 import re
 import select
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -2053,24 +2054,110 @@ def run_install_negative_controls(
             "references/workflows/overnight-insight-discovery/"
             "assets/morning_summary_template.md"
         )
-        original_probe = link_probe.read_bytes()
-        link_probe.write_bytes(
-            original_probe
-            + b"\n[missing reference][probe]\n[probe]: missing-reference.md\n"
-            + b"<missing-autolink.md>\n"
+        canonical_probe = ROOT / (
+            "plugins/overnight-insight-discovery/"
+            "assets/morning_summary_template.md"
         )
-        link_errors: list[str] = []
-        check_installed_inventory(installed_root, mappings, link_errors)
-        for missing_name in ("missing-reference.md", "missing-autolink.md"):
-            if not any(
-                "installed local link is missing" in item
-                and missing_name in item
-                for item in link_errors
+        probe_stat = os.lstat(link_probe)
+        canonical_stat = os.lstat(canonical_probe)
+        if (
+            not stat.S_ISREG(probe_stat.st_mode)
+            or not stat.S_ISREG(canonical_stat.st_mode)
+            or probe_stat.st_nlink != 1
+            or (probe_stat.st_dev, probe_stat.st_ino)
+            == (canonical_stat.st_dev, canonical_stat.st_ino)
+        ):
+            errors.append("Markdown-link negative-control probe is not an isolated file")
+            return
+        canonical_before = canonical_probe.read_bytes()
+        original_mode = stat.S_IMODE(probe_stat.st_mode)
+        guard_descriptor = os.open(
+            link_probe, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
+        probe_mode_changed = False
+        try:
+            opened = os.fstat(guard_descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (probe_stat.st_dev, probe_stat.st_ino)
+                != (opened.st_dev, opened.st_ino)
             ):
                 errors.append(
-                    f"{missing_name} Markdown-link negative control did not fail"
+                    "Markdown-link negative-control probe changed before mutation"
                 )
-        link_probe.write_bytes(original_probe)
+                return
+            original_chunks: list[bytes] = []
+            while True:
+                chunk = os.read(guard_descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                original_chunks.append(chunk)
+            original_probe = b"".join(original_chunks)
+            os.fchmod(guard_descriptor, original_mode | stat.S_IWUSR)
+            probe_mode_changed = True
+            write_descriptor = os.open(
+                link_probe, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            )
+            try:
+                writable = os.fstat(write_descriptor)
+                if (
+                    not stat.S_ISREG(writable.st_mode)
+                    or writable.st_nlink != 1
+                    or (opened.st_dev, opened.st_ino)
+                    != (writable.st_dev, writable.st_ino)
+                ):
+                    errors.append(
+                        "Markdown-link negative-control probe changed before write"
+                    )
+                    return
+
+                def replace_probe(data: bytes) -> None:
+                    os.lseek(write_descriptor, 0, os.SEEK_SET)
+                    os.ftruncate(write_descriptor, 0)
+                    view = memoryview(data)
+                    while view:
+                        written = os.write(write_descriptor, view)
+                        view = view[written:]
+
+                try:
+                    replace_probe(
+                        original_probe
+                        + b"\n[missing reference][probe]\n"
+                        + b"[probe]: missing-reference.md\n"
+                        + b"<missing-autolink.md>\n"
+                    )
+                    link_errors: list[str] = []
+                    check_installed_inventory(installed_root, mappings, link_errors)
+                    for missing_name in (
+                        "missing-reference.md",
+                        "missing-autolink.md",
+                    ):
+                        if not any(
+                            "installed local link is missing" in item
+                            and missing_name in item
+                            for item in link_errors
+                        ):
+                            errors.append(
+                                f"{missing_name} Markdown-link negative control did not fail"
+                            )
+                finally:
+                    replace_probe(original_probe)
+            finally:
+                os.close(write_descriptor)
+        finally:
+            try:
+                if probe_mode_changed:
+                    os.fchmod(guard_descriptor, original_mode)
+            finally:
+                os.close(guard_descriptor)
+        canonical_after = os.lstat(canonical_probe)
+        if (
+            canonical_probe.read_bytes() != canonical_before
+            or stat.S_IMODE(canonical_after.st_mode)
+            != stat.S_IMODE(canonical_stat.st_mode)
+        ):
+            errors.append("Markdown-link negative control mutated its canonical source")
 
         child_entrypoint = installed_root / (
             "references/workflows/overnight-insight-discovery/SKILL.md"

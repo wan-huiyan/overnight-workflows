@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -336,6 +337,58 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(publisher.INVENTORY_FORMAT, guidance.INSTALL_INVENTORY_FORMAT)
         self.assertEqual(publisher.INVENTORY_FORMAT, manifest["evidence_inventory_format"])
 
+    def test_rejected_negative_control_probe_inode_is_never_chmodded(self) -> None:
+        real_open = os.open
+        real_fstat = os.fstat
+        real_fchmod = os.fchmod
+        guard_descriptors: set[int] = set()
+        injected_descriptors: set[int] = set()
+        chmod_descriptors: list[int] = []
+
+        def controlled_open(
+            path: os.PathLike[str] | str,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            if dir_fd is None:
+                descriptor = real_open(path, flags, mode)
+            else:
+                descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+            if (
+                str(path).endswith("assets/morning_summary_template.md")
+                and flags & os.O_ACCMODE == os.O_RDONLY
+            ):
+                guard_descriptors.add(descriptor)
+            return descriptor
+
+        def controlled_fstat(descriptor: int) -> os.stat_result:
+            result = real_fstat(descriptor)
+            if descriptor in guard_descriptors and descriptor not in injected_descriptors:
+                injected_descriptors.add(descriptor)
+                fields = list(result)
+                fields[1] += 1
+                return os.stat_result(fields)
+            return result
+
+        def controlled_fchmod(descriptor: int, mode: int) -> None:
+            chmod_descriptors.append(descriptor)
+            real_fchmod(descriptor, mode)
+
+        errors: list[str] = []
+        with mock.patch.object(guidance.os, "open", side_effect=controlled_open), mock.patch.object(
+            guidance.os, "fstat", side_effect=controlled_fstat
+        ), mock.patch.object(guidance.os, "fchmod", side_effect=controlled_fchmod):
+            guidance.run_install_negative_controls(
+                guidance.expected_install_mappings(), errors
+            )
+        self.assertTrue(injected_descriptors)
+        self.assertIn(
+            "Markdown-link negative-control probe changed before mutation", errors
+        )
+        self.assertEqual([], chmod_descriptors)
+
     def test_sha256_size_path_v1_is_exact_and_one_byte_drift_changes_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="publisher-inventory-") as raw:
             root = Path(raw).resolve()
@@ -492,6 +545,107 @@ class PublicationTests(unittest.TestCase):
             receipt["candidate_inventory"]["sha256"],
             receipt["evidence_snapshot"]["sha256"],
         )
+
+    def test_real_prepare_checker_accepts_read_only_immutable_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="publisher-real-read-only-") as raw:
+            root = Path(raw).resolve()
+            canonical_root = Path(__file__).resolve().parents[1]
+            repository = root / "repository"
+            repository.mkdir()
+            tracked = subprocess.run(
+                ["git", "ls-files", "-z"],
+                cwd=canonical_root,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout.split(b"\0")
+            for encoded_path in tracked:
+                if not encoded_path:
+                    continue
+                relative = Path(os.fsdecode(encoded_path))
+                source = canonical_root / relative
+                destination = repository / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_symlink():
+                    os.symlink(os.readlink(source), destination)
+                else:
+                    shutil.copy2(source, destination)
+            run(["git", "init", "-q"], repository)
+            run(["git", "add", "."], repository)
+            run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Publisher Test",
+                    "-c",
+                    "user.email=publisher@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    "real checker read-only source fixture",
+                ],
+                repository,
+            )
+            commit = run(["git", "rev-parse", "HEAD"], repository)
+            manifest_path = "codex/overnight-workflows/install-manifest.json"
+            manifest = json.loads((repository / manifest_path).read_text(encoding="utf-8"))
+            install_root = root / "skills/overnight-workflows"
+            for mapping in manifest["mappings"]:
+                destination = install_root / mapping["installed_path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(repository / mapping["canonical_source"], destination)
+            expected_paths = {
+                mapping["installed_path"] for mapping in manifest["mappings"]
+            }
+            live_before = publisher.build_inventory(install_root, expected_paths)
+
+            probe_relative = Path(
+                "plugins/overnight-insight-discovery/"
+                "assets/morning_summary_template.md"
+            )
+            canonical_probe = canonical_root / probe_relative
+            repository_probe = repository / probe_relative
+            canonical_before = (
+                canonical_probe.read_bytes(),
+                os.stat(canonical_probe).st_mode,
+            )
+            repository_before = (
+                repository_probe.read_bytes(),
+                os.stat(repository_probe).st_mode,
+            )
+            state_root = root / "state"
+            receipt = publisher.prepare_operation(
+                source_repository=repository,
+                source_commit=commit,
+                expected_live_source_commit=commit,
+                manifest_path=manifest_path,
+                install_root=install_root,
+                state_root=state_root,
+                evidence_root=root / "evidence/read-only-source",
+                operation="read-only-source",
+            )
+
+            paths = publisher._operation_paths(state_root, "read-only-source")
+            immutable_probe = paths["source"] / probe_relative
+            immutable_checker = paths["source"] / "scripts/check_large_queue_guidance.py"
+            self.assertEqual(0, os.stat(immutable_probe).st_mode & 0o222)
+            self.assertEqual(0, os.stat(immutable_checker).st_mode & 0o222)
+            self.assertEqual(repository_probe.read_bytes(), immutable_probe.read_bytes())
+            self.assertEqual(
+                live_before.data,
+                publisher.build_inventory(install_root, expected_paths).data,
+            )
+            self.assertEqual(
+                canonical_before,
+                (canonical_probe.read_bytes(), os.stat(canonical_probe).st_mode),
+            )
+            self.assertEqual(
+                repository_before,
+                (repository_probe.read_bytes(), os.stat(repository_probe).st_mode),
+            )
+            outcomes = receipt["staged_validation"]["named_mutation_outcomes"]
+            self.assertGreaterEqual(len(outcomes), 1)
+            self.assertTrue(all(result == "PASS" for result in outcomes.values()))
 
     def test_prepare_rejects_incorrect_expected_live_source_commit(self) -> None:
         temporary, harness = self.make_harness()
