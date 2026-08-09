@@ -221,6 +221,14 @@ imports the same parser and appender. The prior project-specific schema-1
 grammar remains available only to reproduce archived manifests; it cannot be
 appended or sealed.
 
+Generic-v2 `raw_input_registered` rows are restricted to the
+`postpublication-installed-snapshot` boundary. A
+`prepublication-source-and-staged-snapshot` dispatch must use
+`source_review_input_registered`, so it cannot select the generic raw-input row
+to evade a declared source-validation artifact. The validation artifact JSON
+is decoded with duplicate-key rejection before its review ID and configured
+PASS field are checked.
+
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
 active, exactly one inventory chain must run in order: `dispatch`, then
@@ -360,6 +368,13 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.3**:
+  generic raw-input rows are now postpublication-only, so prepublication
+  source/staged dispatch cannot bypass its source-input validation gate. The
+  registered PASS receipt rejects duplicate JSON keys, including conflicting
+  review IDs or status values. Positive postpublication and frozen legacy-v1
+  behavior remain covered. The 44-file package remains unpublished and bundle
+  `VERSION` remains **1.5.0**.
 - **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.2**:
   a source-review input can require one exact pre-dispatch validation artifact.
   The generic-v2 dispatch seal now joins that declaration to a same-review

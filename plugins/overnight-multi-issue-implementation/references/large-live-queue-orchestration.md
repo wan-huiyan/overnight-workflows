@@ -577,13 +577,21 @@ field with value `PASS`. The canonical generic-v2 `dispatch` seal rereads the
 file and rejects a missing registration, changed bytes, a non-PASS state or
 receipt, another review ID, or an invalidation row. Run any receipt-specific
 create-once verifier immediately before sealing as well; the generic gate binds
-its result but does not replace its domain checks.
+its result but does not replace its domain checks. Duplicate JSON keys fail,
+including duplicate review IDs or configured status fields.
 
 An archived generic-v2 source row without
 `required_pre_dispatch_validation` keeps its original ungated meaning. A new
 review whose repository rules require a gate must declare it; omission is not a
 way to bypass that rule. Reviews with no required pre-dispatch validation may
 omit the field explicitly under this compatibility rule.
+
+The generic-v2 `raw_input_registered` row is only for the
+`postpublication-installed-snapshot` boundary. It cannot dispatch a
+`prepublication-source-and-staged-snapshot` review. Every new prepublication
+source/staged review must use `source_review_input_registered`, including its
+schema-3 panel join and any declared validation gate. Frozen legacy-v1 rows
+remain reproducible read-only evidence; they do not authorize a new seal.
 
 Resolve the panel validator from the exact `SKILL.md` path in the active
 loader record; do not scan discovery roots or guess the newest cache. An

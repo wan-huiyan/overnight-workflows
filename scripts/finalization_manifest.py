@@ -36,6 +36,8 @@ MANIFEST_SCHEMA = "overnight-finalization-v2"
 PREFIX_RECEIPT_TYPE = "manifest_prefix_receipt"
 PHASE_ORDER = ("dispatch", "judgment", "acceptance")
 JUDGE_RECEIPT_TYPE = "finalization_judge_verdict"
+PREPUBLICATION_SOURCE_REVIEW_BOUNDARY = "prepublication-source-and-staged-snapshot"
+POSTPUBLICATION_REVIEW_BOUNDARY = "postpublication-installed-snapshot"
 JUDGE_RECEIPT_FIELDS = {
     "schema_version",
     "record_type",
@@ -679,6 +681,14 @@ def _validate_record_payload(
         if record.get("state") != "PREPARED":
             raise PublicationError("prepare registration state is not PREPARED")
     if record_type == "raw_input_registered":
+        if (
+            manifest_schema == MANIFEST_SCHEMA
+            and record.get("review_boundary") != POSTPUBLICATION_REVIEW_BOUNDARY
+        ):
+            raise PublicationError(
+                "generic-v2 raw_input_registered is postpublication-only; "
+                "prepublication source review requires source_review_input_registered"
+            )
         for field in (
             "raw_input_max_files",
             "raw_input_max_total_bytes",
@@ -981,6 +991,23 @@ def _verify_artifact_record(record: Mapping[str, Any], label: str) -> bytes:
     return data
 
 
+def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
+    def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise PublicationError(f"{label} contains duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        return json.loads(
+            data.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"{label} is invalid JSON") from exc
+
+
 def _verify_required_pre_dispatch_validation(
     records: Sequence[Mapping[str, Any]],
     source_input: Mapping[str, Any],
@@ -1022,12 +1049,9 @@ def _verify_required_pre_dispatch_validation(
     data = _verify_artifact_record(
         registration, "required pre-dispatch validation artifact"
     )
-    try:
-        receipt = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError(
-            "required pre-dispatch validation artifact is invalid JSON"
-        ) from exc
+    receipt = _decode_json_without_duplicate_keys(
+        data, "required pre-dispatch validation artifact"
+    )
     status_field = requirement.get("status_field")
     required_status = requirement.get("required_status")
     if (
@@ -1501,6 +1525,11 @@ def _require_review_phase_prerequisites(
         _verify_source_raw_input(historical_input)
         _verify_required_pre_dispatch_validation(records, historical_input)
     if generic_input is not None:
+        if generic_input.get("review_boundary") != POSTPUBLICATION_REVIEW_BOUNDARY:
+            raise PublicationError(
+                "manifest-prefix dispatch cannot use raw_input_registered for "
+                "prepublication source review"
+            )
         _verify_generic_raw_input(generic_input)
     if phase == "dispatch":
         return
@@ -1690,7 +1719,7 @@ def _require_review_phase_prerequisites(
         return
     if (
         not generic_complete
-        or generic_input.get("review_boundary") != "postpublication-installed-snapshot"
+        or generic_input.get("review_boundary") != POSTPUBLICATION_REVIEW_BOUNDARY
     ):
         raise PublicationError(
             "manifest-prefix acceptance requires a complete postpublication review"

@@ -90,6 +90,22 @@ PRE_DISPATCH_VALIDATION_README_MARKERS = (
     "review ID",
     "retain their explicit ungated compatibility meaning",
 )
+SOURCE_REVIEW_BOUNDARY_ROUTE_MARKERS = (
+    "The generic-v2 `raw_input_registered` row is only for the "
+    "`postpublication-installed-snapshot` boundary",
+    "It cannot dispatch a `prepublication-source-and-staged-snapshot` review",
+    "Every new prepublication source/staged review must use "
+    "`source_review_input_registered`",
+    "Duplicate JSON keys fail, including duplicate review IDs or configured "
+    "status fields",
+)
+SOURCE_REVIEW_BOUNDARY_README_MARKERS = (
+    "Generic-v2 `raw_input_registered` rows are restricted to the "
+    "`postpublication-installed-snapshot` boundary",
+    "A `prepublication-source-and-staged-snapshot` dispatch must use "
+    "`source_review_input_registered`",
+    "decoded with duplicate-key rejection",
+)
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
     r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?Z$"
@@ -352,6 +368,12 @@ def check_panel_schema3_guidance(
             errors.append(
                 f"pre-dispatch validation README guidance is missing {marker!r}"
             )
+    for marker in SOURCE_REVIEW_BOUNDARY_ROUTE_MARKERS:
+        if marker not in normalized_reference:
+            errors.append(f"source-review boundary guidance is missing {marker!r}")
+    for marker in SOURCE_REVIEW_BOUNDARY_README_MARKERS:
+        if marker not in normalized_readme:
+            errors.append(f"source-review boundary README is missing {marker!r}")
     for stale in (
         "Panel dispatches use exact schema-2 `panel_input` records",
         "Run that schema-2 validation before dispatch",
@@ -400,6 +422,30 @@ def run_pre_dispatch_validation_guidance_negative_control(
         for item in observed
     ):
         errors.append("pre-dispatch validation negative control did not fail")
+
+
+def run_source_review_boundary_guidance_negative_control(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Prove a generic raw-row prepublication bypass is observable."""
+    marker = SOURCE_REVIEW_BOUNDARY_ROUTE_MARKERS[0]
+    normalized_reference = " ".join(reference.split())
+    if marker not in normalized_reference:
+        errors.append("source-review boundary control setup marker is absent")
+        return
+    mutated = normalized_reference.replace(
+        marker,
+        "The generic-v2 `raw_input_registered` row may use either boundary",
+        1,
+    )
+    observed: list[str] = []
+    check_panel_schema3_guidance(mutated, readme, observed)
+    if not any(
+        "source-review boundary guidance is missing" in item for item in observed
+    ):
+        errors.append("source-review boundary negative control did not fail")
 
 
 def read_json(path: Path, errors: list[str]) -> dict[str, Any]:
@@ -3166,6 +3212,7 @@ def named_self_test_outcomes(
             "routing.final_byte_review",
             "guidance.panel_schema3_regression",
             "guidance.pre_dispatch_validation_regression",
+            "guidance.source_review_boundary_regression",
             "routing.schedule_consolidation_latch",
             "routing.schedule_unconditional_action",
             "routing.authority.loaded_client_deny_and_exact_grants",
@@ -3454,6 +3501,9 @@ def main() -> int:
         run_routing_negative_controls(routing_cases, mappings, codex, errors)
         run_panel_schema3_guidance_negative_control(reference, readme, errors)
         run_pre_dispatch_validation_guidance_negative_control(
+            reference, readme, errors
+        )
+        run_source_review_boundary_guidance_negative_control(
             reference, readme, errors
         )
         run_materialized_authority_controls(mappings, routing_cases, errors)

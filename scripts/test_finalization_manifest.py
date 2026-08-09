@@ -970,14 +970,18 @@ class FinalizationManifestTests(unittest.TestCase):
                 status: str = "PASS",
                 registration_review_id: str = "review-test",
                 registration_state: str = "PASS",
+                receipt_bytes: bytes | None = None,
             ) -> tuple[Path, str, dict[str, object]]:
                 case = root / name
                 payload, digest = self.source_review_evidence(
                     case, panel_record, repository_heads
                 )
-                requirement, _ = self.required_validation(
+                requirement, validation_path = self.required_validation(
                     case, review_id=receipt_review_id, status=status
                 )
+                if receipt_bytes is not None:
+                    validation_path.write_bytes(receipt_bytes)
+                    requirement["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
                 payload["required_pre_dispatch_validation"] = requirement
                 path = self.make_manifest(case)
                 manifest.append_finalization_record(
@@ -1031,6 +1035,48 @@ class FinalizationManifestTests(unittest.TestCase):
             ):
                 self.seal(wrong_receipt, "dispatch", digest)
             self.assertEqual(before, wrong_receipt.read_bytes())
+
+            duplicate_review, digest, _ = make_case(
+                "duplicate-review-key",
+                receipt_bytes=(
+                    b'{"review_id":"review-test","review_id":"other-review",'
+                    b'"identity_coverage_status":"PASS"}\n'
+                ),
+            )
+            before = duplicate_review.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "duplicate JSON key 'review_id'"
+            ):
+                self.seal(duplicate_review, "dispatch", digest)
+            self.assertEqual(before, duplicate_review.read_bytes())
+            self.assertFalse(
+                (duplicate_review.parent / "manifest-prefix.dispatch.jsonl").exists()
+            )
+            self.assertFalse(
+                (duplicate_review.parent / "manifest-prefix.dispatch.json").exists()
+            )
+
+            duplicate_status, digest, _ = make_case(
+                "duplicate-status-key",
+                receipt_bytes=(
+                    b'{"review_id":"review-test",'
+                    b'"identity_coverage_status":"PASS",'
+                    b'"identity_coverage_status":"FAIL"}\n'
+                ),
+            )
+            before = duplicate_status.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "duplicate JSON key 'identity_coverage_status'",
+            ):
+                self.seal(duplicate_status, "dispatch", digest)
+            self.assertEqual(before, duplicate_status.read_bytes())
+            self.assertFalse(
+                (duplicate_status.parent / "manifest-prefix.dispatch.jsonl").exists()
+            )
+            self.assertFalse(
+                (duplicate_status.parent / "manifest-prefix.dispatch.json").exists()
+            )
 
             invalidated, digest, requirement = make_case("invalidated")
             manifest.append_finalization_record(
@@ -1490,6 +1536,35 @@ class FinalizationManifestTests(unittest.TestCase):
                     self.seal(path, "dispatch", raw_digest)
             self.assertEqual(before, path.read_bytes())
             target.write_bytes(stable_bytes)
+
+    def test_prepublication_source_dispatch_rejects_generic_raw_input_bypass(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-raw-bypass-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_manifest(root)
+            raw_digest = self.append_raw_input(path)
+            records = self.records(path)
+            raw_input = next(
+                record
+                for record in records
+                if record["record_type"] == "raw_input_registered"
+            )
+            raw_input["review_boundary"] = (
+                manifest.PREPUBLICATION_SOURCE_REVIEW_BOUNDARY
+            )
+            self.write_records(path, records)
+            mutated = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "raw_input_registered is postpublication-only",
+            ):
+                self.seal(path, "dispatch", raw_digest)
+
+            self.assertEqual(mutated, path.read_bytes())
+            self.assertFalse((root / "manifest-prefix.dispatch.jsonl").exists())
+            self.assertFalse((root / "manifest-prefix.dispatch.json").exists())
 
     def test_phase_seals_require_raw_input_and_complete_review_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-lifecycle-negative-") as raw:

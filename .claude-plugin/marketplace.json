@@ -28,7 +28,7 @@
       "name": "overnight-multi-issue-implementation",
       "source": "./plugins/overnight-multi-issue-implementation",
       "description": "Overnight autonomous implementation for either a related GitHub issue cluster or a large mixed live queue, with stale and partial classification, granular authority, shared-file ownership, durable recovery, immutable base/head review, and serial integration.",
-      "version": "1.5.2"
+      "version": "1.5.3"
     },
     {
       "name": "large-redesign-parallel-branch-collision-audit",
