@@ -1525,7 +1525,11 @@ def _require_review_phase_prerequisites(
         _verify_source_raw_input(historical_input)
         _verify_required_pre_dispatch_validation(records, historical_input)
     if generic_input is not None:
-        if generic_input.get("review_boundary") != POSTPUBLICATION_REVIEW_BOUNDARY:
+        if (
+            records[0].get("manifest_schema") == MANIFEST_SCHEMA
+            and generic_input.get("review_boundary")
+            != POSTPUBLICATION_REVIEW_BOUNDARY
+        ):
             raise PublicationError(
                 "manifest-prefix dispatch cannot use raw_input_registered for "
                 "prepublication source review"

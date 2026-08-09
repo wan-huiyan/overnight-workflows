@@ -696,20 +696,29 @@ class FinalizationManifestTests(unittest.TestCase):
             },
         )
 
-    def make_frozen_legacy_sealed_manifest(self, root: Path) -> Path:
-        """Reframe one valid three-phase v2 lifecycle as archived v1 bytes."""
+    def make_frozen_legacy_sealed_manifest(
+        self,
+        root: Path,
+        *,
+        dispatch_only: bool = False,
+        review_boundary: str = manifest.POSTPUBLICATION_REVIEW_BOUNDARY,
+    ) -> Path:
+        """Reframe a valid v2 lifecycle as archived v1 bytes."""
 
         path = self.make_manifest(root, "legacy-sealed.jsonl")
         raw_digest = self.append_raw_input(path)
         self.seal(path, "dispatch", raw_digest)
-        self.append_generic_review(path)
-        self.seal(path, "judgment", raw_digest)
-        self.append_generic_summary(path, raw_digest)
-        self.seal(path, "acceptance", raw_digest)
+        if not dispatch_only:
+            self.append_generic_review(path)
+            self.seal(path, "judgment", raw_digest)
+            self.append_generic_summary(path, raw_digest)
+            self.seal(path, "acceptance", raw_digest)
         records = self.records(path)
         for record in records:
             record["schema_version"] = manifest.LEGACY_SCHEMA_VERSION
             record["manifest_schema"] = manifest.LEGACY_MANIFEST_SCHEMA
+            if record["record_type"] == "raw_input_registered":
+                record["review_boundary"] = review_boundary
         for index, record in enumerate(records):
             if record["record_type"] == "judge_verdict_registered":
                 dispatch = next(
@@ -1236,6 +1245,58 @@ class FinalizationManifestTests(unittest.TestCase):
             acceptance_prefix.write_bytes(acceptance_prefix.read_bytes() + b"drift")
             with self.assertRaisesRegex(manifest.PublicationError, "snapshot bytes drifted"):
                 manifest.validate_manifest(path)
+
+    def test_frozen_legacy_prepublication_raw_dispatch_remains_readable_but_not_writable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-legacy-raw-dispatch-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_frozen_legacy_sealed_manifest(
+                root,
+                dispatch_only=True,
+                review_boundary=manifest.PREPUBLICATION_SOURCE_REVIEW_BOUNDARY,
+            )
+            baseline_manifest = path.read_bytes()
+            records = self.records(path)
+            registration = records[-1]
+            prefix_path = Path(str(registration["manifest_prefix_path"]))
+            receipt_path = Path(str(registration["receipt_path"]))
+            baseline_prefix = prefix_path.read_bytes()
+            baseline_receipt = receipt_path.read_bytes()
+
+            identity = manifest.validate_manifest(path)
+            self.assertEqual(3, identity["record_count"])
+            self.assertEqual(manifest.LEGACY_MANIFEST_SCHEMA, identity["manifest_schema"])
+            self.assertEqual(
+                manifest.PREPUBLICATION_SOURCE_REVIEW_BOUNDARY,
+                records[1]["review_boundary"],
+            )
+            self.assertEqual("dispatch", registration["phase"])
+
+            with self.assertRaisesRegex(manifest.PublicationError, "read-only"):
+                manifest.append_finalization_record(
+                    path,
+                    record_type="external_panel_note",
+                    payload={"note": "must-not-append"},
+                )
+            with self.assertRaisesRegex(manifest.PublicationError, "read-only"):
+                manifest.seal_manifest_prefix(
+                    path,
+                    writer_controller_id="legacy-controller",
+                    review_id="review-test",
+                    phase="judgment",
+                    raw_input_inventory_sha256=str(
+                        registration["raw_input_inventory_sha256"]
+                    ),
+                    prefix_output=root / "forbidden-prefix.jsonl",
+                    receipt_output=root / "forbidden-receipt.json",
+                )
+
+            self.assertEqual(baseline_manifest, path.read_bytes())
+            self.assertEqual(baseline_prefix, prefix_path.read_bytes())
+            self.assertEqual(baseline_receipt, receipt_path.read_bytes())
+            self.assertFalse((root / "forbidden-prefix.jsonl").exists())
+            self.assertFalse((root / "forbidden-receipt.json").exists())
 
     def test_controller_cli_initializes_and_appends_known_rows_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-cli-") as raw:
