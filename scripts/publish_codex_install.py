@@ -4,6 +4,14 @@
 The real publisher deliberately supports only Darwin ``renameatx_np`` with
 ``RENAME_SWAP``.  Tests inject ``FakeAtomicExchanger``; production never falls
 back to a sequence of renames or to per-file writes in the live tree.
+Terminal validation retains the durable package reservation. Locked inventory
+receipts bind dispatch, judgment, and acceptance to an exact live generation
+and bounded finalization-manifest prefix; only ``accept`` releases the package.
+
+The inventory codec stays in this safety-critical module so every filesystem
+read, exchange, rollback, recovery, and receipt uses one implementation. Panel
+validation imports it directly; a regression test also locks its wire-format
+name to the independent install checker and committed manifest contract.
 """
 
 from __future__ import annotations
@@ -27,13 +35,17 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 
 INVENTORY_FORMAT = "sha256-size-path-v1"
-STATE_SCHEMA_VERSION = 1
-RECEIPT_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
+RECEIPT_SCHEMA_VERSION = 3
 RENAME_SWAP = 0x00000002
 OPERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX_40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX_64_RE = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_COMPONENT_FORBIDDEN = {"", ".", ".."}
+MUTATION_NO_LIVE_CHANGE = "NO_LIVE_MUTATION_PREPARED"
+MUTATION_PUBLISHED = "PUBLISHED_CANDIDATE_GENERATION"
+MUTATION_ROLLED_BACK = "ROLLED_BACK_TO_PREFLIGHT_GENERATION"
+LIVE_INVENTORY_PHASES = {"dispatch", "judgment", "acceptance"}
 
 
 class PublicationError(RuntimeError):
@@ -658,6 +670,9 @@ def _operation_paths(state_root: Path, operation: str) -> Dict[str, Path]:
         "state": operation_root / "state.json",
         "source": operation_root / "immutable-source",
         "source_inventory": operation_root / "immutable-source.inventory",
+        "predecessor_source": operation_root / "immutable-predecessor-source",
+        "predecessor_source_inventory": operation_root / "immutable-predecessor-source.inventory",
+        "preflight_model": operation_root / "expected-live-predecessor",
         "slot": operation_root / "exchange-slot",
         "previous": operation_root / "previous",
         "failed": operation_root / "failed-new",
@@ -671,6 +686,17 @@ def _operation_paths(state_root: Path, operation: str) -> Dict[str, Path]:
 
 def _inventory_record(inventory: Inventory, path: Path) -> Dict[str, Any]:
     return {**inventory.metadata(), "path": str(path)}
+
+
+def _path_byte_identity(
+    inventory: Inventory, path: Path, expected_paths: Sequence[str]
+) -> Dict[str, Any]:
+    """Name both parts of the identity: exact installed paths and exact bytes."""
+    return {
+        **_inventory_record(inventory, path),
+        "identity_kind": "exact-installed-paths-and-file-bytes",
+        "installed_paths": list(expected_paths),
+    }
 
 
 def _normalize_manifest_path(source_repository: Path, manifest_path: str) -> str:
@@ -771,6 +797,55 @@ def _verify_immutable_source(state: Mapping[str, Any]) -> Inventory:
     return current
 
 
+def _verify_predecessor_source(state: Mapping[str, Any]) -> Inventory:
+    """Verify the immutable commit used to model the exact live predecessor."""
+    source_record = state.get("predecessor_source")
+    if not isinstance(source_record, dict):
+        raise PublicationError("operation lacks an immutable predecessor-source identity")
+    state_root_text = state.get("state_root")
+    operation_id = state.get("operation_id")
+    if not isinstance(state_root_text, str) or not isinstance(operation_id, str):
+        raise PublicationError("predecessor-source operation paths are malformed")
+    paths = _operation_paths(Path(state_root_text), operation_id)
+    if (
+        source_record.get("root") != str(paths["predecessor_source"])
+        or source_record.get("path") != str(paths["predecessor_source_inventory"])
+    ):
+        raise PublicationError("predecessor-source paths differ from the operation layout")
+    root = _safe_absolute(
+        paths["predecessor_source"], label="immutable predecessor source", must_exist=True
+    )
+    inventory_path = _safe_absolute(
+        paths["predecessor_source_inventory"],
+        label="immutable predecessor source inventory",
+        must_exist=True,
+    )
+    persisted_entries = parse_inventory(
+        _read_regular_bytes(inventory_path, label="immutable predecessor source inventory")
+    )
+    persisted_data = serialize_inventory(persisted_entries)
+    current = build_inventory(root, [entry.path for entry in persisted_entries])
+    if (
+        current.data != persisted_data
+        or current.digest != source_record.get("sha256")
+        or current.file_count != source_record.get("file_count")
+        or current.total_bytes != source_record.get("total_bytes")
+    ):
+        raise PublicationError("immutable predecessor source drifted from its prepared identity")
+    commit = state.get("expected_live_source_commit")
+    tree = state.get("expected_live_source_tree")
+    if (
+        not isinstance(commit, str)
+        or source_record.get("commit") != commit
+        or source_record.get("tree") != tree
+    ):
+        raise PublicationError("immutable predecessor Git identity differs from prepared state")
+    _, observed_tree = _verify_commit(Path(str(state["source_repository"])), commit)
+    if observed_tree != tree:
+        raise PublicationError("immutable predecessor commit tree differs from prepared state")
+    return current
+
+
 def _verify_prepare_evidence(state: Mapping[str, Any]) -> None:
     receipt_record = state.get("prepare_receipt")
     if not isinstance(receipt_record, dict):
@@ -791,20 +866,31 @@ def _verify_prepare_evidence(state: Mapping[str, Any]) -> None:
         raise PublicationError("prepare receipt is not an object")
     if receipt.get("operation_id") != state.get("operation_id"):
         raise PublicationError("prepare receipt operation ID differs from state")
+    if receipt.get("mutation_outcome") != MUTATION_NO_LIVE_CHANGE:
+        raise PublicationError("prepare receipt lacks the named no-live-mutation outcome")
+    named_outcomes = receipt.get("named_mutation_outcomes")
+    if not isinstance(named_outcomes, dict) or not named_outcomes:
+        raise PublicationError("prepare receipt lacks named checker mutation outcomes")
     candidate = receipt.get("candidate_inventory")
+    preflight = receipt.get("preflight_live_inventory")
     snapshot = receipt.get("evidence_snapshot")
     state_candidate = state.get("candidate_inventory")
+    state_preflight = state.get("preflight_inventory")
     state_snapshot = state.get("evidence_snapshot")
     if (
         not isinstance(candidate, dict)
+        or not isinstance(preflight, dict)
         or not isinstance(snapshot, dict)
         or not isinstance(state_candidate, dict)
+        or not isinstance(state_preflight, dict)
         or not isinstance(state_snapshot, dict)
     ):
         raise PublicationError("prepare receipt inventory records are malformed")
-    if candidate.get("sha256") != state_candidate.get("sha256"):
+    if candidate != state_candidate:
         raise PublicationError("prepare receipt candidate identity differs from state")
-    if snapshot.get("sha256") != state_snapshot.get("sha256"):
+    if preflight != state_preflight:
+        raise PublicationError("prepare receipt preflight identity differs from state")
+    if snapshot != state_snapshot:
         raise PublicationError("prepare receipt snapshot identity differs from state")
     receipt_source = receipt.get("immutable_source")
     state_source = state.get("immutable_source")
@@ -813,6 +899,24 @@ def _verify_prepare_evidence(state: Mapping[str, Any]) -> None:
     if receipt_source != state_source:
         raise PublicationError("prepare receipt immutable-source identity differs from state")
     _verify_immutable_source(state)
+    receipt_predecessor = receipt.get("predecessor_source")
+    state_predecessor = state.get("predecessor_source")
+    if (
+        not isinstance(receipt_predecessor, dict)
+        or not isinstance(state_predecessor, dict)
+        or receipt_predecessor != state_predecessor
+    ):
+        raise PublicationError("prepare receipt predecessor-source identity differs from state")
+    expected_live_source = receipt.get("expected_live_source")
+    if (
+        not isinstance(expected_live_source, dict)
+        or expected_live_source.get("commit") != state.get("expected_live_source_commit")
+        or expected_live_source.get("tree") != state.get("expected_live_source_tree")
+        or expected_live_source.get("manifest_sha256")
+        != state.get("expected_live_manifest_sha256")
+    ):
+        raise PublicationError("prepare receipt expected-live source identity differs from state")
+    _verify_predecessor_source(state)
 
 
 class WriterLock:
@@ -871,17 +975,48 @@ def run_installed_checker(source_snapshot: Path, installed_root: Path) -> Dict[s
     checker_digest = hashlib.sha256(
         _read_regular_bytes(checker, label="immutable installed-root checker")
     ).hexdigest()
-    argv = [sys.executable, str(checker), "--installed-root", str(installed_root), "--self-test"]
+    argv = [
+        sys.executable,
+        str(checker),
+        "--installed-root",
+        str(installed_root),
+        "--self-test",
+        "--json",
+    ]
     completed = _run(argv, cwd=source_snapshot)
+    stdout = completed.stdout.decode("utf-8", "replace")
+    parsed: Optional[Dict[str, Any]] = None
+    try:
+        value = json.loads(stdout)
+        if isinstance(value, dict):
+            parsed = value
+    except json.JSONDecodeError:
+        parsed = None
     receipt = {
         "argv": argv,
         "checker_sha256": checker_digest,
-        "stdout": completed.stdout.decode("utf-8", "replace"),
+        "stdout": stdout,
         "stderr": completed.stderr.decode("utf-8", "replace"),
         "exit_status": completed.returncode,
+        "result": parsed,
     }
     if completed.returncode != 0:
         raise ValidationFailure("installed-root checker --self-test failed: " + receipt["stderr"].strip())
+    outcomes = parsed.get("named_mutation_outcomes") if parsed else None
+    if (
+        parsed is None
+        or parsed.get("status") != "PASS"
+        or not isinstance(outcomes, dict)
+        or not outcomes
+        or any(
+            not isinstance(name, str) or not name or result != "PASS"
+            for name, result in outcomes.items()
+        )
+    ):
+        raise ValidationFailure(
+            "installed-root checker did not return nonempty named mutation PASS outcomes"
+        )
+    receipt["named_mutation_outcomes"] = outcomes
     return receipt
 
 
@@ -918,6 +1053,7 @@ def prepare_operation(
     *,
     source_repository: Path,
     source_commit: str,
+    expected_live_source_commit: str,
     manifest_path: str,
     install_root: Path,
     state_root: Path,
@@ -954,7 +1090,7 @@ def prepare_operation(
         _is_within(receipt_output, evidence_root / "snapshot")
         or receipt_output == evidence_root / "snapshot.inventory"
         or receipt_output == evidence_root / "publication-receipt.json"
-        or receipt_output == evidence_root / "acceptance-live.inventory"
+        or receipt_output == evidence_root / "terminal-validation-live.inventory"
     ):
         raise PublicationError("prepare receipt output collides with reserved evidence paths")
     _mkdir_secure(state_root, exist_ok=True)
@@ -972,6 +1108,7 @@ def prepare_operation(
             "evidence_root": str(evidence_root),
             "source_repository": str(source_repository),
             "source_commit": source_commit,
+            "expected_live_source_commit": expected_live_source_commit,
             "manifest_path": manifest_path,
             "created_at": _utc_now(),
             "events": [],
@@ -992,18 +1129,60 @@ def prepare_operation(
             }
             _make_tree_read_only(paths["source"])
             _verify_immutable_source(state)
+            predecessor_tree, _ = materialize_commit(
+                source_repository,
+                expected_live_source_commit,
+                paths["predecessor_source"],
+            )
+            state["expected_live_source_tree"] = predecessor_tree
+            predecessor_source_inventory = build_inventory(paths["predecessor_source"])
+            _atomic_write_bytes(
+                paths["predecessor_source_inventory"],
+                predecessor_source_inventory.data,
+            )
+            os.chmod(paths["predecessor_source_inventory"], 0o400, follow_symlinks=False)
+            state["predecessor_source"] = {
+                **_inventory_record(
+                    predecessor_source_inventory,
+                    paths["predecessor_source_inventory"],
+                ),
+                "root": str(paths["predecessor_source"]),
+                "commit": expected_live_source_commit,
+                "tree": predecessor_tree,
+            }
+            _make_tree_read_only(paths["predecessor_source"])
+            _verify_predecessor_source(state)
             manifest, manifest_raw, mappings = _load_manifest(paths["source"], manifest_path)
-            expected_paths = [mapping["installed_path"] for mapping in mappings]
+            predecessor_manifest, predecessor_manifest_raw, predecessor_mappings = _load_manifest(
+                paths["predecessor_source"], manifest_path
+            )
+            candidate_paths = [mapping["installed_path"] for mapping in mappings]
+            preflight_paths = [mapping["installed_path"] for mapping in predecessor_mappings]
             state["manifest_sha256"] = hashlib.sha256(manifest_raw).hexdigest()
             state["manifest_schema_version"] = manifest.get("schema_version")
-            state["expected_paths"] = expected_paths
+            state["expected_live_manifest_sha256"] = hashlib.sha256(
+                predecessor_manifest_raw
+            ).hexdigest()
+            state["expected_live_manifest_schema_version"] = predecessor_manifest.get(
+                "schema_version"
+            )
+            state["candidate_expected_paths"] = candidate_paths
+            state["preflight_expected_paths"] = preflight_paths
             if failpoint:
                 failpoint("during_staging")
             _materialize_candidate(paths["source"], paths["slot"], mappings)
-            candidate = build_inventory(paths["slot"], expected_paths)
+            candidate = build_inventory(paths["slot"], candidate_paths)
             state["generation_id"] = candidate.digest
             _atomic_write_bytes(paths["candidate_inventory"], candidate.data)
-            preflight = build_inventory(install_root, expected_paths)
+            _materialize_candidate(
+                paths["predecessor_source"], paths["preflight_model"], predecessor_mappings
+            )
+            predecessor_model = build_inventory(paths["preflight_model"], preflight_paths)
+            preflight = build_inventory(install_root, preflight_paths)
+            if preflight.data != predecessor_model.data:
+                raise PublicationError(
+                    "live generation does not exactly match --expected-live-source-commit"
+                )
             _atomic_write_bytes(paths["preflight_inventory"], preflight.data)
             _require_same_filesystem(paths["slot"], install_root.parent)
             staged_checker = _run_bound_checker(
@@ -1011,15 +1190,19 @@ def prepare_operation(
             )
             _mkdir_secure(evidence_root)
             snapshot = evidence_root / "snapshot"
-            _copy_tree(paths["slot"], snapshot, expected_paths)
-            snapshot_inventory = build_inventory(snapshot, expected_paths)
+            _copy_tree(paths["slot"], snapshot, candidate_paths)
+            snapshot_inventory = build_inventory(snapshot, candidate_paths)
             if snapshot_inventory.data != candidate.data:
                 raise PublicationError("evidence snapshot identity differs from candidate")
             _make_tree_read_only(snapshot)
             evidence_inventory_path = evidence_root / "snapshot.inventory"
             _atomic_write_bytes(evidence_inventory_path, snapshot_inventory.data)
-            state["candidate_inventory"] = _inventory_record(candidate, paths["candidate_inventory"])
-            state["preflight_inventory"] = _inventory_record(preflight, paths["preflight_inventory"])
+            state["candidate_inventory"] = _path_byte_identity(
+                candidate, paths["candidate_inventory"], candidate_paths
+            )
+            state["preflight_inventory"] = _path_byte_identity(
+                preflight, paths["preflight_inventory"], preflight_paths
+            )
             state["evidence_snapshot"] = {
                 **_inventory_record(snapshot_inventory, evidence_inventory_path),
                 "root": str(snapshot),
@@ -1037,10 +1220,21 @@ def prepare_operation(
                     "manifest_sha256": state["manifest_sha256"],
                 },
                 "immutable_source": state["immutable_source"],
+                "expected_live_source": {
+                    "commit": expected_live_source_commit,
+                    "tree": predecessor_tree,
+                    "manifest_path": manifest_path,
+                    "manifest_sha256": state["expected_live_manifest_sha256"],
+                },
+                "predecessor_source": state["predecessor_source"],
                 "candidate_inventory": state["candidate_inventory"],
                 "preflight_live_inventory": state["preflight_inventory"],
                 "evidence_snapshot": state["evidence_snapshot"],
                 "staged_validation": staged_checker,
+                "named_mutation_outcomes": {
+                    "staged": staged_checker["named_mutation_outcomes"]
+                },
+                "mutation_outcome": MUTATION_NO_LIVE_CHANGE,
                 "prepared_at": _utc_now(),
             }
             prepare_receipt_path = receipt_output
@@ -1132,10 +1326,113 @@ def _parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def _finalization_manifest_prefix(
+    path: Path,
+    *,
+    through_sequence: Optional[int] = None,
+    required_prefix: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Bind a JSONL prefix and optionally prove an earlier prefix is unchanged."""
+    path = _safe_absolute(path, label="finalization evidence manifest", must_exist=True)
+    observed = os.lstat(path)
+    if not stat.S_ISREG(observed.st_mode):
+        raise PublicationError("finalization manifest is not a regular file")
+    if observed.st_nlink != 1:
+        raise PublicationError("finalization manifest must have exactly one hard link")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_nlink != 1
+        ):
+            raise PublicationError("finalization manifest changed before prefix read")
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        if os.fstat(descriptor).st_nlink != 1:
+            raise PublicationError("finalization manifest gained a hard link before prefix read")
+        chunks: List[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        data = b"".join(chunks)
+        if (
+            (opened.st_dev, opened.st_ino, opened.st_size)
+            != (after.st_dev, after.st_ino, after.st_size)
+            or after.st_nlink != 1
+            or len(data) != after.st_size
+        ):
+            raise PublicationError("finalization manifest changed during prefix read")
+        records = _parse_finalization_jsonl(data, path)
+        prefix_data = data
+        prefix_records = records
+        if through_sequence is not None:
+            matching_indexes = [
+                index
+                for index, record in enumerate(records)
+                if record.get("sequence") == through_sequence
+            ]
+            if len(matching_indexes) != 1:
+                raise PublicationError(
+                    "finalization manifest lacks the requested bounded sequence"
+                )
+            line_count = matching_indexes[0] + 1
+            prefix_data = b"".join(data.splitlines(keepends=True)[:line_count])
+            prefix_records = records[:line_count]
+        observed_prefix = {
+            "path": str(path),
+            "prefix_bytes": len(prefix_data),
+            "prefix_sha256": hashlib.sha256(prefix_data).hexdigest(),
+            "record_count": len(prefix_records),
+            "last_sequence": prefix_records[-1]["sequence"],
+            "last_record_type": prefix_records[-1]["record_type"],
+            "finalization_id": prefix_records[-1]["finalization_id"],
+        }
+        if required_prefix is not None:
+            required = dict(required_prefix)
+            required_bytes = required.get("prefix_bytes")
+            if (
+                set(required) != set(observed_prefix)
+                or not isinstance(required_bytes, int)
+                or isinstance(required_bytes, bool)
+                or required_bytes <= 0
+                or required_bytes > len(data)
+            ):
+                raise PublicationError("required finalization-manifest prefix is malformed")
+            required_data = data[:required_bytes]
+            required_records = _parse_finalization_jsonl(required_data, path)
+            actual_required = {
+                "path": str(path),
+                "prefix_bytes": len(required_data),
+                "prefix_sha256": hashlib.sha256(required_data).hexdigest(),
+                "record_count": len(required_records),
+                "last_sequence": required_records[-1]["sequence"],
+                "last_record_type": required_records[-1]["record_type"],
+                "finalization_id": required_records[-1]["finalization_id"],
+            }
+            if actual_required != required:
+                raise PublicationError(
+                    "finalization manifest no longer extends the required durable prefix"
+                )
+        return observed_prefix
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
 def _validate_finalization_manifest_path(
     path: Path, *, state_root: Path, state: Mapping[str, Any]
 ) -> Path:
     path = _safe_absolute(path, label="finalization evidence manifest", must_exist=True)
+    observed = os.lstat(path)
+    if not stat.S_ISREG(observed.st_mode):
+        raise PublicationError("finalization manifest is not a regular file")
+    if observed.st_nlink != 1:
+        raise PublicationError("finalization manifest must have exactly one hard link")
     protected_roots = {
         "state root": state_root,
         "installed skill root": Path(str(state["install_root"])),
@@ -1156,10 +1453,25 @@ def _append_finalization_record(
     *,
     record_type: str,
     payload: Mapping[str, Any],
+    expected_prefix: Optional[Mapping[str, Any]] = None,
+    required_ancestor_prefix: Optional[Mapping[str, Any]] = None,
+    predecessor_payload_field: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if expected_prefix is not None and required_ancestor_prefix is not None:
+        raise PublicationError(
+            "finalization append cannot require both exact and ancestor prefixes"
+        )
+    if predecessor_payload_field is not None and required_ancestor_prefix is None:
+        raise PublicationError(
+            "a predecessor payload binding requires an ancestor prefix"
+        )
+    if predecessor_payload_field is not None and predecessor_payload_field in payload:
+        raise PublicationError("predecessor payload field is reserved by the appender")
     observed = os.lstat(manifest_path)
     if not stat.S_ISREG(observed.st_mode):
         raise PublicationError("finalization manifest is not a regular file")
+    if observed.st_nlink != 1:
+        raise PublicationError("finalization manifest must have exactly one hard link")
     flags = os.O_RDWR | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(manifest_path, flags)
     try:
@@ -1167,9 +1479,12 @@ def _append_finalization_record(
         if (
             not stat.S_ISREG(opened.st_mode)
             or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_nlink != 1
         ):
             raise PublicationError("finalization manifest changed before it was opened")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        if os.fstat(descriptor).st_nlink != 1:
+            raise PublicationError("finalization manifest gained a hard link before append")
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks: List[bytes] = []
         while True:
@@ -1178,26 +1493,89 @@ def _append_finalization_record(
                 break
             chunks.append(chunk)
         original = b"".join(chunks)
+        if os.fstat(descriptor).st_nlink != 1:
+            raise PublicationError("finalization manifest gained a hard link during append")
         records = _parse_finalization_jsonl(original, manifest_path)
+
+        def prefix_identity(
+            prefix_data: bytes, prefix_records: Sequence[Mapping[str, Any]]
+        ) -> Dict[str, Any]:
+            if not prefix_records:
+                raise PublicationError("finalization prefix has no records")
+            return {
+                "path": str(manifest_path),
+                "prefix_bytes": len(prefix_data),
+                "prefix_sha256": hashlib.sha256(prefix_data).hexdigest(),
+                "record_count": len(prefix_records),
+                "last_sequence": prefix_records[-1]["sequence"],
+                "last_record_type": prefix_records[-1]["record_type"],
+                "finalization_id": prefix_records[-1]["finalization_id"],
+            }
+
+        def require_ancestor(prefix_data: bytes) -> None:
+            if required_ancestor_prefix is None:
+                return
+            required = dict(required_ancestor_prefix)
+            byte_count = required.get("prefix_bytes")
+            if (
+                not isinstance(byte_count, int)
+                or isinstance(byte_count, bool)
+                or byte_count <= 0
+                or byte_count > len(prefix_data)
+            ):
+                raise PublicationError("required ancestor prefix is malformed")
+            ancestor_data = prefix_data[:byte_count]
+            ancestor_records = _parse_finalization_jsonl(ancestor_data, manifest_path)
+            if prefix_identity(ancestor_data, ancestor_records) != required:
+                raise PublicationError(
+                    "finalization manifest no longer extends the observed ancestor prefix"
+                )
+
         finalization_id = records[0]["finalization_id"]
         operation_id = payload.get("operation_id")
         generation_id = payload.get("generation_id")
-        for existing in records:
+        manifest_lines = original.splitlines(keepends=True)
+        for existing_index, existing in enumerate(records):
             if (
                 existing.get("record_type") == record_type
                 and existing.get("operation_id") == operation_id
                 and existing.get("generation_id") == generation_id
             ):
-                for key, value in payload.items():
+                preceding_data = b"".join(manifest_lines[:existing_index])
+                preceding_records = records[:existing_index]
+                actual_preceding = prefix_identity(preceding_data, preceding_records)
+                effective_payload = dict(payload)
+                if predecessor_payload_field is not None:
+                    effective_payload[predecessor_payload_field] = actual_preceding
+                for key, value in effective_payload.items():
                     if existing.get(key) != value:
                         raise PublicationError(
                             "existing finalization record conflicts with this operation"
                         )
+                if expected_prefix is not None:
+                    if actual_preceding != dict(expected_prefix):
+                        raise PublicationError(
+                            "existing finalization record does not immediately extend "
+                            "the required bounded prefix"
+                        )
+                require_ancestor(preceding_data)
+                through_record = b"".join(manifest_lines[: existing_index + 1])
                 return {
                     "record": existing,
-                    "manifest_sha256": hashlib.sha256(original).hexdigest(),
+                    "manifest_sha256": hashlib.sha256(through_record).hexdigest(),
+                    "manifest_prefix_bytes": len(through_record),
                     "appended": False,
                 }
+        observed_prefix = prefix_identity(original, records)
+        if expected_prefix is not None:
+            if observed_prefix != dict(expected_prefix):
+                raise PublicationError(
+                    "finalization manifest changed after the bounded prefix was observed"
+                )
+        require_ancestor(original)
+        effective_payload = dict(payload)
+        if predecessor_payload_field is not None:
+            effective_payload[predecessor_payload_field] = observed_prefix
         reserved = {
             "schema_version",
             "sequence",
@@ -1205,7 +1583,7 @@ def _append_finalization_record(
             "record_type",
             "finalization_id",
         }
-        if reserved & payload.keys():
+        if reserved & effective_payload.keys():
             raise PublicationError("finalization record payload overrides journal fields")
         record = {
             "schema_version": 1,
@@ -1213,20 +1591,25 @@ def _append_finalization_record(
             "recorded_at": _utc_now(),
             "record_type": record_type,
             "finalization_id": finalization_id,
-            **payload,
+            **effective_payload,
         }
         encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
+        if os.fstat(descriptor).st_nlink != 1:
+            raise PublicationError("finalization manifest gained a hard link before append")
         view = memoryview(encoded)
         while view:
             written = os.write(descriptor, view)
             view = view[written:]
         os.fsync(descriptor)
+        if os.fstat(descriptor).st_nlink != 1:
+            raise PublicationError("finalization manifest gained a hard link during append")
         combined = original + encoded
         return {
             "record": record,
             "manifest_sha256": hashlib.sha256(combined).hexdigest(),
+            "manifest_prefix_bytes": len(combined),
             "appended": True,
         }
     finally:
@@ -1322,6 +1705,7 @@ def reserve_operation(
                 "reader_quiescence_record": receipt,
                 "preflight_inventory": state["preflight_inventory"],
                 "candidate_inventory": state["candidate_inventory"],
+                "expected_live_source_commit": state["expected_live_source_commit"],
                 "reservation_state": "INTENT_RECORDED",
                 "atomic_operation": "darwin-rename-swap",
                 "mandatory_recovery_condition": (
@@ -1356,12 +1740,26 @@ def reserve_operation(
             },
             "preflight_inventory_sha256": state["preflight_inventory"]["sha256"],
             "candidate_inventory_sha256": state["candidate_inventory"]["sha256"],
+            "expected_live_source_commit": state["expected_live_source_commit"],
         }
         if manifest_path is not None and manifest_intent is not None:
+            intent_prefix = _finalization_manifest_prefix(
+                manifest_path,
+                through_sequence=manifest_intent["record"]["sequence"],
+            )
+            if (
+                intent_prefix["prefix_sha256"] != manifest_intent["manifest_sha256"]
+                or intent_prefix["prefix_bytes"]
+                != manifest_intent["manifest_prefix_bytes"]
+            ):
+                raise PublicationError(
+                    "reservation intent prefix differs from the appended manifest identity"
+                )
             reservation["finalization_manifest"] = {
                 "path": str(manifest_path),
                 "intent_sequence": manifest_intent["record"]["sequence"],
                 "sha256_after_intent": manifest_intent["manifest_sha256"],
+                "intent_prefix": intent_prefix,
             }
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(paths["reservation"], flags, 0o600)
@@ -1381,7 +1779,9 @@ def reserve_operation(
         return reservation
 
 
-def _load_reservation(paths: Mapping[str, Path], operation: str) -> Dict[str, Any]:
+def _load_reservation(
+    paths: Mapping[str, Path], operation: str, state: Mapping[str, Any]
+) -> Dict[str, Any]:
     reservation = _read_json_file(paths["reservation"], label="package reservation")
     if reservation.get("schema_version") != 1 or reservation.get("operation_id") != operation:
         raise PublicationError("package reservation is malformed or belongs to another operation")
@@ -1393,6 +1793,25 @@ def _load_reservation(paths: Mapping[str, Path], operation: str) -> Dict[str, An
         raise PublicationError("reservation controller state is not ACTIVE")
     if maintenance.get("reader_quiescence_status") != "QUIESCENT":
         raise PublicationError("reservation does not record quiescent readers")
+    recorded_reservation = state.get("reservation")
+    if not isinstance(recorded_reservation, dict) or reservation != recorded_reservation:
+        raise PublicationError(
+            "package reservation differs from the exact reservation stored in operation state"
+        )
+    candidate_inventory = state.get("candidate_inventory")
+    preflight_inventory = state.get("preflight_inventory")
+    if (
+        not isinstance(candidate_inventory, dict)
+        or not isinstance(preflight_inventory, dict)
+        or reservation.get("generation_id") != state.get("generation_id")
+        or reservation.get("candidate_inventory_sha256")
+        != candidate_inventory.get("sha256")
+        or reservation.get("preflight_inventory_sha256")
+        != preflight_inventory.get("sha256")
+        or reservation.get("expected_live_source_commit")
+        != state.get("expected_live_source_commit")
+    ):
+        raise PublicationError("package reservation identity differs from prepared state")
     receipt_path = maintenance.get("receipt_path")
     if not isinstance(receipt_path, str):
         raise PublicationError("reservation lacks maintenance receipt path")
@@ -1506,26 +1925,52 @@ def _identity_at(path: Path, expected_paths: Sequence[str]) -> Optional[str]:
 def classify_generation_state(state_root: Path, operation: str) -> Dict[str, Any]:
     """Classify complete-tree identities without deleting or moving anything."""
     paths, state = _load_state(state_root, operation)
-    expected = state.get("expected_paths")
-    if not isinstance(expected, list) or not all(isinstance(item, str) for item in expected):
-        raise PublicationError("operation expected path set is malformed")
+    candidate_paths = state.get("candidate_expected_paths")
+    preflight_paths = state.get("preflight_expected_paths")
+    if (
+        not isinstance(candidate_paths, list)
+        or not all(isinstance(item, str) for item in candidate_paths)
+        or not isinstance(preflight_paths, list)
+        or not all(isinstance(item, str) for item in preflight_paths)
+    ):
+        raise PublicationError("operation candidate/preflight path sets are malformed")
     old_digest = state["preflight_inventory"]["sha256"]
     new_digest = state["candidate_inventory"]["sha256"]
-    identities = {
-        "live": _identity_at(Path(state["install_root"]), expected),
-        "exchange_slot": _identity_at(paths["slot"], expected),
-        "previous": _identity_at(paths["previous"], expected),
-        "failed_new": _identity_at(paths["failed"], expected),
-    }
-    if identities["live"] == old_digest and identities["exchange_slot"] == new_digest:
+    identities = {}
+    for name, path in {
+        "live": Path(state["install_root"]),
+        "exchange_slot": paths["slot"],
+        "previous": paths["previous"],
+        "failed_new": paths["failed"],
+    }.items():
+        identities[name] = {
+            "candidate": _identity_at(path, candidate_paths),
+            "preflight": _identity_at(path, preflight_paths),
+        }
+    if (
+        identities["live"]["preflight"] == old_digest
+        and identities["exchange_slot"]["candidate"] == new_digest
+    ):
         classification = "PRE_SWAP"
-    elif identities["live"] == new_digest and identities["exchange_slot"] == old_digest:
+    elif (
+        identities["live"]["candidate"] == new_digest
+        and identities["exchange_slot"]["preflight"] == old_digest
+    ):
         classification = "POST_SWAP_SLOT"
-    elif identities["live"] == new_digest and identities["previous"] == old_digest:
+    elif (
+        identities["live"]["candidate"] == new_digest
+        and identities["previous"]["preflight"] == old_digest
+    ):
         classification = "POST_SWAP_RETAINED"
-    elif identities["live"] == old_digest and identities["previous"] == new_digest:
+    elif (
+        identities["live"]["preflight"] == old_digest
+        and identities["previous"]["candidate"] == new_digest
+    ):
         classification = "ROLLED_BACK_SLOT"
-    elif identities["live"] == old_digest and identities["failed_new"] == new_digest:
+    elif (
+        identities["live"]["preflight"] == old_digest
+        and identities["failed_new"]["candidate"] == new_digest
+    ):
         classification = "ROLLED_BACK_RETAINED"
     else:
         classification = "AMBIGUOUS"
@@ -1544,15 +1989,16 @@ def _rollback_after_validation_failure(
     paths: Mapping[str, Path],
     state: Dict[str, Any],
     install_root: Path,
-    expected_paths: Sequence[str],
+    candidate_paths: Sequence[str],
+    preflight_paths: Sequence[str],
     exchanger: AtomicExchanger,
     reason: str,
 ) -> None:
     _record_event(state, "rollback_started", reason=reason)
     _persist_state(paths["state"], state, "ROLLBACK_PENDING")
     exchanger.exchange(paths["previous"], install_root)
-    old_inventory = build_inventory(install_root, expected_paths)
-    failed_inventory = build_inventory(paths["previous"], expected_paths)
+    old_inventory = build_inventory(install_root, preflight_paths)
+    failed_inventory = build_inventory(paths["previous"], candidate_paths)
     if old_inventory.digest != state["preflight_inventory"]["sha256"]:
         raise PublicationError("atomic rollback did not restore the recorded old generation")
     if failed_inventory.digest != state["candidate_inventory"]["sha256"]:
@@ -1560,11 +2006,18 @@ def _rollback_after_validation_failure(
     _move_complete_tree(paths["previous"], paths["failed"])
     state["rollback"] = {
         "reason": reason,
-        "restored_live_inventory": _inventory_record(old_inventory, paths["preflight_inventory"]),
+        "restored_live_inventory": _path_byte_identity(
+            old_inventory, paths["preflight_inventory"], preflight_paths
+        ),
         "failed_generation_root": str(paths["failed"]),
         "failed_generation_sha256": failed_inventory.digest,
+        "failed_generation_identity": _path_byte_identity(
+            failed_inventory, paths["candidate_inventory"], candidate_paths
+        ),
         "exchange_primitive": exchanger.name,
     }
+    state["previous_generation"] = None
+    state["mutation_outcome"] = MUTATION_ROLLED_BACK
     _record_event(state, "rollback_completed")
     _persist_state(paths["state"], state, "ROLLED_BACK")
 
@@ -1577,6 +2030,7 @@ def publish_operation(
     lock_path: Optional[Path] = None,
     checker_runner: CheckerRunner = run_installed_checker,
     failpoint: Failpoint = None,
+    recovery_takeover_authorization: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Recheck the reservation/digests and atomically publish one generation."""
     state_root = _safe_absolute(state_root, label="state root", must_exist=True)
@@ -1588,15 +2042,25 @@ def publish_operation(
             if state.get("status") != "RESERVED":
                 raise PublicationError(f"operation is not RESERVED: {state.get('status')}")
             _verify_prepare_evidence(state)
-            reservation = _load_reservation(paths, operation)
-            expected = state.get("expected_paths")
-            if not isinstance(expected, list) or not all(isinstance(item, str) for item in expected):
-                raise PublicationError("operation expected paths are malformed")
+            reservation = _load_reservation(paths, operation, state)
+            if recovery_takeover_authorization is not None:
+                if state.get("recovery_takeover_authorization") != recovery_takeover_authorization:
+                    raise PublicationError("recovery takeover authorization drifted before resume")
+                _verify_recorded_takeover_authorization(state, reservation)
+            candidate_paths = state.get("candidate_expected_paths")
+            preflight_paths = state.get("preflight_expected_paths")
+            if (
+                not isinstance(candidate_paths, list)
+                or not all(isinstance(item, str) for item in candidate_paths)
+                or not isinstance(preflight_paths, list)
+                or not all(isinstance(item, str) for item in preflight_paths)
+            ):
+                raise PublicationError("operation candidate/preflight paths are malformed")
             install_root = _safe_absolute(Path(state["install_root"]), label="install root", must_exist=True)
             slot = _safe_absolute(paths["slot"], label="staged exchange slot", must_exist=True)
             evidence_root = _safe_absolute(Path(state["evidence_root"]), label="evidence root", must_exist=True)
             exchanger.require_available()
-            candidate = build_inventory(slot, expected)
+            candidate = build_inventory(slot, candidate_paths)
             if candidate.digest != state["candidate_inventory"]["sha256"]:
                 raise PublicationError("staged candidate drifted after prepare")
             persisted_candidate = parse_inventory(
@@ -1604,7 +2068,7 @@ def publish_operation(
             )
             if serialize_inventory(persisted_candidate) != candidate.data:
                 raise PublicationError("candidate inventory receipt drifted after prepare")
-            snapshot = build_inventory(evidence_root / "snapshot", expected)
+            snapshot = build_inventory(evidence_root / "snapshot", candidate_paths)
             if snapshot.digest != state["evidence_snapshot"]["sha256"] or snapshot.data != candidate.data:
                 raise PublicationError("immutable evidence snapshot drifted after prepare")
             snapshot_inventory_path = Path(state["evidence_snapshot"]["path"])
@@ -1613,7 +2077,7 @@ def publish_operation(
             )
             if serialize_inventory(persisted_snapshot) != snapshot.data:
                 raise PublicationError("evidence snapshot inventory receipt drifted after prepare")
-            live_before = build_inventory(install_root, expected)
+            live_before = build_inventory(install_root, preflight_paths)
             if live_before.digest != state["preflight_inventory"]["sha256"]:
                 raise PublicationError("live inventory drifted since recorded preflight")
             persisted_preflight = parse_inventory(
@@ -1625,11 +2089,16 @@ def publish_operation(
                 raise PublicationError("reservation preflight digest does not match live tree")
             if reservation.get("candidate_inventory_sha256") != candidate.digest:
                 raise PublicationError("reservation candidate digest does not match staged tree")
+            if (
+                reservation.get("expected_live_source_commit")
+                != state["expected_live_source_commit"]
+            ):
+                raise PublicationError("reservation predecessor commit differs from state")
             staged_validation = _run_bound_checker(
                 state, paths["source"], slot, checker_runner
             )
             state.setdefault("validation", {})["immediate_pre_swap_staged"] = staged_validation
-            candidate_after_checker = build_inventory(slot, expected)
+            candidate_after_checker = build_inventory(slot, candidate_paths)
             if (
                 candidate_after_checker.digest
                 != state["candidate_inventory"]["sha256"]
@@ -1639,8 +2108,8 @@ def publish_operation(
                 raise PublicationError(
                     "staged candidate changed during the immediate pre-swap checker"
                 )
-            state["live_inventory_immediately_before_swap"] = _inventory_record(
-                live_before, paths["preflight_inventory"]
+            state["live_inventory_immediately_before_swap"] = _path_byte_identity(
+                live_before, paths["preflight_inventory"], preflight_paths
             )
             _record_event(state, "preflight_recheck_passed")
             _persist_state(paths["state"], state, "SWAP_PENDING")
@@ -1650,14 +2119,16 @@ def publish_operation(
             state["exchange_primitive"] = exchanger.name
             _record_event(state, "atomic_exchange_completed")
             _persist_state(paths["state"], state, "SWAPPED")
-            new_live = build_inventory(install_root, expected)
-            old_slot = build_inventory(slot, expected)
+            new_live = build_inventory(install_root, candidate_paths)
+            old_slot = build_inventory(slot, preflight_paths)
             if new_live.digest != candidate.digest or old_slot.digest != live_before.digest:
                 raise PublicationError("post-exchange trees do not match complete old/new identities")
             _move_complete_tree(slot, paths["previous"])
             state["previous_generation"] = {
                 "root": str(paths["previous"]),
-                **live_before.metadata(),
+                **_path_byte_identity(
+                    live_before, paths["preflight_inventory"], preflight_paths
+                ),
             }
             _record_event(state, "previous_generation_retained")
             _persist_state(paths["state"], state, "VALIDATING")
@@ -1674,19 +2145,21 @@ def publish_operation(
                     paths=paths,
                     state=state,
                     install_root=install_root,
-                    expected_paths=expected,
+                    candidate_paths=candidate_paths,
+                    preflight_paths=preflight_paths,
                     exchanger=exchanger,
                     reason=str(exc),
                 )
                 raise
-            accepted_live = build_inventory(install_root, expected)
-            accepted_previous = build_inventory(paths["previous"], expected)
+            accepted_live = build_inventory(install_root, candidate_paths)
+            accepted_previous = build_inventory(paths["previous"], preflight_paths)
             if accepted_live.digest != candidate.digest or accepted_previous.digest != live_before.digest:
                 raise PublicationError("live or retained previous generation drifted during validation")
             state.setdefault("validation", {})["post_publish_live"] = live_validation
-            state["live_inventory_at_publication"] = _inventory_record(
-                accepted_live, evidence_root / "snapshot.inventory"
+            state["live_inventory_at_publication"] = _path_byte_identity(
+                accepted_live, evidence_root / "snapshot.inventory", candidate_paths
             )
+            state["mutation_outcome"] = MUTATION_PUBLISHED
             _record_event(state, "publication_validated")
             _persist_state(paths["state"], state, "PUBLISHED")
             return state
@@ -1706,6 +2179,88 @@ def publish_operation(
             raise
 
 
+def _validate_takeover_authorization(
+    path: Optional[Path],
+    *,
+    state: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Require durable proof that the reserved owner was inspected and is inactive."""
+    if path is None:
+        raise PublicationError(
+            "mutating recovery requires durable stopped/superseded takeover authorization"
+        )
+    path = _safe_absolute(path, label="takeover authorization", must_exist=True)
+    if _is_within(path, Path(str(state["install_root"]))):
+        raise PublicationError("takeover authorization must be outside the installed root")
+    evidence_root = Path(str(state["evidence_root"]))
+    reserved_evidence_paths = {
+        evidence_root / "publication-receipt.json",
+        evidence_root / "terminal-validation-live.inventory",
+        evidence_root / "snapshot.inventory",
+    }
+    if path in reserved_evidence_paths or _is_within(path, evidence_root / "snapshot"):
+        raise PublicationError("takeover authorization overlaps reserved evidence output")
+    authorization = _read_json_file(path, label="takeover authorization")
+    prior_owner = reservation.get("owner")
+    inspection = authorization.get("inspection")
+    disposition = authorization.get("owner_disposition")
+    required_strings = ("authorized_by", "authorized_at")
+    if (
+        authorization.get("schema_version") != 1
+        or authorization.get("operation_id") != state.get("operation_id")
+        or authorization.get("generation_id") != state.get("generation_id")
+        or authorization.get("prior_owner") != prior_owner
+    ):
+        raise PublicationError("takeover authorization is not bound to this owner and operation")
+    if disposition not in {"STOPPED", "SUPERSEDED"}:
+        raise PublicationError("takeover owner disposition is not STOPPED or SUPERSEDED")
+    if any(
+        not isinstance(authorization.get(key), str) or not authorization[key].strip()
+        for key in required_strings
+    ):
+        raise PublicationError("takeover authorization lacks durable author/time identity")
+    if not isinstance(inspection, dict):
+        raise PublicationError("takeover authorization lacks owner inspection evidence")
+    evidence = inspection.get("evidence")
+    if (
+        inspection.get("owner_process_status") != "INACTIVE"
+        or inspection.get("tool_session_status") != "INACTIVE"
+        or not isinstance(inspection.get("inspected_at"), str)
+        or not inspection["inspected_at"].strip()
+        or not isinstance(inspection.get("inspected_by"), str)
+        or not inspection["inspected_by"].strip()
+        or not isinstance(evidence, list)
+        or not evidence
+        or any(not isinstance(item, str) or not item.strip() for item in evidence)
+    ):
+        raise PublicationError(
+            "takeover inspection does not prove inactive process and tool session"
+        )
+    raw = _read_regular_bytes(path, label="takeover authorization")
+    return {
+        "path": str(path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "authorization": authorization,
+    }
+
+
+def _verify_recorded_takeover_authorization(
+    state: Mapping[str, Any], reservation: Mapping[str, Any]
+) -> Optional[Dict[str, Any]]:
+    recorded = state.get("recovery_takeover_authorization")
+    if recorded is None:
+        return None
+    if not isinstance(recorded, dict) or not isinstance(recorded.get("path"), str):
+        raise PublicationError("recorded recovery takeover authorization is malformed")
+    observed = _validate_takeover_authorization(
+        Path(recorded["path"]), state=state, reservation=reservation
+    )
+    if observed != recorded:
+        raise PublicationError("recovery takeover authorization drifted after recovery")
+    return observed
+
+
 def recover_operation(
     *,
     state_root: Path,
@@ -1713,6 +2268,7 @@ def recover_operation(
     action: str,
     exchanger: AtomicExchanger,
     lock_path: Optional[Path] = None,
+    takeover_authorization: Optional[Path] = None,
     checker_runner: CheckerRunner = run_installed_checker,
 ) -> Dict[str, Any]:
     """Inspect first; complete or roll back only an unambiguous complete-tree state."""
@@ -1723,16 +2279,29 @@ def recover_operation(
     with WriterLock(paths["writer_lock"]):
         paths, state = _load_state(state_root, operation)
         _verify_prepare_evidence(state)
-        _load_reservation(paths, operation)
+        reservation = _load_reservation(paths, operation, state)
+        _verify_recorded_takeover_authorization(state, reservation)
         inspection = classify_generation_state(state_root, operation)
         if action == "inspect":
             return inspection
+        takeover = _validate_takeover_authorization(
+            takeover_authorization, state=state, reservation=reservation
+        )
+        state["recovery_takeover_authorization"] = takeover
+        _record_event(
+            state,
+            "mutating_recovery_takeover_authorized",
+            owner_disposition=takeover["authorization"]["owner_disposition"],
+            authorization_sha256=takeover["sha256"],
+        )
+        _persist_state(paths["state"], state)
         if inspection["classification"] == "AMBIGUOUS":
             state["last_inspection"] = inspection
             _record_event(state, "ambiguous_recovery_refused")
             _persist_state(paths["state"], state, "UNCHECKED")
             raise PublicationError("recovery state is ambiguous; reservation and all trees were preserved")
-        expected = state["expected_paths"]
+        candidate_paths = state["candidate_expected_paths"]
+        preflight_paths = state["preflight_expected_paths"]
         install_root = Path(state["install_root"])
         exchanger.require_available()
         if action == "complete":
@@ -1745,15 +2314,21 @@ def recover_operation(
                     _move_complete_tree(paths["slot"], paths["previous"])
                 elif inspection["classification"] != "POST_SWAP_RETAINED":
                     raise PublicationError(f"cannot complete from {inspection['classification']}")
-                retained = build_inventory(paths["previous"], expected)
-                live_after_recovery = build_inventory(install_root, expected)
+                retained = build_inventory(paths["previous"], preflight_paths)
+                live_after_recovery = build_inventory(install_root, candidate_paths)
                 state["previous_generation"] = {
                     "root": str(paths["previous"]),
-                    **retained.metadata(),
+                    **_path_byte_identity(
+                        retained, paths["preflight_inventory"], preflight_paths
+                    ),
                 }
                 state["live_inventory_at_publication"] = {
                     "root": str(install_root),
-                    **live_after_recovery.metadata(),
+                    **_path_byte_identity(
+                        live_after_recovery,
+                        Path(state["evidence_root"]) / "snapshot.inventory",
+                        candidate_paths,
+                    ),
                 }
                 state["exchange_primitive"] = exchanger.name
                 try:
@@ -1765,13 +2340,14 @@ def recover_operation(
                         paths=paths,
                         state=state,
                         install_root=install_root,
-                        expected_paths=expected,
+                        candidate_paths=candidate_paths,
+                        preflight_paths=preflight_paths,
                         exchanger=exchanger,
                         reason=str(exc),
                     )
                     raise
-                checked_live = build_inventory(install_root, expected)
-                checked_previous = build_inventory(paths["previous"], expected)
+                checked_live = build_inventory(install_root, candidate_paths)
+                checked_previous = build_inventory(paths["previous"], preflight_paths)
                 if (
                     checked_live.digest != state["candidate_inventory"]["sha256"]
                     or checked_previous.digest
@@ -1781,6 +2357,7 @@ def recover_operation(
                         "recovery checker changed the live or retained generation"
                     )
                 state.setdefault("validation", {})["recovery_live"] = validation
+                state["mutation_outcome"] = MUTATION_PUBLISHED
                 _record_event(state, "publication_completed_by_recovery")
                 _persist_state(paths["state"], state, "PUBLISHED")
                 return state
@@ -1793,17 +2370,24 @@ def recover_operation(
                 _move_complete_tree(paths["previous"], paths["failed"])
             else:
                 raise PublicationError(f"cannot roll back from {inspection['classification']}")
-            restored = build_inventory(install_root, expected)
+            restored = build_inventory(install_root, preflight_paths)
             if restored.digest != state["preflight_inventory"]["sha256"]:
                 raise PublicationError("recovery rollback did not restore the old generation")
-            failed = build_inventory(paths["failed"], expected)
+            failed = build_inventory(paths["failed"], candidate_paths)
             state["rollback"] = {
                 "reason": "explicit unambiguous recovery rollback",
-                "restored_live_inventory": restored.metadata(),
+                "restored_live_inventory": _path_byte_identity(
+                    restored, paths["preflight_inventory"], preflight_paths
+                ),
                 "failed_generation_root": str(paths["failed"]),
                 "failed_generation_sha256": failed.digest,
+                "failed_generation_identity": _path_byte_identity(
+                    failed, paths["candidate_inventory"], candidate_paths
+                ),
                 "exchange_primitive": exchanger.name,
             }
+            state["previous_generation"] = None
+            state["mutation_outcome"] = MUTATION_ROLLED_BACK
             _record_event(state, "rollback_completed_by_recovery")
             _persist_state(paths["state"], state, "ROLLED_BACK")
             return state
@@ -1815,6 +2399,7 @@ def recover_operation(
             operation=operation,
             exchanger=exchanger,
             checker_runner=checker_runner,
+            recovery_takeover_authorization=takeover,
         )
     raise PublicationError("recovery did not select a complete-tree action")
 
@@ -1855,6 +2440,202 @@ def _reject_receipt_output_overlap(
             raise PublicationError(
                 "final receipt output collides with the maintenance authorization receipt"
             )
+    takeover = state.get("recovery_takeover_authorization")
+    if isinstance(takeover, dict) and isinstance(takeover.get("path"), str):
+        takeover_path = _safe_absolute(
+            Path(takeover["path"]),
+            label="takeover authorization",
+            must_exist=True,
+        )
+        if receipt_output == takeover_path:
+            raise PublicationError(
+                "final receipt output collides with the takeover authorization"
+            )
+
+
+def _write_once_or_verify_bytes(path: Path, data: bytes, *, label: str) -> None:
+    if path.exists() or path.is_symlink():
+        if _read_regular_bytes(path, label=label) != data:
+            raise PublicationError(f"existing {label} conflicts with this operation")
+        return
+    _write_new_file(path, data)
+    _fsync_directory(path.parent)
+
+
+def _complete_pending_terminal_finalization(
+    *,
+    paths: Mapping[str, Path],
+    state: Dict[str, Any],
+    reservation: Mapping[str, Any],
+    state_root: Path,
+    operation: str,
+    receipt_output: Optional[Path],
+    manifest_path: Optional[Path],
+) -> Dict[str, Any]:
+    """Resume the deterministic receipt/manifest boundary after any crash."""
+    pending = state.get("pending_terminal_finalization")
+    if not isinstance(pending, dict) or not isinstance(pending.get("receipt"), dict):
+        raise PublicationError("FINALIZING state lacks deterministic terminal evidence")
+    _verify_prepare_evidence(state)
+    receipt = pending["receipt"]
+    evidence_receipt = Path(str(pending.get("evidence_receipt")))
+    durable_receipt = Path(str(pending.get("durable_receipt")))
+    pending_manifest = pending.get("finalization_manifest")
+    if (
+        evidence_receipt != Path(str(state["evidence_root"])) / "publication-receipt.json"
+        or not evidence_receipt.is_absolute()
+        or not durable_receipt.is_absolute()
+        or (receipt_output is not None and durable_receipt != receipt_output)
+        or pending_manifest != (str(manifest_path) if manifest_path else None)
+    ):
+        raise PublicationError("terminal finalization retry arguments differ from pending state")
+    terminal_state = state.get("terminal_state")
+    candidate_paths = state.get("candidate_expected_paths")
+    preflight_paths = state.get("preflight_expected_paths")
+    if terminal_state == "PUBLISHED":
+        live_paths = candidate_paths
+        expected_inventory = state.get("candidate_inventory")
+        expected_mutation = MUTATION_PUBLISHED
+    elif terminal_state == "ROLLED_BACK":
+        live_paths = preflight_paths
+        expected_inventory = state.get("preflight_inventory")
+        expected_mutation = MUTATION_ROLLED_BACK
+    else:
+        raise PublicationError("pending terminal state is malformed")
+    if (
+        not isinstance(live_paths, list)
+        or not live_paths
+        or not isinstance(candidate_paths, list)
+        or not candidate_paths
+        or not isinstance(expected_inventory, dict)
+    ):
+        raise PublicationError("pending terminal inventory identity is malformed")
+    snapshot = build_inventory(
+        Path(str(state["evidence_root"])) / "snapshot", candidate_paths
+    )
+    snapshot_sidecar = Path(str(state["evidence_snapshot"]["path"]))
+    persisted_snapshot = _read_regular_bytes(
+        snapshot_sidecar, label="evidence snapshot inventory"
+    )
+    if (
+        snapshot.digest != state["candidate_inventory"]["sha256"]
+        or persisted_snapshot != snapshot.data
+        or serialize_inventory(parse_inventory(persisted_snapshot)) != snapshot.data
+    ):
+        raise PublicationError("evidence snapshot drifted during terminal finalization")
+    live = build_inventory(Path(str(state["install_root"])), live_paths)
+    terminal_inventory_path = Path(str(state["evidence_root"])) / (
+        "terminal-validation-live.inventory"
+    )
+    expected_live_identity = _path_byte_identity(
+        live, terminal_inventory_path, live_paths
+    )
+    if (
+        live.digest != expected_inventory.get("sha256")
+        or receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("operation_id") != operation
+        or receipt.get("generation_id") != state.get("generation_id")
+        or receipt.get("terminal_state") != terminal_state
+        or receipt.get("live_inventory_at_terminal_validation")
+        != expected_live_identity
+        or receipt.get("reservation") != reservation
+        or receipt.get("candidate_inventory") != state.get("candidate_inventory")
+        or receipt.get("live_inventory_at_dispatch") != state.get("preflight_inventory")
+        or receipt.get("mutation_outcome") != expected_mutation
+        or receipt.get("reservation_state")
+        != "RETAINED_PENDING_PANEL_ACCEPTANCE"
+        or receipt.get("finalization_manifest") != pending_manifest
+        or receipt.get("source")
+        != {
+            "commit": state["source_commit"],
+            "tree": state["source_tree"],
+            "manifest_path": state["manifest_path"],
+            "manifest_sha256": state["manifest_sha256"],
+        }
+        or receipt.get("expected_live_source")
+        != {
+            "commit": state["expected_live_source_commit"],
+            "tree": state["expected_live_source_tree"],
+            "manifest_path": state["manifest_path"],
+            "manifest_sha256": state["expected_live_manifest_sha256"],
+        }
+        or receipt.get("evidence_snapshot") != state.get("evidence_snapshot")
+    ):
+        raise PublicationError("pending terminal receipt differs from current exact state")
+    named_outcomes = receipt.get("named_mutation_outcomes")
+    if not isinstance(named_outcomes, dict) or not named_outcomes:
+        raise PublicationError("pending terminal receipt lacks named mutation outcomes")
+    _write_once_or_verify_bytes(
+        terminal_inventory_path,
+        live.data,
+        label="terminal live inventory",
+    )
+    _write_once_or_verify_json(
+        evidence_receipt, receipt, label="canonical terminal publication receipt"
+    )
+    if durable_receipt != evidence_receipt:
+        _mkdir_secure(durable_receipt.parent, exist_ok=True)
+        _write_once_or_verify_json(
+            durable_receipt, receipt, label="external terminal publication receipt"
+        )
+    reread = _read_json_file(durable_receipt, label="durable final receipt")
+    if reread != receipt:
+        raise PublicationError("durable final receipt did not round-trip")
+    receipt_digest = hashlib.sha256(
+        _read_regular_bytes(durable_receipt, label="final publication receipt")
+    ).hexdigest()
+    manifest_terminal: Optional[Dict[str, Any]] = None
+    terminal_prefix: Optional[Dict[str, Any]] = None
+    if manifest_path is not None:
+        manifest_record = reservation.get("finalization_manifest")
+        intent_prefix = (
+            manifest_record.get("intent_prefix")
+            if isinstance(manifest_record, dict)
+            else None
+        )
+        if not isinstance(intent_prefix, dict):
+            raise PublicationError("reservation lacks its terminal predecessor prefix")
+        manifest_terminal = _append_finalization_record(
+            manifest_path,
+            record_type="installed_publication_terminal",
+            expected_prefix=intent_prefix,
+            payload={
+                "operation_id": operation,
+                "generation_id": state["generation_id"],
+                "installed_root": state["install_root"],
+                "lock_path": str(paths["reservation"]),
+                "reservation_state": "RETAINED_PENDING_PANEL_ACCEPTANCE",
+                "terminal_state": terminal_state,
+                "publication_receipt_path": str(durable_receipt),
+                "publication_receipt_sha256": receipt_digest,
+                "publication_receipt": receipt,
+            },
+        )
+        terminal_prefix = _finalization_manifest_prefix(
+            manifest_path,
+            through_sequence=manifest_terminal["record"]["sequence"],
+            required_prefix=intent_prefix,
+        )
+        if (
+            terminal_prefix["prefix_sha256"]
+            != manifest_terminal["manifest_sha256"]
+            or terminal_prefix["prefix_bytes"]
+            != manifest_terminal["manifest_prefix_bytes"]
+        ):
+            raise PublicationError(
+                "terminal manifest prefix differs from the appended record identity"
+            )
+    state["final_receipt"] = {
+        "path": str(durable_receipt),
+        "sha256": receipt_digest,
+    }
+    if terminal_prefix is not None:
+        state["finalization_manifest_terminal"] = terminal_prefix
+    state["terminal_finalization"] = pending
+    state.pop("pending_terminal_finalization", None)
+    _record_event(state, "terminal_validation_finalized_reservation_retained")
+    _persist_state(paths["state"], state, "FINALIZED_RESERVED")
+    return receipt
 
 
 def finalize_operation(
@@ -1867,7 +2648,7 @@ def finalize_operation(
     exchanger: Optional[AtomicExchanger] = None,
     checker_runner: CheckerRunner = run_installed_checker,
 ) -> Dict[str, Any]:
-    """Persist a terminal receipt, then release only this operation's reservation."""
+    """Persist terminal validation evidence while retaining the reservation."""
     state_root = _safe_absolute(state_root, label="state root", must_exist=True)
     paths, state = _load_state(state_root, operation)
     _validate_package_lock_argument(state_root, operation, lock_path)
@@ -1885,7 +2666,8 @@ def finalize_operation(
         )
     with WriterLock(paths["writer_lock"]):
         paths, state = _load_state(state_root, operation)
-        reservation = _load_reservation(paths, operation)
+        reservation = _load_reservation(paths, operation, state)
+        _verify_recorded_takeover_authorization(state, reservation)
         if receipt_output is not None:
             _reject_receipt_output_overlap(
                 receipt_output,
@@ -1894,21 +2676,38 @@ def finalize_operation(
                 reservation=reservation,
             )
         if manifest_path is not None:
-            recorded_manifest = reservation.get("finalization_manifest")
-            if (
-                not isinstance(recorded_manifest, dict)
-                or recorded_manifest.get("path") != str(manifest_path)
-            ):
+            reserved_manifest = _reserved_finalization_manifest(
+                reservation, state_root=state_root, state=state
+            )
+            if reserved_manifest != manifest_path:
                 raise PublicationError(
                     "finalization manifest differs from the reserved publication manifest"
                 )
         status = state.get("status")
+        if status == "FINALIZING":
+            return _complete_pending_terminal_finalization(
+                paths=paths,
+                state=state,
+                reservation=reservation,
+                state_root=state_root,
+                operation=operation,
+                receipt_output=receipt_output,
+                manifest_path=manifest_path,
+            )
         if status not in {"PUBLISHED", "ROLLED_BACK"}:
             raise PublicationError(f"cannot finalize non-terminal publication state: {status}")
+        if receipt_output is not None and (
+            receipt_output.exists() or receipt_output.is_symlink()
+        ):
+            raise PublicationError(
+                "external final receipt output already exists; refusing to overwrite it"
+            )
         _verify_prepare_evidence(state)
-        expected = state["expected_paths"]
+        candidate_paths = state["candidate_expected_paths"]
+        preflight_paths = state["preflight_expected_paths"]
         install_root = Path(state["install_root"])
-        live = build_inventory(install_root, expected)
+        live_paths = candidate_paths if status == "PUBLISHED" else preflight_paths
+        live = build_inventory(install_root, live_paths)
         expected_live_digest = (
             state["candidate_inventory"]["sha256"]
             if status == "PUBLISHED"
@@ -1916,21 +2715,21 @@ def finalize_operation(
         )
         if live.digest != expected_live_digest:
             raise PublicationError("live tree drifted before finalization")
-        acceptance_validation: Optional[Dict[str, Any]] = None
+        terminal_validation: Optional[Dict[str, Any]] = None
         if status == "PUBLISHED":
             try:
-                acceptance_validation = _run_bound_checker(
+                terminal_validation = _run_bound_checker(
                     state, paths["source"], install_root, checker_runner
                 )
-                live_after_acceptance_checker = build_inventory(install_root, expected)
+                live_after_terminal_checker = build_inventory(install_root, candidate_paths)
                 if (
-                    live_after_acceptance_checker.digest != expected_live_digest
-                    or live_after_acceptance_checker.data != live.data
+                    live_after_terminal_checker.digest != expected_live_digest
+                    or live_after_terminal_checker.data != live.data
                 ):
                     raise PublicationError(
-                        "acceptance checker changed the live generation before finalization"
-                )
-                live = live_after_acceptance_checker
+                        "terminal checker changed the live generation before finalization"
+                    )
+                live = live_after_terminal_checker
             except ValidationFailure as exc:
                 rollback_exchanger = exchanger or DarwinAtomicExchanger()
                 try:
@@ -1939,7 +2738,8 @@ def finalize_operation(
                         paths=paths,
                         state=state,
                         install_root=install_root,
-                        expected_paths=expected,
+                        candidate_paths=candidate_paths,
+                        preflight_paths=preflight_paths,
                         exchanger=rollback_exchanger,
                         reason=f"finalization validation failed: {exc}",
                     )
@@ -1964,7 +2764,7 @@ def finalize_operation(
                 _persist_state(paths["state"], state, "UNCHECKED")
                 raise
         evidence_root = Path(state["evidence_root"])
-        snapshot = build_inventory(evidence_root / "snapshot", expected)
+        snapshot = build_inventory(evidence_root / "snapshot", candidate_paths)
         if snapshot.digest != state["candidate_inventory"]["sha256"]:
             raise PublicationError("evidence snapshot drifted before finalization")
         persisted_snapshot = parse_inventory(
@@ -1975,8 +2775,14 @@ def finalize_operation(
         )
         if serialize_inventory(persisted_snapshot) != snapshot.data:
             raise PublicationError("evidence snapshot inventory receipt drifted before finalization")
-        acceptance_inventory_path = evidence_root / "acceptance-live.inventory"
-        _atomic_write_bytes(acceptance_inventory_path, live.data)
+        expected_mutation_outcome = (
+            MUTATION_PUBLISHED if status == "PUBLISHED" else MUTATION_ROLLED_BACK
+        )
+        if state.get("mutation_outcome") != expected_mutation_outcome:
+            raise PublicationError(
+                "terminal state lacks its exact named live mutation outcome"
+            )
+        terminal_inventory_path = evidence_root / "terminal-validation-live.inventory"
         receipt = {
             "schema_version": RECEIPT_SCHEMA_VERSION,
             "operation_id": operation,
@@ -1988,92 +2794,900 @@ def finalize_operation(
                 "manifest_path": state["manifest_path"],
                 "manifest_sha256": state["manifest_sha256"],
             },
+            "expected_live_source": {
+                "commit": state["expected_live_source_commit"],
+                "tree": state["expected_live_source_tree"],
+                "manifest_path": state["manifest_path"],
+                "manifest_sha256": state["expected_live_manifest_sha256"],
+            },
             "evidence_snapshot": state["evidence_snapshot"],
             "candidate_inventory": state["candidate_inventory"],
             "live_inventory_at_dispatch": state["preflight_inventory"],
             "live_inventory_immediately_before_swap": state.get(
                 "live_inventory_immediately_before_swap"
             ),
-            "live_inventory_at_acceptance": _inventory_record(live, acceptance_inventory_path),
+            "live_inventory_at_terminal_validation": _path_byte_identity(
+                live, terminal_inventory_path, live_paths
+            ),
             "reservation": reservation,
             "exchange_primitive": state.get("exchange_primitive"),
             "previous_generation": state.get("previous_generation"),
             "rollback": state.get("rollback"),
+            "mutation_outcome": expected_mutation_outcome,
+            "recovery_takeover_authorization": state.get(
+                "recovery_takeover_authorization"
+            ),
+            "reservation_state": "RETAINED_PENDING_PANEL_ACCEPTANCE",
             "finalization_manifest": str(manifest_path) if manifest_path else None,
             "validation": {
                 **state.get("validation", {}),
-                "acceptance_live": acceptance_validation,
+                "terminal_live": terminal_validation,
+            },
+            "named_mutation_outcomes": {
+                name: validation.get("named_mutation_outcomes")
+                for name, validation in {
+                    **state.get("validation", {}),
+                    "terminal_live": terminal_validation,
+                }.items()
+                if isinstance(validation, dict)
+                and isinstance(validation.get("named_mutation_outcomes"), dict)
             },
             "finalized_at": _utc_now(),
         }
         evidence_receipt = evidence_root / "publication-receipt.json"
-        _atomic_write_json(evidence_receipt, receipt)
         durable_receipt = evidence_receipt
         if receipt_output is not None:
-            _mkdir_secure(receipt_output.parent, exist_ok=True)
-            _atomic_write_json(receipt_output, receipt)
             durable_receipt = receipt_output
-        reread = _read_json_file(durable_receipt, label="durable final receipt")
-        if reread != receipt:
-            raise PublicationError("durable final receipt did not round-trip")
-        receipt_digest = hashlib.sha256(
-            _read_regular_bytes(durable_receipt, label="final publication receipt")
-        ).hexdigest()
-        manifest_terminal: Optional[Dict[str, Any]] = None
-        if manifest_path is not None:
-            manifest_terminal = _append_finalization_record(
-                manifest_path,
-                record_type="installed_publication_terminal",
-                payload={
-                    "operation_id": operation,
-                    "generation_id": state["generation_id"],
-                    "installed_root": state["install_root"],
-                    "lock_path": str(paths["reservation"]),
-                    "reservation_state": "TERMINAL_RECEIPT_DURABLE",
-                    "terminal_state": status,
-                    "publication_receipt_path": str(durable_receipt),
-                    "publication_receipt_sha256": receipt_digest,
-                    "publication_receipt": receipt,
-                },
-            )
-        _mkdir_secure(paths["released"].parent, exist_ok=True)
-        release_record = {
-            "schema_version": 1,
-            "operation_id": operation,
-            "released_at": _utc_now(),
-            "terminal_state": status,
-            "receipt_path": str(durable_receipt),
-            "receipt_sha256": receipt_digest,
-            "reservation": reservation,
+        state["terminal_state"] = status
+        state["pending_terminal_finalization"] = {
+            "receipt": receipt,
+            "evidence_receipt": str(evidence_receipt),
+            "durable_receipt": str(durable_receipt),
+            "finalization_manifest": str(manifest_path) if manifest_path else None,
         }
-        if manifest_path is not None and manifest_terminal is not None:
-            release_record["finalization_manifest"] = {
-                "path": str(manifest_path),
-                "terminal_sequence": manifest_terminal["record"]["sequence"],
-                "sha256_after_terminal": manifest_terminal["manifest_sha256"],
-            }
-        _atomic_write_json(paths["released"], release_record)
-        current = _read_json_file(paths["reservation"], label="reservation before release")
-        if current.get("operation_id") != operation:
-            raise PublicationError("refusing to release a reservation owned by another operation")
-        os.unlink(paths["reservation"])
-        _fsync_directory(state_root)
-        state["final_receipt"] = str(durable_receipt)
-        state["release_record"] = str(paths["released"])
-        _record_event(state, "finalized_and_reservation_released")
-        _persist_state(paths["state"], state, "FINALIZED")
+        _record_event(state, "terminal_finalization_evidence_staged")
+        _persist_state(paths["state"], state, "FINALIZING")
+        return _complete_pending_terminal_finalization(
+            paths=paths,
+            state=state,
+            reservation=reservation,
+            state_root=state_root,
+            operation=operation,
+            receipt_output=receipt_output,
+            manifest_path=manifest_path,
+        )
+
+
+def _validated_record_text(value: str, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise PublicationError(f"{label} must be a non-empty normalized string")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise PublicationError(f"{label} contains a control character")
+    return value
+
+
+def _reserved_finalization_manifest(
+    reservation: Mapping[str, Any], *, state_root: Path, state: Mapping[str, Any]
+) -> Path:
+    record = reservation.get("finalization_manifest")
+    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+        raise PublicationError(
+            "the active reservation lacks a bound finalization manifest"
+        )
+    path = _validate_finalization_manifest_path(
+        Path(record["path"]), state_root=state_root, state=state
+    )
+    intent_prefix = record.get("intent_prefix")
+    if not isinstance(intent_prefix, dict):
+        raise PublicationError(
+            "the active reservation lacks its durable intent-manifest prefix"
+        )
+    _finalization_manifest_prefix(path, required_prefix=intent_prefix)
+    return path
+
+
+def _reservation_identity(
+    paths: Mapping[str, Path], reservation: Mapping[str, Any]
+) -> Dict[str, Any]:
+    raw = _read_regular_bytes(paths["reservation"], label="active package reservation")
+    try:
+        observed = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"active package reservation is invalid JSON: {exc}") from exc
+    if observed != reservation:
+        raise PublicationError("active package reservation changed during identity capture")
+    return {
+        "path": str(paths["reservation"]),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "operation_id": reservation.get("operation_id"),
+        "generation_id": reservation.get("generation_id"),
+        "owner": reservation.get("owner"),
+        "maintenance": reservation.get("maintenance"),
+    }
+
+
+def _terminal_receipt(
+    state: Mapping[str, Any], *, operation: str
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    identity = state.get("final_receipt")
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("path"), str)
+        or not HEX_64_RE.fullmatch(str(identity.get("sha256")))
+    ):
+        raise PublicationError("operation lacks a durable terminal receipt identity")
+    raw = _read_regular_bytes(Path(identity["path"]), label="terminal publication receipt")
+    if hashlib.sha256(raw).hexdigest() != identity["sha256"]:
+        raise PublicationError("terminal publication receipt drifted")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"terminal publication receipt is invalid: {exc}") from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("operation_id") != operation
+        or receipt.get("generation_id") != state.get("generation_id")
+        or receipt.get("terminal_state") != state.get("terminal_state")
+        or receipt.get("reservation_state") != "RETAINED_PENDING_PANEL_ACCEPTANCE"
+    ):
+        raise PublicationError("terminal publication receipt is not bound to this operation")
+    return dict(identity), receipt
+
+
+def _terminal_live_identity(
+    state: Mapping[str, Any]
+) -> Tuple[str, List[str], Mapping[str, Any]]:
+    terminal_state = state.get("terminal_state")
+    if terminal_state == "PUBLISHED":
+        expected_paths = state.get("candidate_expected_paths")
+        expected_inventory = state.get("candidate_inventory")
+    elif terminal_state == "ROLLED_BACK":
+        expected_paths = state.get("preflight_expected_paths")
+        expected_inventory = state.get("preflight_inventory")
+    else:
+        raise PublicationError("operation lacks a valid terminal live-generation state")
+    if (
+        not isinstance(expected_paths, list)
+        or not expected_paths
+        or any(not isinstance(path, str) for path in expected_paths)
+        or not isinstance(expected_inventory, dict)
+        or not HEX_64_RE.fullmatch(str(expected_inventory.get("sha256")))
+    ):
+        raise PublicationError("terminal live-generation identity is malformed")
+    return terminal_state, expected_paths, expected_inventory
+
+
+def _live_inventory_report_paths(
+    output: Path, *, evidence_root: Path
+) -> Tuple[Path, Path]:
+    output = _safe_absolute(output, label="live inventory receipt output")
+    evidence_root = _safe_absolute(
+        evidence_root, label="operation evidence root", must_exist=True
+    )
+    if output == evidence_root or not _is_within(output, evidence_root):
+        raise PublicationError("live inventory receipt must be inside the evidence root")
+    inventory_path = output.with_name(output.name + ".inventory")
+    for candidate in (output, inventory_path):
+        _safe_absolute(candidate, label="live inventory evidence output")
+        if candidate.exists() or candidate.is_symlink():
+            raise PublicationError(
+                f"live inventory evidence output already exists: {candidate}"
+            )
+        if _is_within(candidate, evidence_root / "snapshot") or candidate in {
+            evidence_root / "snapshot.inventory",
+            evidence_root / "publication-receipt.json",
+            evidence_root / "terminal-validation-live.inventory",
+        }:
+            raise PublicationError(
+                f"live inventory evidence overlaps reserved evidence: {candidate}"
+            )
+    return output, inventory_path
+
+
+def report_live_inventory(
+    *,
+    state_root: Path,
+    operation: str,
+    phase: str,
+    output: Path,
+    lock_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Record an exact live inventory and manifest prefix under the reservation."""
+    if phase not in LIVE_INVENTORY_PHASES:
+        raise PublicationError(f"unsupported live inventory phase: {phase!r}")
+    state_root = _safe_absolute(state_root, label="state root", must_exist=True)
+    paths, state = _load_state(state_root, operation)
+    _validate_package_lock_argument(state_root, operation, lock_path)
+    output, inventory_path = _live_inventory_report_paths(
+        output, evidence_root=Path(str(state["evidence_root"]))
+    )
+    with WriterLock(paths["writer_lock"]):
+        paths, state = _load_state(state_root, operation)
+        if state.get("status") != "FINALIZED_RESERVED":
+            raise PublicationError(
+                "live inventory reporting requires terminal validation and a retained reservation"
+            )
+        reservation = _load_reservation(paths, operation, state)
+        _verify_recorded_takeover_authorization(state, reservation)
+        _verify_prepare_evidence(state)
+        manifest_path = _reserved_finalization_manifest(
+            reservation, state_root=state_root, state=state
+        )
+        terminal_prefix = state.get("finalization_manifest_terminal")
+        if not isinstance(terminal_prefix, dict):
+            raise PublicationError(
+                "terminal state lacks its durable finalization-manifest prefix"
+            )
+        manifest_prefix = _finalization_manifest_prefix(
+            manifest_path, required_prefix=terminal_prefix
+        )
+        terminal_receipt_identity, _ = _terminal_receipt(state, operation=operation)
+        terminal_state, live_paths, expected_inventory = _terminal_live_identity(state)
+        live = build_inventory(Path(str(state["install_root"])), live_paths)
+        if live.digest != expected_inventory["sha256"]:
+            raise PublicationError(
+                f"live tree drifted before the {phase} inventory observation"
+            )
+        reservation_identity = _reservation_identity(paths, reservation)
+        receipt = {
+            "schema_version": 1,
+            "record_type": "live_inventory_observation",
+            "phase": phase,
+            "operation_id": operation,
+            "generation_id": state["generation_id"],
+            "terminal_state": terminal_state,
+            "observed_at": _utc_now(),
+            "installed_root": state["install_root"],
+            "source": {
+                "commit": state["source_commit"],
+                "tree": state["source_tree"],
+                "manifest_path": state["manifest_path"],
+                "manifest_sha256": state["manifest_sha256"],
+            },
+            "expected_live_source": {
+                "commit": state["expected_live_source_commit"],
+                "tree": state["expected_live_source_tree"],
+                "manifest_sha256": state["expected_live_manifest_sha256"],
+            },
+            "live_inventory": _path_byte_identity(live, inventory_path, live_paths),
+            "terminal_receipt": terminal_receipt_identity,
+            "reservation": reservation_identity,
+            "finalization_manifest_prefix": manifest_prefix,
+            "mutation_outcome": state["mutation_outcome"],
+        }
+        encoded = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        _write_new_file(inventory_path, live.data)
+        persisted_inventory = _read_regular_bytes(
+            inventory_path, label=f"{phase} live inventory sidecar"
+        )
+        if (
+            persisted_inventory != live.data
+            or serialize_inventory(parse_inventory(persisted_inventory)) != live.data
+        ):
+            raise PublicationError(
+                f"{phase} live inventory sidecar changed before receipt commit"
+            )
+        _write_new_file(output, encoded)
+        _fsync_directory(output.parent)
+        observed = _read_regular_bytes(output, label=f"{phase} live inventory receipt")
+        if observed != encoded:
+            raise PublicationError("live inventory receipt did not round-trip")
+        live_after_receipt = build_inventory(
+            Path(str(state["install_root"])), live_paths
+        )
+        sidecar_after_receipt = _read_regular_bytes(
+            inventory_path, label=f"{phase} live inventory sidecar"
+        )
+        if (
+            live_after_receipt.data != live.data
+            or sidecar_after_receipt != live.data
+            or _finalization_manifest_prefix(
+                manifest_path, required_prefix=terminal_prefix
+            )
+            != manifest_prefix
+            or _reservation_identity(paths, reservation) != reservation_identity
+            or _terminal_receipt(state, operation=operation)[0]
+            != terminal_receipt_identity
+        ):
+            raise PublicationError(
+                f"{phase} evidence identity changed before report journal commit"
+            )
+        report_identity = {
+            "phase": phase,
+            "path": str(output),
+            "sha256": hashlib.sha256(observed).hexdigest(),
+            "inventory_sha256": live.digest,
+            "manifest_prefix_sha256": manifest_prefix["prefix_sha256"],
+        }
+        reports = state.setdefault("live_inventory_reports", [])
+        if not isinstance(reports, list):
+            raise PublicationError("operation live inventory report journal is malformed")
+        reports.append(report_identity)
+        _record_event(
+            state,
+            "live_inventory_observed_under_reservation",
+            phase=phase,
+            receipt_sha256=report_identity["sha256"],
+        )
+        _persist_state(paths["state"], state, "FINALIZED_RESERVED")
         return receipt
+
+
+def _load_recorded_live_inventory_report(
+    *,
+    state: Mapping[str, Any],
+    reservation_identity: Mapping[str, Any],
+    terminal_receipt_identity: Mapping[str, Any],
+    receipt_path: Path,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    receipt_path = _safe_absolute(
+        receipt_path, label="acceptance live inventory receipt", must_exist=True
+    )
+    evidence_root = _safe_absolute(
+        Path(str(state["evidence_root"])), label="operation evidence root", must_exist=True
+    )
+    if not _is_within(receipt_path, evidence_root):
+        raise PublicationError("acceptance live inventory receipt is outside the evidence root")
+    raw = _read_regular_bytes(receipt_path, label="acceptance live inventory receipt")
+    digest = hashlib.sha256(raw).hexdigest()
+    reports = state.get("live_inventory_reports")
+    if not isinstance(reports, list) or not any(
+        isinstance(report, dict)
+        and report.get("phase") == "acceptance"
+        and report.get("path") == str(receipt_path)
+        and report.get("sha256") == digest
+        for report in reports
+    ):
+        raise PublicationError("acceptance inventory receipt is not in the operation journal")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"acceptance inventory receipt is invalid: {exc}") from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema_version") != 1
+        or receipt.get("record_type") != "live_inventory_observation"
+        or receipt.get("phase") != "acceptance"
+        or receipt.get("operation_id") != state.get("operation_id")
+        or receipt.get("generation_id") != state.get("generation_id")
+        or receipt.get("terminal_state") != state.get("terminal_state")
+        or receipt.get("reservation") != reservation_identity
+        or receipt.get("terminal_receipt") != terminal_receipt_identity
+    ):
+        raise PublicationError("acceptance inventory receipt is not bound to this publication")
+    return receipt, {"path": str(receipt_path), "sha256": digest}
+
+
+def _verify_acceptance_live_identity(
+    *,
+    state: Mapping[str, Any],
+    inventory_receipt: Mapping[str, Any],
+    inventory_receipt_identity: Mapping[str, Any],
+    acceptance_inventory_receipt: Path,
+) -> Inventory:
+    raw_receipt = _read_regular_bytes(
+        acceptance_inventory_receipt, label="acceptance live inventory receipt"
+    )
+    if hashlib.sha256(raw_receipt).hexdigest() != inventory_receipt_identity.get(
+        "sha256"
+    ):
+        raise PublicationError("acceptance live inventory receipt drifted")
+    terminal_state, live_paths, expected_inventory = _terminal_live_identity(state)
+    if terminal_state != inventory_receipt.get("terminal_state"):
+        raise PublicationError("acceptance receipt terminal state drifted")
+    live = build_inventory(Path(str(state["install_root"])), live_paths)
+    recorded_live = inventory_receipt.get("live_inventory")
+    expected_sidecar = acceptance_inventory_receipt.with_name(
+        acceptance_inventory_receipt.name + ".inventory"
+    )
+    if not isinstance(recorded_live, dict) or recorded_live.get("path") != str(
+        expected_sidecar
+    ):
+        raise PublicationError("acceptance inventory sidecar path is malformed")
+    persisted_inventory = _read_regular_bytes(
+        expected_sidecar, label="acceptance live inventory sidecar"
+    )
+    if (
+        live.digest != expected_inventory["sha256"]
+        or recorded_live != _path_byte_identity(live, expected_sidecar, live_paths)
+        or persisted_inventory != live.data
+        or serialize_inventory(parse_inventory(persisted_inventory)) != live.data
+    ):
+        raise PublicationError("live generation drifted from the acceptance inventory")
+    return live
+
+
+def _write_once_or_verify_json(path: Path, value: Mapping[str, Any], *, label: str) -> None:
+    encoded = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if path.exists() or path.is_symlink():
+        if _read_regular_bytes(path, label=label) != encoded:
+            raise PublicationError(f"existing {label} conflicts with this acceptance")
+        return
+    _write_new_file(path, encoded)
+    _fsync_directory(path.parent)
+
+
+def _load_bound_release_record(
+    *,
+    paths: Mapping[str, Path],
+    state: Mapping[str, Any],
+    operation: str,
+    acceptance_inventory_receipt: Path,
+    accepted_by: str,
+    acceptance_reason: str,
+    finalization_manifest: Path,
+) -> Dict[str, Any]:
+    raw = _read_regular_bytes(paths["released"], label="package release record")
+    try:
+        release = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"package release record is invalid: {exc}") from exc
+    if not isinstance(release, dict):
+        raise PublicationError("package release record is not an object")
+    recorded_identity = state.get("release_record")
+    acceptance_identity = release.get("acceptance_inventory_receipt")
+    authorization = release.get("acceptance_authorization")
+    manifest_prefix = release.get("finalization_manifest")
+    receipt_path = _safe_absolute(
+        acceptance_inventory_receipt,
+        label="acceptance live inventory receipt",
+        must_exist=True,
+    )
+    receipt_digest = hashlib.sha256(
+        _read_regular_bytes(receipt_path, label="acceptance live inventory receipt")
+    ).hexdigest()
+    if (
+        release.get("schema_version") != 2
+        or release.get("record_type") != "package_reservation_release"
+        or release.get("operation_id") != operation
+        or release.get("generation_id") != state.get("generation_id")
+        or not isinstance(recorded_identity, dict)
+        or recorded_identity.get("path") != str(paths["released"])
+        or recorded_identity.get("sha256") != hashlib.sha256(raw).hexdigest()
+        or acceptance_identity
+        != {"path": str(receipt_path), "sha256": receipt_digest}
+        or not isinstance(authorization, dict)
+        or authorization.get("accepted_by") != accepted_by
+        or authorization.get("acceptance_reason") != acceptance_reason
+        or authorization.get("acceptance_inventory_receipt") != acceptance_identity
+        or not isinstance(manifest_prefix, dict)
+        or manifest_prefix.get("path") != str(finalization_manifest)
+    ):
+        raise PublicationError(
+            "package release record is not bound to this acceptance invocation"
+        )
+    return release
+
+
+def _release_after_verified_acceptance(
+    *,
+    paths: Mapping[str, Path],
+    state: Dict[str, Any],
+    state_root: Path,
+    operation: str,
+    release_record: Mapping[str, Any],
+) -> None:
+    """Release the lock only across immediate pre/post exact-identity checks."""
+    reservation = _load_reservation(paths, operation, state)
+    reservation_raw = _read_regular_bytes(
+        paths["reservation"], label="reservation immediately before release"
+    )
+    reservation_identity = _reservation_identity(paths, reservation)
+    if release_record.get("reservation") != reservation_identity:
+        raise PublicationError("release record reservation identity drifted")
+    inventory_identity = release_record.get("acceptance_inventory_receipt")
+    if not isinstance(inventory_identity, dict) or not isinstance(
+        inventory_identity.get("path"), str
+    ):
+        raise PublicationError("release record acceptance inventory identity is malformed")
+    inventory_path = Path(inventory_identity["path"])
+    inventory_raw = _read_regular_bytes(
+        inventory_path, label="acceptance live inventory receipt"
+    )
+    if hashlib.sha256(inventory_raw).hexdigest() != inventory_identity.get("sha256"):
+        raise PublicationError("release acceptance inventory receipt drifted")
+    try:
+        inventory_receipt = json.loads(inventory_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"release acceptance inventory receipt is invalid: {exc}") from exc
+    if not isinstance(inventory_receipt, dict):
+        raise PublicationError("release acceptance inventory receipt is not an object")
+    acceptance_prefix = release_record.get("finalization_manifest")
+    if not isinstance(acceptance_prefix, dict) or not isinstance(
+        acceptance_prefix.get("path"), str
+    ):
+        raise PublicationError("release acceptance manifest prefix is malformed")
+    manifest_path = Path(acceptance_prefix["path"])
+    _finalization_manifest_prefix(
+        manifest_path, required_prefix=acceptance_prefix
+    )
+    _verify_acceptance_live_identity(
+        state=state,
+        inventory_receipt=inventory_receipt,
+        inventory_receipt_identity=inventory_identity,
+        acceptance_inventory_receipt=inventory_path,
+    )
+    try:
+        os.unlink(paths["reservation"])
+    except Exception as exc:
+        if not paths["reservation"].exists() and not paths["reservation"].is_symlink():
+            try:
+                _write_new_file(paths["reservation"], reservation_raw)
+                _fsync_directory(state_root)
+                _record_event(
+                    state,
+                    "ambiguous_release_unlink_reservation_restored",
+                    error=str(exc),
+                )
+                _persist_state(paths["state"], state, "ACCEPTED_RELEASE_PENDING")
+            except Exception as restore_exc:
+                _record_event(
+                    state,
+                    "ambiguous_release_unlink_restore_failed",
+                    error=str(exc),
+                    restore_error=str(restore_exc),
+                )
+                _persist_state(paths["state"], state, "UNCHECKED")
+                raise PublicationError(
+                    "reservation unlink was ambiguous and restoration failed"
+                ) from restore_exc
+            raise PublicationError(
+                "reservation unlink was ambiguous; the exact reservation was restored"
+            ) from exc
+        raise
+    _fsync_directory(state_root)
+    try:
+        _finalization_manifest_prefix(
+            manifest_path, required_prefix=acceptance_prefix
+        )
+        _verify_acceptance_live_identity(
+            state=state,
+            inventory_receipt=inventory_receipt,
+            inventory_receipt_identity=inventory_identity,
+            acceptance_inventory_receipt=inventory_path,
+        )
+    except Exception as exc:
+        try:
+            _write_new_file(paths["reservation"], reservation_raw)
+            _fsync_directory(state_root)
+            _record_event(
+                state,
+                "post_release_identity_drift_reservation_restored",
+                error=str(exc),
+            )
+            _persist_state(paths["state"], state, "ACCEPTED_RELEASE_PENDING")
+        except Exception as restore_exc:
+            _record_event(
+                state,
+                "post_release_identity_drift_reservation_restore_failed",
+                error=str(exc),
+                restore_error=str(restore_exc),
+            )
+            _persist_state(paths["state"], state, "UNCHECKED")
+            raise PublicationError(
+                "post-release identity drifted and reservation restoration failed"
+            ) from restore_exc
+        raise PublicationError(
+            "post-release identity drifted; the exact reservation was restored"
+        ) from exc
+
+
+def _verify_completed_release_with_missing_reservation(
+    *,
+    paths: Mapping[str, Path],
+    state: Mapping[str, Any],
+    release_record: Mapping[str, Any],
+) -> None:
+    """Classify the post-unlink crash boundary from already-durable evidence."""
+    if paths["reservation"].exists() or paths["reservation"].is_symlink():
+        raise PublicationError("missing-reservation recovery found a package lock")
+    reservation = state.get("reservation")
+    if not isinstance(reservation, dict):
+        raise PublicationError("operation state lacks its original reservation")
+    reservation_raw = (json.dumps(reservation, sort_keys=True, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    expected_reservation_identity = {
+        "path": str(paths["reservation"]),
+        "sha256": hashlib.sha256(reservation_raw).hexdigest(),
+        "operation_id": reservation.get("operation_id"),
+        "generation_id": reservation.get("generation_id"),
+        "owner": reservation.get("owner"),
+        "maintenance": reservation.get("maintenance"),
+    }
+    if release_record.get("reservation") != expected_reservation_identity:
+        raise PublicationError(
+            "durable release record does not bind the original missing reservation"
+        )
+    inventory_identity = release_record.get("acceptance_inventory_receipt")
+    if not isinstance(inventory_identity, dict) or not isinstance(
+        inventory_identity.get("path"), str
+    ):
+        raise PublicationError("durable release inventory identity is malformed")
+    inventory_path = Path(inventory_identity["path"])
+    inventory_raw = _read_regular_bytes(
+        inventory_path, label="acceptance live inventory receipt"
+    )
+    if hashlib.sha256(inventory_raw).hexdigest() != inventory_identity.get("sha256"):
+        raise PublicationError("durable release inventory receipt drifted")
+    try:
+        inventory_receipt = json.loads(inventory_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"durable release inventory receipt is invalid: {exc}") from exc
+    if not isinstance(inventory_receipt, dict):
+        raise PublicationError("durable release inventory receipt is not an object")
+    acceptance_prefix = release_record.get("finalization_manifest")
+    if not isinstance(acceptance_prefix, dict) or not isinstance(
+        acceptance_prefix.get("path"), str
+    ):
+        raise PublicationError("durable release manifest prefix is malformed")
+    _finalization_manifest_prefix(
+        Path(acceptance_prefix["path"]), required_prefix=acceptance_prefix
+    )
+    _verify_acceptance_live_identity(
+        state=state,
+        inventory_receipt=inventory_receipt,
+        inventory_receipt_identity=inventory_identity,
+        acceptance_inventory_receipt=inventory_path,
+    )
+
+
+def accept_operation(
+    *,
+    state_root: Path,
+    operation: str,
+    acceptance_inventory_receipt: Path,
+    accepted_by: str,
+    acceptance_reason: str,
+    lock_path: Optional[Path] = None,
+    finalization_manifest: Path,
+) -> Dict[str, Any]:
+    """Record panel acceptance, then release exactly this package reservation."""
+    accepted_by = _validated_record_text(accepted_by, label="accepted-by")
+    acceptance_reason = _validated_record_text(
+        acceptance_reason, label="acceptance-reason"
+    )
+    state_root = _safe_absolute(state_root, label="state root", must_exist=True)
+    paths, state = _load_state(state_root, operation)
+    _validate_package_lock_argument(state_root, operation, lock_path)
+    finalization_manifest = _validate_finalization_manifest_path(
+        finalization_manifest, state_root=state_root, state=state
+    )
+    with WriterLock(paths["writer_lock"]):
+        paths, state = _load_state(state_root, operation)
+        status = state.get("status")
+        if status in {"ACCEPTED", "ACCEPTED_RELEASE_PENDING"}:
+            release_record = _load_bound_release_record(
+                paths=paths,
+                state=state,
+                operation=operation,
+                acceptance_inventory_receipt=acceptance_inventory_receipt,
+                accepted_by=accepted_by,
+                acceptance_reason=acceptance_reason,
+                finalization_manifest=finalization_manifest,
+            )
+            if status == "ACCEPTED":
+                return release_record
+            if not paths["reservation"].exists() and not paths["reservation"].is_symlink():
+                _verify_completed_release_with_missing_reservation(
+                    paths=paths,
+                    state=state,
+                    release_record=release_record,
+                )
+                _record_event(
+                    state,
+                    "post_unlink_crash_classified_from_durable_acceptance_evidence",
+                )
+            else:
+                _release_after_verified_acceptance(
+                    paths=paths,
+                    state=state,
+                    state_root=state_root,
+                    operation=operation,
+                    release_record=release_record,
+                )
+            _record_event(state, "panel_acceptance_release_completed")
+            _persist_state(paths["state"], state, "ACCEPTED")
+            return release_record
+        if status not in {"FINALIZED_RESERVED", "ACCEPTANCE_PENDING"}:
+            raise PublicationError(
+                f"cannot accept publication from operation state: {status}"
+            )
+        reservation = _load_reservation(paths, operation, state)
+        _verify_recorded_takeover_authorization(state, reservation)
+        _verify_prepare_evidence(state)
+        reserved_manifest = _reserved_finalization_manifest(
+            reservation, state_root=state_root, state=state
+        )
+        if reserved_manifest != finalization_manifest:
+            raise PublicationError(
+                "acceptance finalization manifest differs from the active reservation"
+            )
+        terminal_receipt_identity, terminal_receipt_value = _terminal_receipt(
+            state, operation=operation
+        )
+        reservation_identity = _reservation_identity(paths, reservation)
+        inventory_receipt, inventory_receipt_identity = (
+            _load_recorded_live_inventory_report(
+                state=state,
+                reservation_identity=reservation_identity,
+                terminal_receipt_identity=terminal_receipt_identity,
+                receipt_path=acceptance_inventory_receipt,
+            )
+        )
+        observed_prefix = inventory_receipt.get("finalization_manifest_prefix")
+        if not isinstance(observed_prefix, dict):
+            raise PublicationError(
+                "acceptance inventory receipt lacks a bounded finalization-manifest prefix"
+            )
+        terminal_state, _, _ = _terminal_live_identity(state)
+        _verify_acceptance_live_identity(
+            state=state,
+            inventory_receipt=inventory_receipt,
+            inventory_receipt_identity=inventory_receipt_identity,
+            acceptance_inventory_receipt=acceptance_inventory_receipt,
+        )
+        terminal_prefix = state.get("finalization_manifest_terminal")
+        if not isinstance(terminal_prefix, dict):
+            raise PublicationError(
+                "acceptance state lacks the durable terminal-manifest prefix"
+            )
+        observed_last_sequence = observed_prefix.get("last_sequence")
+        if (
+            not isinstance(observed_last_sequence, int)
+            or isinstance(observed_last_sequence, bool)
+            or _finalization_manifest_prefix(
+                finalization_manifest,
+                through_sequence=observed_last_sequence,
+                required_prefix=terminal_prefix,
+            )
+            != observed_prefix
+        ):
+            raise PublicationError(
+                "finalization manifest changed after the bounded prefix was observed"
+            )
+        if (
+            status == "FINALIZED_RESERVED"
+            and _finalization_manifest_prefix(
+                finalization_manifest, required_prefix=terminal_prefix
+            )
+            != observed_prefix
+        ):
+            raise PublicationError(
+                "finalization manifest changed after the acceptance observation"
+            )
+        authorization = state.get("acceptance_authorization")
+        if status == "FINALIZED_RESERVED":
+            authorization = {
+                "accepted_by": accepted_by,
+                "acceptance_reason": acceptance_reason,
+                "accepted_at": _utc_now(),
+                "acceptance_inventory_receipt": inventory_receipt_identity,
+            }
+            state["acceptance_authorization"] = authorization
+            _record_event(state, "panel_acceptance_authorized")
+            _persist_state(paths["state"], state, "ACCEPTANCE_PENDING")
+        elif (
+            not isinstance(authorization, dict)
+            or authorization.get("accepted_by") != accepted_by
+            or authorization.get("acceptance_reason") != acceptance_reason
+            or authorization.get("acceptance_inventory_receipt")
+            != inventory_receipt_identity
+        ):
+            raise PublicationError(
+                "acceptance retry differs from the durable pending authorization"
+            )
+        assert isinstance(authorization, dict)
+        acceptance_manifest = _append_finalization_record(
+            finalization_manifest,
+            record_type="installed_publication_accepted",
+            required_ancestor_prefix=observed_prefix,
+            predecessor_payload_field="acceptance_manifest_predecessor_prefix",
+            payload={
+                "operation_id": operation,
+                "generation_id": state["generation_id"],
+                "installed_root": state["install_root"],
+                "lock_path": str(paths["reservation"]),
+                "reservation_state": "PANEL_ACCEPTANCE_RECORDED",
+                "terminal_state": terminal_state,
+                "accepted_by": authorization["accepted_by"],
+                "acceptance_reason": authorization["acceptance_reason"],
+                "accepted_at": authorization["accepted_at"],
+                "terminal_receipt": terminal_receipt_identity,
+                "acceptance_inventory_receipt": inventory_receipt_identity,
+                "acceptance_inventory": inventory_receipt,
+            },
+        )
+        acceptance_prefix = _finalization_manifest_prefix(
+            finalization_manifest,
+            through_sequence=acceptance_manifest["record"]["sequence"],
+            required_prefix=observed_prefix,
+        )
+        if (
+            acceptance_prefix["prefix_sha256"]
+            != acceptance_manifest["manifest_sha256"]
+            or acceptance_prefix["prefix_bytes"]
+            != acceptance_manifest["manifest_prefix_bytes"]
+        ):
+            raise PublicationError(
+                "acceptance manifest prefix differs from the appended record identity"
+            )
+        _verify_acceptance_live_identity(
+            state=state,
+            inventory_receipt=inventory_receipt,
+            inventory_receipt_identity=inventory_receipt_identity,
+            acceptance_inventory_receipt=acceptance_inventory_receipt,
+        )
+        if _reservation_identity(paths, reservation) != reservation_identity:
+            raise PublicationError("package reservation drifted during acceptance")
+        release_record = {
+            "schema_version": 2,
+            "record_type": "package_reservation_release",
+            "operation_id": operation,
+            "generation_id": state["generation_id"],
+            "released_at": authorization["accepted_at"],
+            "terminal_state": terminal_state,
+            "reservation_state": "RELEASED_AFTER_PANEL_ACCEPTANCE",
+            "terminal_receipt": terminal_receipt_identity,
+            "terminal_receipt_value": terminal_receipt_value,
+            "acceptance_inventory_receipt": inventory_receipt_identity,
+            "acceptance_authorization": authorization,
+            "reservation": reservation_identity,
+            "finalization_manifest": acceptance_prefix,
+        }
+        _mkdir_secure(paths["released"].parent, exist_ok=True)
+        _write_once_or_verify_json(
+            paths["released"], release_record, label="package release record"
+        )
+        _verify_acceptance_live_identity(
+            state=state,
+            inventory_receipt=inventory_receipt,
+            inventory_receipt_identity=inventory_receipt_identity,
+            acceptance_inventory_receipt=acceptance_inventory_receipt,
+        )
+        _finalization_manifest_prefix(
+            finalization_manifest, required_prefix=acceptance_prefix
+        )
+        if _reservation_identity(paths, reservation) != reservation_identity:
+            raise PublicationError(
+                "package reservation drifted after release-record write"
+            )
+        state["release_record"] = {
+            "path": str(paths["released"]),
+            "sha256": hashlib.sha256(
+                _read_regular_bytes(paths["released"], label="package release record")
+            ).hexdigest(),
+        }
+        state["finalization_manifest_acceptance"] = acceptance_prefix
+        _record_event(state, "panel_acceptance_recorded_release_pending")
+        _persist_state(paths["state"], state, "ACCEPTED_RELEASE_PENDING")
+        _release_after_verified_acceptance(
+            paths=paths,
+            state=state,
+            state_root=state_root,
+            operation=operation,
+            release_record=release_record,
+        )
+        _record_event(state, "panel_acceptance_release_completed")
+        _persist_state(paths["state"], state, "ACCEPTED")
+        return release_record
 
 
 def _fake_checker(_: Path, installed_root: Path) -> Dict[str, Any]:
     inventory = build_inventory(installed_root)
     return {
-        "argv": ["TEST-ONLY", "--installed-root", str(installed_root), "--self-test"],
+        "argv": ["TEST-ONLY", "--installed-root", str(installed_root), "--self-test", "--json"],
         "checker_sha256": "0" * 64,
         "stdout": "OK: deterministic fake checker\n",
         "stderr": "",
         "exit_status": 0,
         "observed_inventory_sha256": inventory.digest,
+        "result": {
+            "status": "PASS",
+            "named_mutation_outcomes": {"TEST_ONLY_INVENTORY_OBSERVED": "PASS"},
+        },
+        "named_mutation_outcomes": {"TEST_ONLY_INVENTORY_OBSERVED": "PASS"},
     }
 
 
@@ -2136,6 +3750,11 @@ def _parser() -> argparse.ArgumentParser:
     _add_common_operation(prepare)
     prepare.add_argument("--source-repository", required=True, type=Path)
     prepare.add_argument("--source-commit", required=True)
+    prepare.add_argument(
+        "--expected-live-source-commit",
+        required=True,
+        help="exact predecessor commit whose install mapping and bytes must match live",
+    )
     prepare.add_argument("--manifest", required=True)
     prepare.add_argument("--install-root", required=True, type=Path)
     prepare.add_argument("--evidence-root", required=True, type=Path)
@@ -2170,12 +3789,45 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument(
         "--require-atomic-exchange", choices=("darwin-rename-swap",)
     )
+    recover.add_argument(
+        "--takeover-authorization",
+        type=Path,
+        help=(
+            "schema-1 JSON bound to operation/generation/prior_owner; mutation requires "
+            "STOPPED or SUPERSEDED plus INACTIVE process and tool-session inspection"
+        ),
+    )
 
-    finalize = subparsers.add_parser("finalize", help="write receipts and release the reservation")
+    finalize = subparsers.add_parser(
+        "finalize",
+        help="write terminal validation receipts and retain the reservation",
+    )
     _add_common_operation(finalize)
     finalize.add_argument("--lock", required=True, type=Path)
     finalize.add_argument("--finalization-manifest", required=True, type=Path)
     finalize.add_argument("--receipt-output", type=Path)
+
+    inventory = subparsers.add_parser(
+        "inventory",
+        help="report the exact live inventory under the retained reservation",
+    )
+    _add_common_operation(inventory)
+    inventory.add_argument("--lock", required=True, type=Path)
+    inventory.add_argument("--phase", choices=sorted(LIVE_INVENTORY_PHASES), required=True)
+    inventory.add_argument("--output", required=True, type=Path)
+
+    accept = subparsers.add_parser(
+        "accept",
+        help="record panel acceptance and release the retained reservation",
+    )
+    _add_common_operation(accept)
+    accept.add_argument("--lock", required=True, type=Path)
+    accept.add_argument("--finalization-manifest", required=True, type=Path)
+    accept.add_argument(
+        "--acceptance-inventory-receipt", required=True, type=Path
+    )
+    accept.add_argument("--accepted-by", required=True)
+    accept.add_argument("--acceptance-reason", required=True)
 
     subparsers.add_parser("self-test", help="run fake-exchange negative controls only")
     return parser
@@ -2188,6 +3840,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             result = prepare_operation(
                 source_repository=args.source_repository,
                 source_commit=args.source_commit,
+                expected_live_source_commit=args.expected_live_source_commit,
                 manifest_path=args.manifest,
                 install_root=args.install_root,
                 state_root=args.state_root,
@@ -2222,6 +3875,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 action=args.action,
                 exchanger=DarwinAtomicExchanger(),
                 lock_path=args.lock,
+                takeover_authorization=args.takeover_authorization,
             )
         elif args.command == "finalize":
             result = finalize_operation(
@@ -2231,6 +3885,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 lock_path=args.lock,
                 finalization_manifest=args.finalization_manifest,
                 exchanger=DarwinAtomicExchanger(),
+            )
+        elif args.command == "inventory":
+            result = report_live_inventory(
+                state_root=args.state_root,
+                operation=args.operation,
+                phase=args.phase,
+                output=args.output,
+                lock_path=args.lock,
+            )
+        elif args.command == "accept":
+            result = accept_operation(
+                state_root=args.state_root,
+                operation=args.operation,
+                acceptance_inventory_receipt=args.acceptance_inventory_receipt,
+                accepted_by=args.accepted_by,
+                acceptance_reason=args.acceptance_reason,
+                lock_path=args.lock,
+                finalization_manifest=args.finalization_manifest,
             )
         elif args.command == "self-test":
             _self_test()

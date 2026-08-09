@@ -4,7 +4,7 @@
   "layout": "per-workflow-package",
   "input_identity": {
     "format": "overnight-workflows-install-input-v1",
-    "digest": "d1075f44c33aad886df99c22f89d1d90826feda49fa1ecb05dbaf9e769f5f3ed"
+    "digest": "51d10cec7b32c09adc360f1b07409a2175fb89e521439cd29f89fd2280e15e01"
   },
   "evidence_inventory_format": "sha256-size-path-v1",
   "loader_contract": {
@@ -17,7 +17,7 @@
     {
       "canonical_source": "codex/overnight-workflows/SKILL.md",
       "installed_path": "SKILL.md",
-      "source_sha256": "e337c9cffade4eff4c98bc91278d5ef6fc8864afdbcae202c50d0f6cb52862e7"
+      "source_sha256": "e979e088276165ffce6e530161ccb4095e0ec8a2968df1ec31364b6d034d69d4"
     },
     {
       "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
@@ -28,13 +28,13 @@
       "canonical_source": "plugins/large-redesign-parallel-branch-collision-audit/SKILL.md",
       "installed_path": "references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md",
-      "source_sha256": "ecabaf39be904d654f1ed369fbdd278fbee7375b86c9207885fef30bf5d73581"
+      "source_sha256": "dd00b790b1dc063970be69ad70f9cf63b46d5b076b5aff818d3796008bfbc494"
     },
     {
       "canonical_source": "plugins/overnight-insight-discovery/SKILL.md",
       "installed_path": "references/workflows/overnight-insight-discovery/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-insight-discovery/WORKFLOW.md",
-      "source_sha256": "99c05bed52530b2bda55effb4c3bda0667f1e5b0a4f7cb1d3f14ebf995b13dc5"
+      "source_sha256": "8a5c3576ed4256a16c4f0edfed2fda384d018a8fd48460891ec850ddf38c8232"
     },
     {
       "canonical_source": "plugins/overnight-insight-discovery/references/adaptive_tuning.md",
@@ -180,36 +180,36 @@
       "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
-      "source_sha256": "e8d7021ead755df423b956d5716861ce7f96a2b23e5d52fe75298002a37f8f73"
+      "source_sha256": "55c4b12f247a4b2521f2fc3df8d41faa720f70b941dd9b3e8ffb801e82e24696"
     },
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
-      "source_sha256": "10ae81bf9004fcb33078a5f7e95d8065636da22615effaf07818a5244bc5b621"
+      "source_sha256": "4a44accd82a5d7bcbf2c102816fa264d28f9162890a02e399f82d86890c52d39"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
       "installed_path": "references/workflows/overnight-review-client-delivery/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery/WORKFLOW.md",
-      "source_sha256": "2dc48e40494d1b93ccafe1bbf0bf7bae425884a9da01e32a01e28802fb8b283a"
+      "source_sha256": "f82d53dc68abdef8f94399574900098315b2e98ca66cf0b2b8dea311f501c415"
     },
     {
       "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
       "installed_path": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md",
-      "source_sha256": "762c7e26e9c7082e3a7fc093d98991ce4628bb94ee361e5b42e7f85670daf3c6"
+      "source_sha256": "e663c2aeb10bc1368b479c97ec6544edc449c5f8c0cbeda0d2ad5a938afbda6b"
     },
     {
       "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
       "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
-      "source_sha256": "f58ba119c94930a94a07850419bab23334f8d2a9b9c3698f171512be6d98b13a"
+      "source_sha256": "be9bd203854251184cb64345791a64f079a9cc626959aab7bb9b916bf86f479f"
     },
     {
       "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
       "installed_path": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md",
-      "source_sha256": "98d0186446b1183466330cac4b9e3b21470901f064d05aed977636cce2fb578c"
+      "source_sha256": "db9b4105c33b1fe9134d6229cb3cdf14bd7f22472d23f41a69e9de54e4c978fa"
     }
   ]
 }

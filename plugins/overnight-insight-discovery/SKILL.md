@@ -1,23 +1,45 @@
 ---
 name: overnight-insight-discovery
 description: |
-  Run an overnight autonomous B-vs-C parallel insight-discovery workflow that surfaces
-  ah-ha findings from data for a client. Use when: (1) a client wants interesting or
-  surprising insights (not just monitoring or action items); (2) you want to hedge LLM
-  creativity against deterministic rigor by running two tracks in parallel and
-  consolidating; (3) the work fits an 8-hour autonomous window with review-panel gates;
-  (4) the underlying data supports both exploratory querying and mechanical candidate
-  scans. Specializes `overnight-review-client-delivery` for INSIGHT DISCOVERY rather
-  than deliverable polishing — the two are sister skills with different problem shapes.
-  ALWAYS use this skill when the user asks for "ah-ha insights", "surprise patterns",
-  "funnel leaks", "hidden findings", "overnight analysis to surface X", or wants a
-  dual-approach (creative + mechanical) for client-facing insight work — even if they
-  don't explicitly name the pattern. NOT for: synchronous analysis (use
-  exploratory-data-analysis), single-track LLM exploration (use deep-research), or work that
-  needs user input mid-stream.
-author: wan-huiyan + Claude Code
-version: 1.9.1
-date: 2026-08-09
+  Run an overnight autonomous B-vs-C insight-discovery workflow that surfaces
+  surprising client findings from data. Use when a client wants insights rather
+  than monitoring or action items; creative LLM exploration should be hedged by
+  a deterministic parallel scan; the work fits an eight-hour unattended window
+  with review gates; and the data supports both approaches. Specializes
+  `overnight-review-client-delivery` for insight discovery rather than polishing.
+  Always use for requests naming ah-ha insights, surprise patterns, funnel leaks,
+  hidden findings, overnight analysis to surface findings, or a creative plus
+  mechanical approach to client-facing insight work. Not for synchronous
+  analysis, a single-track exploration, or work needing user input mid-run.
+---
+
+# Overnight Insight Discovery
+
+> Content version **1.9.1** · Updated **2026-08-09** · Plugin release **1.2.1**
+
+## Contents
+
+- [Problem](#problem)
+- [When to use](#when-to-use)
+- [Sister skill relationship](#sister-skill-relationship)
+- [The six phases](#the-six-phases)
+- [Core patterns](#core-patterns)
+- [Prerequisites and defaults](#prerequisites)
+- [Workflow outline](#workflow-outline)
+- [Verification](#verification)
+- [References, assets, and scripts](#references)
+
+## Changelog
+
+- **1.9.1 (2026-08-09):** adds the complete tie-breaker resource, narrows
+  Phase F pull-request behavior to separately recorded authority, makes the
+  Codex reference navigable with a top
+  contents list and limits YAML frontmatter to the loader-supported `name` and
+  `description` fields. The distributable plugin release is 1.2.1.
+
+<!-- Historical source changelog retained verbatim. Current release metadata and
+     the user-facing changelog follow the title below. Maintainer: wan-huiyan +
+     Claude Code.
 
 # Changelog
 # 1.9.1 (2026-08-09 — complete tie-breaker resource and Phase F authority)
@@ -240,9 +262,7 @@ date: 2026-08-09
 #     scan_shap_interaction. Raw mean_product confounds interaction with
 #     marginal product; rho_shap isolates genuine co-movement beyond marginals.
 #     See references/shap_interaction_scoring.md.
----
-
-# Overnight Insight Discovery
+-->
 
 ## Problem
 

@@ -131,11 +131,17 @@ destination names, and file bytes. Publication evidence uses
 raw UTF-8 path bytes with exactly one final LF.
 
 `scripts/check_large_queue_guidance.py --self-test` is the nonzero state,
-package, and exact prompt-class-to-route contract gate. On a machine with the
-pinned CLI, add `--real-loader /path/to/codex`; it calls Codex 0.147.0
-app-server `skills/list(forceReload=true)`, requires only the root `SKILL.md`,
-and proves a nested child `SKILL.md` becomes recursively exposed. The committed
-word-overlap scorer remains diagnostic and is not this routing gate.
+package, and exact prompt-class-to-route contract gate. The required local
+release command is
+`scripts/check_large_queue_guidance.py --self-test --release-gate /path/to/codex`.
+It fails if the pinned loader is unavailable, calls Codex 0.147.0 app-server
+`skills/list(forceReload=true)`, requires only the root `SKILL.md`, retrieves
+each positive and negative route contract from that loaded umbrella, and proves
+a nested child `SKILL.md` becomes recursively exposed. CI uses
+`--ci-loader-gate`, which skips only after emitting an explicit unavailable or
+version-mismatch environment classification. The committed word-overlap scorer
+remains diagnostic. Implicit model route selection is **UNCHECKED** because no
+pinned-model evaluation was authorized for this release.
 
 ### Safe canonical publication
 
@@ -145,12 +151,38 @@ quiescence or a maintenance window. It stages outside skill-discovery roots,
 retains the prior generation, and requires Darwin whole-directory
 `RENAME_SWAP`; an unavailable exchange is `UNCHECKED`, with no per-file live
 fallback. Both staged and live generations run
-`check_large_queue_guidance.py --installed-root ... --self-test`. Receipts bind
-the source commit/tree, generation, exact inventory, and recovery state.
+`check_large_queue_guidance.py --installed-root ... --self-test --json` and bind
+every named mutation outcome. `prepare` requires
+`--expected-live-source-commit`: the live tree must exactly match that commit's
+installed paths and bytes, independently of the candidate paths and bytes. This
+permits an exact nested `SKILL.md` to `WORKFLOW.md` migration without treating
+the removed path as drift. Mutating `recover` additionally requires a durable
+`--takeover-authorization` proving that the reserved owner was inspected and is
+`STOPPED` or `SUPERSEDED`, with its process and tool session both inactive.
+Receipts bind both source commits/trees, both exact identities, the named live
+mutation outcome, and the recovery authorization when one was used.
+`finalize` writes terminal validation evidence but deliberately retains the
+package-wide `package.lock` through panel review. While that reservation is
+active, the canonical `inventory --phase dispatch|judgment|acceptance --output
+<absolute-evidence-path>` command records the exact live
+`sha256-size-path-v1` inventory and the bounded prefix (byte count, digest, and
+last sequence) of the finalization manifest. Only an explicit `accept` command,
+bound to the acceptance-phase inventory receipt, reviewer identity, reason,
+and the unchanged manifest prefix, appends panel acceptance and releases the
+reservation.
+
+```bash
+python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase acceptance --output /abs/evidence/acceptance-live.json
+python3 scripts/publish_codex_install.py accept --operation OP --state-root /abs/state --lock /abs/state/package.lock --finalization-manifest /abs/finalization.jsonl --acceptance-inventory-receipt /abs/evidence/acceptance-live.json --accepted-by REVIEWER --acceptance-reason "panel accepted"
+```
 
 Do not publish while other Codex sessions may be reading the package. The test
-suite uses a fake exchange adapter and a platform capability probe; it never
-performs a live installation. Run:
+suite uses a fake exchange adapter for failure injection. On Darwin it also
+uses real `RENAME_SWAP` only between temporary directories, proving that a
+reader holding an opened old directory descriptor sees the complete old
+generation while a new path reader sees the complete new one. It never
+performs a live installation; unknown readers still require recorded
+quiescence or maintenance authorization. Run:
 
 ```bash
 python3 -m unittest scripts/test_publish_codex_install.py -v
@@ -236,16 +268,28 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 - **2026-08-09** — `overnight-insight-discovery` plugin → **v1.2.1** and its
   independent workflow-content counter → **v1.9.1**: includes the required
   cross-model tie-breaker template and makes Phase F pull-request creation
-  conditional on a separately recorded grant. The release ledger binds the
-  exact plugin payload to 1.2.1. The routed Codex package keeps the seven
+  conditional on a separately recorded grant, keeps only `name` and
+  `description` in loader frontmatter, and adds a top contents list. The other
+  newly navigable plugin payloads are patch-released as
+  `large-redesign-parallel-branch-collision-audit` **1.0.1**,
+  `overnight-review-client-delivery` **1.0.1**,
+  `overnight-review-panel-blocked-reviewer-reads-as-clean` **1.0.2**,
+  `schedule-poll-orchestrator-pattern` **1.0.2**, and
+  `subagent-review-tier-calibration-for-overnight-pr-chains` **1.0.1**.
+  `overnight-multi-issue-implementation` remains at its already-unreleased
+  **1.5.0**. The release ledger reproduces every prior payload from fixed
+  published commit `3df43c37` and binds every current payload/version. The
+  routed Codex package keeps the seven
   canonical plugin `SKILL.md` entrypoints but installs them as ordinary
   `WORKFLOW.md` references, leaving only the umbrella model-visible. Bundle
   `VERSION` remains **1.5.0** because that bundle release is still unreleased.
   The unreleased bundle repairs also add strict state/journal fixtures, a real
   Codex 0.147.0 loader inventory probe, exact routing cases, immutable panel
   input/snapshot validation, and an atomic generation publisher with rollback
-  and deterministic concurrency/drift/failure controls. No live package is
-  published by these repository changes.
+  and deterministic concurrency/drift/failure controls. Terminal validation
+  retains the package reservation through panel acceptance; locked live
+  inventory receipts and the separate acceptance command bind and release it.
+  No live package is published by these repository changes.
 - **2026-08-08** — `overnight-multi-issue-implementation` → **v1.5.0** and bundle `VERSION` → **1.5.0**: adds `references/large-live-queue-orchestration.md` for mixed indexes and backlogs whose rows may be stale, partly complete, owner-gated, or blocked by shared files. The procedure requires occurrence-aware parent-row reconciliation with child slices, separate authority grants, per-item budgets and latest starts, an explicit contention matrix, separate classification/task/reason/verification/disposition state, separate controller-liveness, execution-lease, and repository-relative exact-path-reservation records joined by ID, inspected crashed-controller takeover, durable recovery, complete review artifacts, deterministic target/merge-base/head/diff review, and serial integration. It adds a tracked canonical source, machine-checked state contract, and complete 38-file transitive install manifest for the concise Codex umbrella plus a focused CI contract gate. The umbrella preserves each workflow's directory shape and verifies local links in canonical and installed layouts. It also starts sequential tasks from a fresh target worktree instead of broadly resetting an unknown tree; honors a recorded merge-on-green grant while stopping when merge authority is absent; inspects a yielded process before retrying it; preserves the old discovery suite and adds large-queue trigger cases; and removes agent, workflow, and wall-time totals the source handoff did not verify.
 - **2026-08-07** — `overnight-multi-issue-implementation` → **v1.4.0** (SKILL + both manifests; bundle `VERSION` already reads 1.4.0 from the 2026-08-06 release below and is unchanged — it is the bundle's own counter, not a mirror of this plugin's): adds **"Pre-flight: stale-base audit — what your OWN branch deletes"**, the inward mirror of the parallel-branch collision audit it now sits beside. That audit looks outward at branches that might conflict with you; this one looks at the branch you are about to merge. **The evidence is one incident.** A pull request merged from a branch created before several other pull requests landed and never rebased; its conflict resolution took its own side across the whole tree — **59 files, 1,891 insertions, 5,081 deletions** — reverting **11 files and 15 tracker entries belonging to three other sessions**, plus a function two surviving files still imported. Nothing failed: no conflict, green PR, schema validator passed, site still rendered. All three sessions had finished a wrap-up that morning and their work *was* on `main`, for between 6 and 90 minutes; the fastest discovery took 16 minutes 36 seconds and was an accident. The merged content was legitimate and had to stand, so `git revert` was the wrong tool — it would have destroyed everything merged after it. **What the section adds beyond "rebase before merge":** a pre-merge recipe that reads the DELETIONS, plus a total-deletions threshold set low enough to force a read — and it uses **`git diff origin/main..HEAD` with two dots, not three**, which is a correction the drafting turned up rather than a restatement. The three-dot form everyone reaches for diffs from the *merge base*, so on a branch that never took `main`'s newer commits a file added to `main` after the branch point is absent from both sides and reports as **no change at all**; verified on a two-commit synthetic repo where three-dot prints nothing and two-dot prints the file. Rebase first — the order is load-bearing — and note that a *plain* merge of a stale branch is harmless (git keeps what only `main` has); the damage needs the branch's tree to win wholesale, via a merge of `main` into the branch resolved to its own side, `-X ours`, or a squash of the branch tree. Also an audit-after recipe built on the finding most checklists miss — **`git cat-file -e` is the weak check**, because a file can be present with its contents rolled back and no existence check, id check or validator will say a word. Audit instead for a marker your change ADDED. The worked example is measured rather than argued: a page of seven interactive widgets whose option lists are single-quoted HTML attributes, three of them holding an apostrophe behind a one-character `&#39;`. Roll that escape back on the fourth widget and the file exists, the HTML is valid, all seven widgets are in the markup, every committed check passes — and four of the seven are silently dead, because the truncated attribute throws inside the one `forEach` that builds them all. Loading the real page with each escape rolled back in turn gives three working, or **none** if the first widget is the one broken. Recovery is a splice-forward (`git show <sha>:<path>`), never a revert, with the three things that bite during one: restore what the restored file imports, re-check state before each restore because parallel sessions are repairing at the same time, and re-measure any figure a restored file carries rather than reconciling two versions by eye.
 - **2026-08-06** — `overnight-insight-discovery` → **v1.2.0** and `schedule-poll-orchestrator-pattern` → **v1.0.1** (both manifests each + bundle `VERSION` → 1.4.0): fixes the single-root skill-path bug in two places. A skill installed as a **plugin** lives at `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`, not at `~/.claude/skills/<name>/`, so anything that reaches a skill through the `~/.claude/skills/` root alone misses on a plugin install. **The one with teeth**: `overnight-insight-discovery`'s Phase 0.Y toolchain pre-flight decided whether the skill was installed with a single `test -f ~/.claude/skills/overnight-insight-discovery/SKILL.md`. On a plugin install that test fails, and the failure path is a tap-out with `[ENV_BLOCKER]` reporting no skill tree — a failed lookup reported as an install-state finding. It now probes all three roots (`$CLAUDE_PLUGIN_ROOT`, `~/.claude/skills/`, then the plugin cache), ranks cache hits on the **version** segment alone rather than whole-path `sort -V` (the marketplace segment sorts first, so `aaa-mkt/2.5.0` would otherwise lose to `zzz-mkt/1.0.0`), uses `find` instead of a glob (zsh's `nomatch` fails a non-matching glob before `2>/dev/null` applies), and prints "not found — tried <the three paths>" rather than anything that reads as "not installed". **The cosmetic ones**: three dead see-also links in `schedule-poll-orchestrator-pattern` pointed at `~/.claude/skills/<name>/SKILL.md` files a reader on a plugin install cannot open — now plain skill names with a GitHub URL where the source repo is known — and one `~/.claude/skills/`-rooted self-reference in `overnight-insight-discovery`'s v1.3.2 changelog entry. **Deliberately unchanged**: every `~/.claude/skills/**` mention in § "Autonomous-safe skill edits" and its Phase G summary. Those are the path patterns that fire a sensitive-file permission prompt in Claude Code, which is a fact about the prompt system and not about where this skill is installed; broadening them would break the contract they encode. `CLAUDE_PLUGIN_ROOT` alone is not the fix — it is frequently unset in the shell a step actually runs in, and it points at the running plugin's own root, so it can never reach a sibling plugin.

@@ -14,11 +14,26 @@ description: |
   drops. NOT for: synchronous code review (use ce:review or claude-code-guide instead), single-task
   overnight automation (use scheduled-tasks or cron), or work that requires user input mid-stream.
 author: wan-huiyan + Claude Code (extracted from a causal-impact project)
-version: 1.0.0
-date: 2026-04-08
+version: 1.0.1
+date: 2026-08-09
 ---
 
 # Overnight Review Panel + Client Delivery
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Solution](#solution)
+- [Verification](#verification)
+- [Example](#example)
+- [Notes and references](#notes)
+- [Changelog](#changelog)
+
+## Changelog
+
+- **1.0.1 (2026-08-09):** adds the top contents list required by the routed
+  Codex `WORKFLOW.md` edition.
 
 ## Problem
 

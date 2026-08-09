@@ -2,6 +2,27 @@
   "schema_version": 1,
   "payload_format": "sha256-size-path-v1",
   "plugins": {
+    "large-redesign-parallel-branch-collision-audit": {
+      "required_current_paths": [],
+      "releases": [
+        {
+          "version": "1.0.0",
+          "content_version": "1.0.0",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "7ebb46057e68eaead7708747a1149fe5fc551ccbada193e9a0a8c55e7f4ac341",
+          "file_count": 2,
+          "total_bytes": 9818
+        },
+        {
+          "version": "1.0.1",
+          "content_version": "1.0.1",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "d170e5f50941f83b5e349838c5ef6b8d449cd334ff340be30511210029154485",
+          "file_count": 2,
+          "total_bytes": 10178
+        }
+      ]
+    },
     "overnight-insight-discovery": {
       "required_current_paths": [
         "assets/tiebreaker_prompt_template.md"
@@ -19,9 +40,116 @@
           "version": "1.2.1",
           "content_version": "1.9.1",
           "source_commit": "working-tree-release",
-          "payload_sha256": "6b1600d1ad829e95525a1fd546a32e356b3305cb060a62e42c3452d183a2d674",
+          "payload_sha256": "80efa09d3cfa197fbc1ffb7004e1bf0f9f55a822c2c87a8551fb5eddb560775e",
           "file_count": 30,
-          "total_bytes": 227273
+          "total_bytes": 227827
+        }
+      ]
+    },
+    "overnight-multi-issue-implementation": {
+      "required_current_paths": [
+        "references/large-live-queue-orchestration.md"
+      ],
+      "releases": [
+        {
+          "version": "1.4.0",
+          "content_version": "1.4.0",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "8eb257cc639a2e2dde4c4c139febec7ac783edce3edfeac7bf7a7ff25664ca27",
+          "file_count": 2,
+          "total_bytes": 56935
+        },
+        {
+          "version": "1.5.0",
+          "content_version": "1.5.0",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "d90a351fb96216f0fb7a764dee9e2f7d273aba8597dbffafee2df1ce3f57d361",
+          "file_count": 3,
+          "total_bytes": 92942
+        }
+      ]
+    },
+    "overnight-review-client-delivery": {
+      "required_current_paths": [],
+      "releases": [
+        {
+          "version": "1.0.0",
+          "content_version": "1.0.0",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "17d2cbc844a69d066824a034542d9577977b085f3296e3a15dc1ebef7de9a06e",
+          "file_count": 2,
+          "total_bytes": 21537
+        },
+        {
+          "version": "1.0.1",
+          "content_version": "1.0.1",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "382550f2d1cd716127a8784857c6776f99565b4f86bdfcd8c715903bb3536b59",
+          "file_count": 2,
+          "total_bytes": 21897
+        }
+      ]
+    },
+    "overnight-review-panel-blocked-reviewer-reads-as-clean": {
+      "required_current_paths": [],
+      "releases": [
+        {
+          "version": "1.0.1",
+          "content_version": "1.0.0",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "81b6aedb4432f223ea42cf4fdd9a53b885a1ef3348cbe80315496041cb4c1eab",
+          "file_count": 2,
+          "total_bytes": 9823
+        },
+        {
+          "version": "1.0.2",
+          "content_version": "1.0.1",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "b6b4afaaf6f7236ce6281f3cefb1ddfb6753e61b53b56f1fbab94a247c29191d",
+          "file_count": 2,
+          "total_bytes": 10234
+        }
+      ]
+    },
+    "schedule-poll-orchestrator-pattern": {
+      "required_current_paths": [],
+      "releases": [
+        {
+          "version": "1.0.1",
+          "content_version": "1.0.1",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "2e136aec74bf2efddd7db7077b578ce73350996fd9c5cd43cdc51215b529706a",
+          "file_count": 2,
+          "total_bytes": 11115
+        },
+        {
+          "version": "1.0.2",
+          "content_version": "1.0.2",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "a2b56a30d4febff3323d86ebe09ac9bb6aabbd71bd05cb444ee21e6b065d8e28",
+          "file_count": 2,
+          "total_bytes": 11513
+        }
+      ]
+    },
+    "subagent-review-tier-calibration-for-overnight-pr-chains": {
+      "required_current_paths": [],
+      "releases": [
+        {
+          "version": "1.0.0",
+          "content_version": "1.0.1",
+          "source_commit": "3df43c37ecdf8d62343907b49b28f0fbb1bf4338",
+          "payload_sha256": "653c83fd3900208358585d17453144218c817202ec90bd2129ff399f09f920eb",
+          "file_count": 2,
+          "total_bytes": 13484
+        },
+        {
+          "version": "1.0.1",
+          "content_version": "1.0.2",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "09e1228489e8133249ff2bcdce5f084235b2a3556d1be6beb9270c63297b2ba2",
+          "file_count": 2,
+          "total_bytes": 13964
         }
       ]
     }

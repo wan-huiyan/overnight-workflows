@@ -11,8 +11,8 @@ Checks (stdlib only, no external deps):
      plugins/<name>/skills/<skill>/SKILL.md set (multi-skill plugin).
   6. Every SKILL.md frontmatter `name:` equals its containing directory name.
   7. Marketplace and plugin manifest versions match.
-  8. The release ledger binds the insight plugin's functional payload and content
-     version to its distributable release identity.
+  8. The release ledger binds every changed routed plugin payload and content
+     version to its distributable identity and the fixed published base.
   9. If a VERSION file exists: it is non-empty; and for a single-plugin repo it must
      equal that plugin's plugin.json version (drift guard).
 
@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,6 +32,16 @@ warnings = []
 RELEASE_LEDGER = os.path.join(ROOT, "scripts", "plugin_release_ledger.json")
 PAYLOAD_FORMAT = "sha256-size-path-v1"
 INSIGHT_PLUGIN = "overnight-insight-discovery"
+PUBLISHED_BASE = "3df43c37ecdf8d62343907b49b28f0fbb1bf4338"
+ROUTED_PLUGINS = {
+    "large-redesign-parallel-branch-collision-audit",
+    INSIGHT_PLUGIN,
+    "overnight-multi-issue-implementation",
+    "overnight-review-client-delivery",
+    "overnight-review-panel-blocked-reviewer-reads-as-clean",
+    "schedule-poll-orchestrator-pattern",
+    "subagent-review-tier-calibration-for-overnight-pr-chains",
+}
 
 
 def err(m): errors.append(m)
@@ -66,8 +77,8 @@ def load_json(path):
         return None
 
 
-def frontmatter_version(skill_md):
-    """Return the `version:` value from a SKILL.md frontmatter block."""
+def content_version(skill_md, require_codex_frontmatter=False):
+    """Return content version while enforcing Codex frontmatter where required."""
     try:
         with open(skill_md, encoding="utf-8") as f:
             text = f.read()
@@ -76,10 +87,42 @@ def frontmatter_version(skill_md):
     end = text.find("\n---", 3)
     if not text.startswith("---") or end == -1:
         return None, f"{skill_md}: missing closed YAML frontmatter"
-    match = re.search(r"^version:\s*(.+?)\s*$", text[3:end], re.MULTILINE)
-    if not match:
-        return None, f"{skill_md}: no `version:` in frontmatter"
-    return match.group(1).strip().strip('"').strip("'"), None
+    frontmatter_keys = {
+        match.group(1)
+        for match in re.finditer(r"^([A-Za-z0-9_-]+):", text[3:end], re.MULTILINE)
+    }
+    if require_codex_frontmatter and frontmatter_keys != {"name", "description"}:
+        return None, (
+            f"{skill_md}: frontmatter must contain only name and description; "
+            f"found {sorted(frontmatter_keys)}"
+        )
+    if require_codex_frontmatter:
+        match = re.search(r"^> Content version \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", text[end + 4 :], re.MULTILINE)
+        if not match:
+            return None, f"{skill_md}: no ordinary-Markdown Content version marker"
+    else:
+        match = re.search(r"^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$", text[3:end], re.MULTILINE)
+        if not match:
+            return None, f"{skill_md}: no content version in frontmatter"
+    return match.group(1), None
+
+
+def identity_from_entries(entries):
+    entries.sort(key=lambda item: item[0].encode("utf-8"))
+    inventory = b"".join(
+        hashlib.sha256(content).hexdigest().encode("ascii")
+        + b"\t"
+        + str(len(content)).encode("ascii")
+        + b"\t"
+        + relative.encode("utf-8")
+        + b"\n"
+        for relative, content in entries
+    )
+    return {
+        "payload_sha256": hashlib.sha256(inventory).hexdigest(),
+        "file_count": len(entries),
+        "total_bytes": sum(len(content) for _, content in entries),
+    }
 
 
 def payload_identity(plugin_dir):
@@ -101,21 +144,54 @@ def payload_identity(plugin_dir):
             with open(path, "rb") as handle:
                 content = handle.read()
             entries.append((relative, content))
-    entries.sort(key=lambda item: item[0].encode("utf-8"))
-    inventory = b"".join(
-        hashlib.sha256(content).hexdigest().encode("ascii")
-        + b"\t"
-        + str(len(content)).encode("ascii")
-        + b"\t"
-        + relative.encode("utf-8")
-        + b"\n"
-        for relative, content in entries
-    )
-    return {
-        "payload_sha256": hashlib.sha256(inventory).hexdigest(),
-        "file_count": len(entries),
-        "total_bytes": sum(len(content) for _, content in entries),
-    }
+    return identity_from_entries(entries)
+
+
+def git_bytes(*arguments):
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    ).stdout
+
+
+def payload_identity_at_commit(plugin_name, commit):
+    """Rebuild a plugin payload identity from immutable Git blob bytes."""
+    prefix = f"plugins/{plugin_name}/"
+    tree = git_bytes("ls-tree", "-r", "-z", commit, "--", prefix)
+    entries = []
+    for raw_record in tree.rstrip(b"\0").split(b"\0") if tree else []:
+        metadata, raw_path = raw_record.split(b"\t", 1)
+        mode, object_type, _object_id = metadata.decode("ascii").split()
+        if object_type != "blob" or mode not in {"100644", "100755"}:
+            raise ValueError(f"published plugin payload member is not regular: {raw_path!r}")
+        path = raw_path.decode("utf-8")
+        if not path.startswith(prefix):
+            raise ValueError(f"published plugin path escapes prefix: {path}")
+        relative = path[len(prefix) :]
+        if any(character in relative for character in ("\t", "\n", "\r")):
+            raise ValueError(f"published plugin payload has unsafe path: {relative!r}")
+        entries.append((relative, git_bytes("show", f"{commit}:{path}")))
+    if not entries:
+        raise ValueError(f"published plugin payload is empty: {plugin_name}")
+    return identity_from_entries(entries)
+
+
+def base_release_errors(base, version, skill_version, payload):
+    found = []
+    if base.get("source_commit") != PUBLISHED_BASE:
+        found.append("base release is not tied to the fixed published commit")
+    if base.get("version") != version:
+        found.append("base plugin version differs from the published manifest")
+    if base.get("content_version") != skill_version:
+        found.append("base content version differs from the published SKILL")
+    for key in ("payload_sha256", "file_count", "total_bytes"):
+        if base.get(key) != payload.get(key):
+            found.append(f"base plugin payload {key} differs from published Git bytes")
+    return found
 
 
 def release_identity_errors(
@@ -156,56 +232,115 @@ def validate_release_ledger(run_self_test=False):
     if ledger.get("payload_format") != PAYLOAD_FORMAT:
         err(f"release ledger payload_format must be {PAYLOAD_FORMAT}")
     plugins = ledger.get("plugins")
-    if not isinstance(plugins, dict) or set(plugins) != {INSIGHT_PLUGIN}:
-        err(f"release ledger must contain exactly {INSIGHT_PLUGIN}")
+    if not isinstance(plugins, dict) or set(plugins) != ROUTED_PLUGINS:
+        err("release ledger must contain every routed plugin exactly once")
         return
-    plugin_ledger = plugins[INSIGHT_PLUGIN]
-    required_paths = plugin_ledger.get("required_current_paths") if isinstance(plugin_ledger, dict) else None
-    if required_paths != ["assets/tiebreaker_prompt_template.md"]:
-        err("release ledger must name the required functional payload path")
-        return
-    releases = plugin_ledger.get("releases") if isinstance(plugin_ledger, dict) else None
-    if not isinstance(releases, list) or len(releases) < 2:
-        err("release ledger needs at least two releases")
-        return
-    base = releases[-2]
-    if base.get("source_commit") != "3df43c37ecdf8d62343907b49b28f0fbb1bf4338":
-        err("release ledger prior release must be tied to the fixed panel target")
-    plugin_dir = os.path.join(ROOT, "plugins", INSIGHT_PLUGIN)
-    for relative in required_paths:
-        required_path = os.path.join(plugin_dir, *relative.split("/"))
-        if os.path.islink(required_path) or not os.path.isfile(required_path):
-            err(f"required release payload is missing or unsafe: {relative}")
-    manifest = load_json(os.path.join(plugin_dir, ".claude-plugin", "plugin.json"))
-    if manifest is None:
-        return
-    content_version, content_error = frontmatter_version(os.path.join(plugin_dir, "SKILL.md"))
-    if content_error:
-        err(content_error)
-        return
-    try:
-        payload = payload_identity(plugin_dir)
-    except (OSError, ValueError) as exc:
-        err(str(exc))
-        return
-    baseline_errors = release_identity_errors(
-        plugin_ledger, manifest.get("version"), content_version, payload
-    )
-    for message in baseline_errors:
-        err(message)
+    expected_required_paths = {
+        INSIGHT_PLUGIN: ["assets/tiebreaker_prompt_template.md"],
+        "overnight-multi-issue-implementation": [
+            "references/large-live-queue-orchestration.md"
+        ],
+    }
+    for plugin_name in sorted(ROUTED_PLUGINS):
+        plugin_ledger = plugins[plugin_name]
+        required_paths = (
+            plugin_ledger.get("required_current_paths")
+            if isinstance(plugin_ledger, dict)
+            else None
+        )
+        if required_paths != expected_required_paths.get(plugin_name, []):
+            err(f"{plugin_name}: release ledger has wrong required payload paths")
+            continue
+        releases = plugin_ledger.get("releases")
+        if not isinstance(releases, list) or len(releases) != 2:
+            err(f"{plugin_name}: release ledger needs exactly published base and current")
+            continue
+        base = releases[0]
+        plugin_dir = os.path.join(ROOT, "plugins", plugin_name)
+        for relative in required_paths:
+            required_path = os.path.join(plugin_dir, *relative.split("/"))
+            if os.path.islink(required_path) or not os.path.isfile(required_path):
+                err(f"{plugin_name}: required release payload is missing or unsafe: {relative}")
+        manifest = load_json(os.path.join(plugin_dir, ".claude-plugin", "plugin.json"))
+        if manifest is None:
+            continue
+        current_content_version, content_error = content_version(
+            os.path.join(plugin_dir, "SKILL.md"),
+            require_codex_frontmatter=plugin_name == INSIGHT_PLUGIN,
+        )
+        if content_error:
+            err(content_error)
+            continue
+        try:
+            payload = payload_identity(plugin_dir)
+            base_payload = payload_identity_at_commit(plugin_name, PUBLISHED_BASE)
+            base_manifest = json.loads(
+                git_bytes(
+                    "show",
+                    f"{PUBLISHED_BASE}:plugins/{plugin_name}/.claude-plugin/plugin.json",
+                ).decode("utf-8")
+            )
+            base_skill_path = os.path.join(ROOT, "plugins", plugin_name, "SKILL.md")
+            base_skill_text = git_bytes(
+                "show", f"{PUBLISHED_BASE}:plugins/{plugin_name}/SKILL.md"
+            ).decode("utf-8")
+            frontmatter_end = base_skill_text.find("\n---", 3)
+            version_match = re.search(
+                r"^version:\s*([0-9]+\.[0-9]+\.[0-9]+)\s*$",
+                base_skill_text[3:frontmatter_end],
+                re.MULTILINE,
+            )
+            if frontmatter_end == -1 or not version_match:
+                raise ValueError(f"published SKILL has no content version: {base_skill_path}")
+            base_content_version = version_match.group(1)
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
+            err(f"{plugin_name}: cannot reproduce published base identity: {exc}")
+            continue
 
-    if run_self_test and not baseline_errors:
-        drifted = dict(payload)
-        digest = payload["payload_sha256"]
-        drifted["payload_sha256"] = ("0" if digest[0] != "0" else "1") + digest[1:]
-        if not release_identity_errors(
-            plugin_ledger, manifest.get("version"), content_version, drifted
-        ):
-            err("release ledger one-byte identity-drift negative control did not fail")
-        if not release_identity_errors(
-            plugin_ledger, base.get("version"), content_version, payload
-        ):
-            err("release ledger unchanged-version negative control did not fail")
+        base_errors = base_release_errors(
+            base,
+            base_manifest.get("version"),
+            base_content_version,
+            base_payload,
+        )
+        baseline_errors = release_identity_errors(
+            plugin_ledger, manifest.get("version"), current_content_version, payload
+        )
+        for message in base_errors + baseline_errors:
+            err(f"{plugin_name}: {message}")
+
+        if run_self_test and not (base_errors or baseline_errors):
+            drifted = dict(payload)
+            digest = payload["payload_sha256"]
+            drifted["payload_sha256"] = (
+                ("0" if digest[0] != "0" else "1") + digest[1:]
+            )
+            if not release_identity_errors(
+                plugin_ledger,
+                manifest.get("version"),
+                current_content_version,
+                drifted,
+            ):
+                err(f"{plugin_name}: one-byte identity-drift control did not fail")
+            if not release_identity_errors(
+                plugin_ledger,
+                base.get("version"),
+                current_content_version,
+                payload,
+            ):
+                err(f"{plugin_name}: unchanged-version control did not fail")
+            drifted_base = dict(base)
+            base_digest = base["payload_sha256"]
+            drifted_base["payload_sha256"] = (
+                ("0" if base_digest[0] != "0" else "1") + base_digest[1:]
+            )
+            if not base_release_errors(
+                drifted_base,
+                base_manifest.get("version"),
+                base_content_version,
+                base_payload,
+            ):
+                err(f"{plugin_name}: published-base drift control did not fail")
 
 
 def main():

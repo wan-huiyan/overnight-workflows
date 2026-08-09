@@ -16,11 +16,27 @@ description: |
   (in-session parent polling a subagent) — this is for scheduled-trigger
   orchestrators that need to survive session ends.
 author: Claude Code
-version: 1.0.1
-date: 2026-08-06
+version: 1.0.2
+date: 2026-08-09
 ---
 
 # Schedule-Poll Orchestrator Pattern
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Solution](#solution)
+- [Verification](#verification)
+- [Example](#example)
+- [Notes and references](#notes)
+- [Version history](#version-history)
+- [Changelog](#changelog)
+
+## Changelog
+
+- **1.0.2 (2026-08-09):** adds the top contents list required by the routed
+  Codex `WORKFLOW.md` edition.
 
 ## Problem
 

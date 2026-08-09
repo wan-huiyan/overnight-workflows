@@ -82,6 +82,8 @@ REQUIRED_FIXTURE_NAMES = {
         "empty_controller_identity",
         "empty_run_identity",
         "malformed_repository_identity",
+        "parent_repository_identity",
+        "dot_repository_identity",
         "malformed_controller_timestamp",
         "timezone_naive_controller_timestamp",
         "controller_timestamp_order",
@@ -90,6 +92,9 @@ REQUIRED_FIXTURE_NAMES = {
         "malformed_authorized_successor",
         "unknown_reservation_owner",
         "dot_reservation_path",
+        "parent_reservation_path",
+        "tab_reservation_path",
+        "newline_reservation_path",
         "relative_lease_worktree",
         "duplicate_task_reservation_join",
         "nonstring_task_reservation_join",
@@ -161,6 +166,20 @@ REQUIRED_ROUTING_NEGATIVES = {
     "summarize_without_execution",
     "review_without_execution",
     "authority_is_not_inferred",
+}
+REQUIRED_ROUTING_NEGATIVE_CLAUSES = {
+    "summarize_without_execution": (
+        "A request to summarize, explain, audit, or review a plan without executing it "
+        "does not enter an execution route."
+    ),
+    "review_without_execution": (
+        "A request to summarize, explain, audit, or review a plan without executing it "
+        "does not enter an execution route."
+    ),
+    "authority_is_not_inferred": (
+        "A route choice never grants commit, push, "
+        "pull-request, merge, deploy, network, paid-call, or external-write authority."
+    ),
 }
 REQUIRED_ROUTING_CASES = {
     "parallel_branch_collision_audit": {
@@ -596,19 +615,47 @@ def is_identity(value: Any) -> bool:
     return bool(isinstance(value, str) and value.strip() == value and IDENTITY.fullmatch(value))
 
 
+def contains_control_character(value: str) -> bool:
+    """Reject C0 controls and DEL in every persisted identity or path."""
+    return any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+
+
+def is_repository_component(value: str) -> bool:
+    return bool(
+        value not in {".", ".."}
+        and not contains_control_character(value)
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value)
+    )
+
+
 def is_repository_id(value: Any) -> bool:
-    if not isinstance(value, str) or not value.strip() or value.strip() != value:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or value.strip() != value
+        or contains_control_character(value)
+    ):
         return False
     if value.startswith("github.com/"):
-        return len(value.split("/")) == 3 and all(value.split("/")[1:])
+        components = value.split("/")
+        return bool(
+            len(components) == 3
+            and components[0] == "github.com"
+            and all(is_repository_component(component) for component in components[1:])
+        )
     if value.startswith("local:"):
         root = value.removeprefix("local:")
-        return bool(root and PurePosixPath(root).is_absolute() and posixpath.normpath(root) == root)
+        return is_normalized_absolute_path(root)
     return False
 
 
 def is_normalized_relative_path(value: Any) -> bool:
-    if not isinstance(value, str) or not value or "\\" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or contains_control_character(value)
+    ):
         return False
     parsed = PurePosixPath(value)
     return bool(
@@ -626,7 +673,11 @@ def is_normalized_absolute_path(value: Any) -> bool:
         isinstance(value, str)
         and value
         and "\\" not in value
+        and not contains_control_character(value)
         and PurePosixPath(value).is_absolute()
+        and not value.endswith("/")
+        and all(part not in {"", ".", ".."} for part in PurePosixPath(value).parts)
+        and PurePosixPath(value).as_posix() == value
         and posixpath.normpath(value) == value
     )
 
@@ -1586,9 +1637,13 @@ def check_state_contract(
 
 
 def check_routing_cases(
-    cases: dict[str, Any], mappings: list[dict[str, str]], codex: str, errors: list[str]
+    cases: dict[str, Any],
+    mappings: list[dict[str, str]],
+    codex: str,
+    errors: list[str],
+    workflow_root: Optional[Path] = None,
 ) -> None:
-    """Gate exact umbrella routes and non-execution cases without word scoring."""
+    """Gate prompt classes against exact routes and retrieved workflow bytes."""
     if cases.get("schema_version") != 1:
         errors.append("routing cases must declare schema_version 1")
     if cases.get("umbrella_skill") != "overnight-workflows":
@@ -1662,7 +1717,19 @@ def check_routing_cases(
         ):
             errors.append(f"{label} required_markers must be nonempty strings")
             continue
-        source_text = (ROOT / mapping["canonical_source"]).read_text(encoding="utf-8")
+        workflow_path = (
+            workflow_root / route
+            if workflow_root is not None
+            else ROOT / mapping["canonical_source"]
+        )
+        try:
+            if workflow_path.is_symlink() or not workflow_path.is_file():
+                errors.append(f"{label} route is not a regular non-symlink file: {route}")
+                continue
+            source_text = workflow_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"{label} route could not be retrieved: {route}: {exc}")
+            continue
         for marker in markers:
             if marker not in source_text:
                 errors.append(
@@ -1705,6 +1772,11 @@ def check_routing_cases(
                     )
         if case.get("execution_allowed") is not False:
             errors.append(f"{label} must explicitly deny execution")
+        required_clause = REQUIRED_ROUTING_NEGATIVE_CLAUSES.get(name)
+        if required_clause is not None and required_clause not in " ".join(codex.split()):
+            errors.append(
+                f"{label} denial contract is absent from umbrella SKILL.md"
+            )
     if len(negative_names) != len(set(negative_names)):
         errors.append("routing negative case names must be unique")
     actual_negative_names = set(negative_names)
@@ -1837,7 +1909,10 @@ def _loader_skills_for_root(codex_bin: Path, codex_home: Path, root: Path) -> li
 
 
 def run_real_loader_controls(
-    codex_bin: Path, mappings: list[dict[str, str]], errors: list[str]
+    codex_bin: Path,
+    mappings: list[dict[str, str]],
+    routing_cases: dict[str, Any],
+    errors: list[str],
 ) -> None:
     try:
         version = subprocess.run(
@@ -1877,7 +1952,11 @@ def run_real_loader_controls(
         elif selected[0].get("name") != "overnight-workflows":
             errors.append("real loader did not retrieve the overnight-workflows umbrella")
         else:
-            source_text = CODEX.read_text(encoding="utf-8")
+            try:
+                source_text = expected_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"loaded umbrella could not be retrieved: {exc}")
+                source_text = ""
             description_match = re.search(
                 r"^description:\s*(.+?)\s*$", source_text, flags=re.MULTILINE
             )
@@ -1900,6 +1979,18 @@ def run_real_loader_controls(
                 ),
             }:
                 errors.append("real loader umbrella interface differs from routing contract")
+            loaded_route_errors: list[str] = []
+            check_routing_cases(
+                routing_cases,
+                mappings,
+                source_text,
+                loaded_route_errors,
+                workflow_root=installed_root,
+            )
+            errors.extend(
+                f"real loader retrieval contract: {error}"
+                for error in loaded_route_errors
+            )
 
     with tempfile.TemporaryDirectory(prefix="overnight-loader-negative-") as temp:
         codex_home = Path(temp)
@@ -2002,6 +2093,92 @@ def run_install_negative_controls(
             errors.append("symlink negative control did not fail")
 
 
+def named_self_test_outcomes(
+    fixtures: dict[str, Any],
+    contract: dict[str, Any],
+    routing_cases: dict[str, Any],
+    reference: str,
+    loader_executed: bool,
+) -> dict[str, str]:
+    """Name every mutation class exercised before a successful receipt is emitted."""
+    names: set[str] = set()
+    for section in REQUIRED_FIXTURE_NAMES:
+        for case in fixtures.get(section, []):
+            if isinstance(case, dict) and isinstance(case.get("name"), str):
+                names.add(f"state.fixture.{section}.{case['name']}")
+        names.add(f"state.fixture_inventory.removed_class.{section}")
+    names.add("state.fixture_inventory.removed_record_mutation")
+
+    outcome_parse_errors: list[str] = []
+    examples = json_examples(reference, outcome_parse_errors)
+    base_states = {
+        "controller_liveness": "RUNNING",
+        "execution_lease": "ACTIVE",
+        "path_reservation": "ACTIVE",
+        "task_transition": None,
+    }
+    bases = {
+        record_type: find_example(examples, record_type, state)
+        for record_type, state in base_states.items()
+    }
+    schemas = contract.get("records", {})
+    if isinstance(schemas, dict):
+        for record_type, schema in schemas.items():
+            if not isinstance(schema, dict):
+                continue
+            for field in schema.get("required", []):
+                names.add(f"state.generated.required.{record_type}.{field}")
+            types = schema.get("types", {})
+            if isinstance(types, dict):
+                for field in types:
+                    base = bases.get(record_type)
+                    if isinstance(base, dict) and field in base:
+                        names.add(f"state.generated.type.{record_type}.{field}")
+            enums = schema.get("enums", {})
+            if isinstance(enums, dict):
+                for field in enums:
+                    names.add(f"state.generated.enum.{record_type}.{field}")
+            if isinstance(schema.get("states"), list):
+                names.add(f"state.generated.state.{record_type}")
+            state_rules = schema.get("state_rules", {})
+            if isinstance(state_rules, dict):
+                base_state = base_states.get(record_type)
+                rules = state_rules.get(base_state, {})
+                if isinstance(rules, dict):
+                    for field in rules.get("non_null", []):
+                        names.add(f"state.generated.non_null.{record_type}.{field}")
+                    for field in rules.get("null", []):
+                        names.add(f"state.generated.null.{record_type}.{field}")
+            names.add(f"state.generated.undeclared.{record_type}")
+
+    names.update(
+        {
+            "install.missing_resource",
+            "install.missing_transitive_dependency",
+            "install.missing_markdown_reference",
+            "install.missing_markdown_autolink",
+            "install.nested_skill_exposure",
+            "install.symlink",
+            "routing.unrelated_prompt",
+            "routing.wrong_route",
+            "routing.execution_authority",
+        }
+    )
+    for case in routing_cases.get("positive", []):
+        if isinstance(case, dict) and isinstance(case.get("name"), str):
+            names.add(f"routing.positive.{case['name']}")
+            if loader_executed:
+                names.add(f"loader.retrieval.positive.{case['name']}")
+    for case in routing_cases.get("negative", []):
+        if isinstance(case, dict) and isinstance(case.get("name"), str):
+            names.add(f"routing.negative.{case['name']}")
+            if loader_executed:
+                names.add(f"loader.retrieval.negative.{case['name']}")
+    if loader_executed:
+        names.update({"loader.umbrella_only", "loader.recursive_child_exposure"})
+    return {name: "PASS" for name in sorted(names)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -2024,7 +2201,32 @@ def main() -> int:
             "optionally provide the codex executable path"
         ),
     )
+    parser.add_argument(
+        "--release-gate",
+        type=Path,
+        nargs="?",
+        const=Path(shutil.which("codex") or "codex"),
+        help=(
+            "required local release gate: run the pinned real loader and loaded "
+            "umbrella route-retrieval controls; unavailable is a failure"
+        ),
+    )
+    parser.add_argument(
+        "--ci-loader-gate",
+        action="store_true",
+        help=(
+            "run the pinned loader when present, otherwise emit an explicit "
+            "CI environment classification (never a local release substitute)"
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one machine-readable result object; diagnostics go to stderr",
+    )
     args = parser.parse_args()
+    if sum(bool(value) for value in (args.real_loader, args.release_gate, args.ci_loader_gate)) > 1:
+        parser.error("choose only one of --real-loader, --release-gate, or --ci-loader-gate")
 
     errors: list[str] = []
     try:
@@ -2207,20 +2409,97 @@ def main() -> int:
         run_fixture_inventory_negative_controls(fixtures, errors)
     if args.installed_root:
         check_installed_inventory(args.installed_root.expanduser(), mappings, errors)
-    if args.real_loader:
-        run_real_loader_controls(args.real_loader.expanduser(), mappings, errors)
+    loader_bin = args.release_gate or args.real_loader
+    ci_loader_classification: Optional[str] = None
+    if args.ci_loader_gate:
+        discovered = shutil.which("codex")
+        if discovered is None:
+            ci_loader_classification = (
+                f"UNAVAILABLE: codex executable absent on platform {sys.platform}"
+            )
+        else:
+            try:
+                discovered_version = subprocess.run(
+                    [discovered, "--version"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                ci_loader_classification = f"UNAVAILABLE: codex version probe failed: {exc}"
+            else:
+                if discovered_version == f"codex-cli {EXPECTED_CODEX_VERSION}":
+                    loader_bin = Path(discovered)
+                else:
+                    ci_loader_classification = (
+                        "UNAVAILABLE: pinned codex-cli "
+                        f"{EXPECTED_CODEX_VERSION} not present; found {discovered_version!r}"
+                    )
+    if loader_bin:
+        run_real_loader_controls(
+            loader_bin.expanduser(), mappings, routing_cases, errors
+        )
 
     if errors:
         for error in errors:
-            print(f"ERROR: {error}")
+            print(f"ERROR: {error}", file=sys.stderr if args.json else sys.stdout)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "FAIL",
+                        "named_mutation_outcomes": {},
+                        "errors": errors,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
         return 1
     installed_note = ", installed inventory/bytes/links" if args.installed_root else ""
     self_test_note = ", negative controls" if args.self_test else ""
-    loader_note = ", Codex 0.147.0 real-loader inventory" if args.real_loader else ""
+    loader_note = (
+        ", Codex 0.147.0 real-loader inventory and loaded route retrieval"
+        if loader_bin
+        else ""
+    )
+    ci_note = (
+        f", CI loader classification {ci_loader_classification}"
+        if ci_loader_classification
+        else ""
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "PASS",
+                    "named_mutation_outcomes": named_self_test_outcomes(
+                        fixtures, contract, routing_cases, reference, bool(loader_bin)
+                    )
+                    if args.self_test
+                    else {},
+                    "real_loader": {
+                        "status": "PASS" if loader_bin else (
+                            "SKIPPED" if ci_loader_classification else "NOT_REQUESTED"
+                        ),
+                        "classification": ci_loader_classification,
+                        "implicit_model_selection": "UNCHECKED",
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return 0
     print(
         "OK: queue coverage, canonical state/recovery fixtures, "
         f"{len(mappings)}-file package "
-        f"closure/routes/links{installed_note}{self_test_note}{loader_note}"
+        f"closure/routes/links{installed_note}{self_test_note}{loader_note}{ci_note}; "
+        "implicit model route selection remains UNCHECKED without an authorized "
+        "pinned-model evaluation"
     )
     return 0
 

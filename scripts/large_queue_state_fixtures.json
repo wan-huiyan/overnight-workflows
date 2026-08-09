@@ -62,6 +62,18 @@
       "expect_error": "repository_id must be a canonical repository identity"
     },
     {
+      "name": "parent_repository_identity",
+      "record_type": "controller_liveness",
+      "set": {"repository_id": "github.com/../repo"},
+      "expect_error": "repository_id must be a canonical repository identity"
+    },
+    {
+      "name": "dot_repository_identity",
+      "record_type": "controller_liveness",
+      "set": {"repository_id": "github.com/./repo"},
+      "expect_error": "repository_id must be a canonical repository identity"
+    },
+    {
       "name": "malformed_controller_timestamp",
       "record_type": "controller_liveness",
       "set": {"time": "not-a-time"},
@@ -107,6 +119,24 @@
       "name": "dot_reservation_path",
       "record_type": "path_reservation",
       "set": {"exact_paths": ["."]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "parent_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/../data.js"]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "tab_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/\tdata.js"]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "newline_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/\ndata.js"]},
       "expect_error": "path is not normalized repository-relative"
     },
     {

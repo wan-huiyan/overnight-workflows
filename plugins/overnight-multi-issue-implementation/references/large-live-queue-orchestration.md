@@ -489,7 +489,8 @@ or widely consumed constant, do not downgrade it because the diff looks small.
 
 For every review, record these separate identities:
 
-- `target_ref`: the literal destination ref observed at dispatch;
+- `target_ref`: the fully qualified symbolic destination ref observed at
+  dispatch (for example `refs/heads/main`), never a raw object SHA;
 - `target_ref_sha_at_dispatch`: that ref's full immutable tip, repeated as
   `target_sha`;
 - `merge_base_sha`: `git merge-base "$target_sha" "$head_sha"`;
@@ -503,10 +504,18 @@ not, reconcile the branch with the current target first. Materialize one
 deterministic two-tree diff and hash the file:
 
 ```bash
-git diff --binary --full-index --no-color --no-ext-diff --no-textconv \
+git -C "$ABSOLUTE_REPOSITORY" diff \
+  --binary --full-index --no-color --no-ext-diff --no-textconv \
   --no-renames --diff-algorithm=myers --unified=3 \
   "$TARGET_SHA" "$HEAD_SHA" -- > "$DIFF_PATH"
 shasum -a 256 "$DIFF_PATH"
+```
+
+Store the expanded no-shell argv in exactly this order, with literal absolute
+repository and full-SHA strings:
+
+```json
+["git", "-C", "/absolute/repository", "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--diff-algorithm=myers", "--unified=3", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--"]
 ```
 
 At acceptance, resolve `target_ref` again and require it still equals

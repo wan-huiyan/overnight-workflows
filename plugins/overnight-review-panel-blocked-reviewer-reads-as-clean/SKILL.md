@@ -20,11 +20,27 @@ description: |
   `voltagent-reviewer-no-write-tool` (Write gap → inline output) and
   `stacked-pr-review-per-base-diff-and-attach`.
 author: Claude Code
-version: 1.0.0
-date: 2026-05-29
+version: 1.0.1
+date: 2026-08-09
 ---
 
 # Overnight review panel: a BLOCKED reviewer reads as CLEAN by morning
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Root cause](#root-cause)
+- [Solution](#solution)
+- [Verification](#verification)
+- [Example](#example)
+- [Notes and references](#notes)
+- [Changelog](#changelog)
+
+## Changelog
+
+- **1.0.1 (2026-08-09):** adds the top contents list required by the routed
+  Codex `WORKFLOW.md` edition. Plugin release: 1.0.2.
 
 > **Overnight specialization.** The bare mechanism — a code-review subagent with
 > no `Bash` tool can't `gh pr diff`/checkout a PR, so it returns BLOCKED — is the

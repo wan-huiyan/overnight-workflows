@@ -27,14 +27,52 @@ DIFF_FLAGS = ["--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-t
 REPO_FIELDS = {"repository", "target_ref", "target_ref_sha_at_dispatch", "target_sha", "merge_base_sha", "head_sha", "head_tree_oid", "diff_argv", "diff_path", "diff_digest_algorithm", "diff_digest"}
 INSTALL_FIELDS = {"root", "inventory_path", "inventory_format", "inventory_sha256", "file_count", "total_bytes", "generation_id", "source_repository", "source_commit", "source_tree", "install_manifest_path", "install_manifest_repository_path", "install_manifest_sha256"}
 OMISSION_NAMES = {"missing_target_ref", "missing_target_ref_sha", "missing_diff_argv", "missing_diff_digest", "missing_inventory_path", "missing_inventory_digest", "missing_inventory_count", "missing_inventory_bytes", "missing_generation", "missing_source_commit", "missing_source_tree", "missing_manifest_digest"}
-DRIFT_NAMES = {"target_ref_drift", "diff_argv_drift", "diff_digest_drift", "inventory_digest_drift", "inventory_count_drift", "inventory_bytes_drift", "generation_drift", "source_commit_drift", "source_tree_drift", "snapshot_byte_drift"}
+DRIFT_NAMES = {
+    "target_ref_drift",
+    "raw_sha_target_ref",
+    "dot_target_ref",
+    "merge_base_not_target",
+    "diff_argv_drift",
+    "diff_repository_argv_drift",
+    "diff_flag_order_drift",
+    "diff_digest_drift",
+    "inventory_digest_drift",
+    "inventory_count_drift",
+    "inventory_bytes_drift",
+    "generation_drift",
+    "source_commit_drift",
+    "source_tree_drift",
+    "snapshot_byte_drift",
+}
 
 
 def absolute(value: Any) -> Optional[Path]:
-    if not isinstance(value, str) or not value or "\x00" in value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
         return None
     path = Path(value)
     return path if path.is_absolute() and os.path.normpath(value) == value else None
+
+
+def symbolic_full_ref(value: Any) -> bool:
+    """Accept a fully qualified named ref, never a raw object ID or ref expression."""
+    if not isinstance(value, str) or not value.startswith("refs/"):
+        return False
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        return False
+    if any(character in value for character in " ~^:?*[\\") or "@{" in value:
+        return False
+    if value.endswith(("/", ".", ".lock")) or "//" in value or ".." in value:
+        return False
+    components = value.split("/")
+    return bool(
+        len(components) >= 3
+        and components[1] in {"heads", "remotes", "tags"}
+        and all(component and component not in {".", ".."} and not component.startswith(".") for component in components)
+    )
 
 
 def timestamp(value: Any) -> bool:
@@ -81,18 +119,31 @@ def validate_repository(label: str, value: Any, verify: bool, errors: list[str])
     if diff_path is None:
         errors.append(f"{label}.diff_path must be a normalized absolute path")
     target_ref = value.get("target_ref")
-    if not isinstance(target_ref, str) or not target_ref.strip() or "\x00" in target_ref:
-        errors.append(f"{label}.target_ref must be a nonempty literal ref")
+    if not symbolic_full_ref(target_ref):
+        errors.append(
+            f"{label}.target_ref must be a fully qualified symbolic ref under refs/"
+        )
     for field in ("target_ref_sha_at_dispatch", "target_sha", "merge_base_sha", "head_sha", "head_tree_oid"):
         if not isinstance(value.get(field), str) or not SHA1.fullmatch(value[field]):
             errors.append(f"{label}.{field} must be a lowercase full Git SHA")
     if value.get("target_sha") != value.get("target_ref_sha_at_dispatch"):
         errors.append(f"{label}.target_sha must equal target_ref_sha_at_dispatch")
+    if value.get("merge_base_sha") != value.get("target_sha"):
+        errors.append(f"{label}.merge_base_sha must equal target_sha")
     if value.get("diff_digest_algorithm") != "SHA-256":
         errors.append(f"{label}.diff_digest_algorithm must be SHA-256")
     if not isinstance(value.get("diff_digest"), str) or not SHA256.fullmatch(value["diff_digest"]):
         errors.append(f"{label}.diff_digest must be lowercase SHA-256")
-    expected_argv = ["git", "diff", *DIFF_FLAGS, value.get("target_sha"), value.get("head_sha"), "--"]
+    expected_argv = [
+        "git",
+        "-C",
+        value.get("repository"),
+        "diff",
+        *DIFF_FLAGS,
+        value.get("target_sha"),
+        value.get("head_sha"),
+        "--",
+    ]
     if value.get("diff_argv") != expected_argv:
         errors.append(f"{label}.diff_argv must equal the deterministic literal argv array")
     if not verify or repository is None or diff_path is None:
@@ -105,7 +156,7 @@ def validate_repository(label: str, value: Any, verify: bool, errors: list[str])
         if git(repository, "merge-base", value.get("target_sha"), value.get("head_sha")).decode().strip() != value.get("merge_base_sha"):
             errors.append(f"{label}.merge_base_sha does not reproduce")
         if value.get("diff_argv") == expected_argv:
-            reproduced = subprocess.run(expected_argv, cwd=repository, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).stdout
+            reproduced = subprocess.run(expected_argv, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).stdout
             saved = regular_bytes(diff_path, f"{label} diff", errors)
             if saved is not None:
                 if saved != reproduced:
@@ -141,7 +192,16 @@ def validate_installed(value: Any, verify: bool, errors: list[str]) -> None:
             errors.append(f"installed.{field} must be a lowercase full Git SHA")
     manifest_repo_path = value.get("install_manifest_repository_path")
     parsed = PurePosixPath(manifest_repo_path) if isinstance(manifest_repo_path, str) else None
-    if parsed is None or parsed.is_absolute() or not manifest_repo_path or ".." in parsed.parts or parsed.as_posix() != manifest_repo_path:
+    if (
+        parsed is None
+        or parsed.is_absolute()
+        or not manifest_repo_path
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in manifest_repo_path)
+        or "\\" in manifest_repo_path
+        or manifest_repo_path.endswith("/")
+        or any(component in {"", ".", ".."} for component in parsed.parts)
+        or parsed.as_posix() != manifest_repo_path
+    ):
         errors.append("installed.install_manifest_repository_path must be normalized repository-relative POSIX")
     if not verify or None in (root, inventory_path, repository, manifest_path):
         return
@@ -272,8 +332,8 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
         inventory = build_inventory(snapshot, ["SKILL.md"])
         inventory_path = base / "snapshot.inventory"; inventory_path.write_bytes(inventory.data)
         manifest_path = base / "install-manifest.json"; shutil.copy2(manifest_source, manifest_path)
-        argv = ["git", "diff", *DIFF_FLAGS, target, head, "--"]
-        diff = subprocess.run(argv, cwd=repository, check=True, stdout=subprocess.PIPE).stdout
+        argv = ["git", "-C", str(repository), "diff", *DIFF_FLAGS, target, head, "--"]
+        diff = subprocess.run(argv, check=True, stdout=subprocess.PIPE).stdout
         diff_path = base / "input.diff"; diff_path.write_bytes(diff)
         record = {
             "schema_version": 2, "record_type": "panel_input", "panel_id": "panel-test",
@@ -304,7 +364,20 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
             if mutation == "target_ref":
                 mutated["repositories"]["global"]["target_ref_sha_at_dispatch"] = "0" * 40
                 mutated["repositories"]["global"]["target_sha"] = "0" * 40
-            elif mutation == "diff_argv": mutated["repositories"]["global"]["diff_argv"] = argv[:-3] + argv[-2:]
+            elif mutation == "raw_sha_target_ref":
+                mutated["repositories"]["global"]["target_ref"] = target
+            elif mutation == "dot_target_ref":
+                mutated["repositories"]["global"]["target_ref"] = "refs/heads/../review-target"
+            elif mutation == "merge_base_not_target":
+                mutated["repositories"]["global"]["merge_base_sha"] = head
+            elif mutation == "diff_argv":
+                mutated["repositories"]["global"]["diff_argv"] = argv[:-3] + argv[-2:]
+            elif mutation == "diff_repository_argv":
+                mutated["repositories"]["global"]["diff_argv"][2] = str(base)
+            elif mutation == "diff_flag_order":
+                mutated["repositories"]["global"]["diff_argv"][5:7] = reversed(
+                    mutated["repositories"]["global"]["diff_argv"][5:7]
+                )
             elif mutation == "diff_digest": mutated["repositories"]["global"]["diff_digest"] = "0" * 64
             elif mutation == "inventory_digest": mutated["installed"]["inventory_sha256"] = "0" * 64
             elif mutation == "inventory_count": mutated["installed"]["file_count"] += 1
@@ -342,6 +415,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, help="panel JSONL manifest to validate")
     parser.add_argument("--self-test", action="store_true", help="run omission and drift controls")
+    parser.add_argument("--json", action="store_true", help="emit one machine-readable result object")
     args = parser.parse_args()
     if not args.manifest and not args.self_test: parser.error("provide --manifest and/or --self-test")
     errors: list[str] = []
@@ -356,8 +430,19 @@ def main() -> int:
         if len(inputs) != 1: errors.append(f"panel manifest must contain exactly one panel_input; found {len(inputs)}")
         else: errors.extend(validate_panel_input(inputs[0]))
     if errors:
-        for error in errors: print(f"ERROR: {error}")
+        for error in errors: print(f"ERROR: {error}", file=sys.stderr if args.json else sys.stdout)
+        if args.json:
+            print(json.dumps({"schema_version": 1, "status": "FAIL", "named_mutation_outcomes": {}, "errors": errors}, sort_keys=True, separators=(",", ":")))
         return 1
+    if args.json:
+        outcomes: dict[str, str] = {}
+        if args.self_test:
+            for section in ("omission_cases", "drift_cases"):
+                outcomes[f"panel.fixture_inventory.removed_class.{section}"] = "PASS"
+                for case in fixtures[section]:
+                    outcomes[f"panel.{section}.{case['name']}"] = "PASS"
+        print(json.dumps({"schema_version": 1, "status": "PASS", "named_mutation_outcomes": dict(sorted(outcomes.items()))}, sort_keys=True, separators=(",", ":")))
+        return 0
     print("OK: panel input manifest/snapshot contract" + (" and negative controls" if args.self_test else ""))
     return 0
 

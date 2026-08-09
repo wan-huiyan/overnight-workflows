@@ -16,7 +16,12 @@
   ],
   "drift_cases": [
     {"name": "target_ref_drift", "mutation": "target_ref", "expect": "target_ref no longer resolves"},
+    {"name": "raw_sha_target_ref", "mutation": "raw_sha_target_ref", "expect": "fully qualified symbolic ref"},
+    {"name": "dot_target_ref", "mutation": "dot_target_ref", "expect": "fully qualified symbolic ref"},
+    {"name": "merge_base_not_target", "mutation": "merge_base_not_target", "expect": "merge_base_sha must equal target_sha"},
     {"name": "diff_argv_drift", "mutation": "diff_argv", "expect": "diff_argv must equal"},
+    {"name": "diff_repository_argv_drift", "mutation": "diff_repository_argv", "expect": "diff_argv must equal"},
+    {"name": "diff_flag_order_drift", "mutation": "diff_flag_order", "expect": "diff_argv must equal"},
     {"name": "diff_digest_drift", "mutation": "diff_digest", "expect": "saved diff digest differs"},
     {"name": "inventory_digest_drift", "mutation": "inventory_digest", "expect": "inventory digest differs"},
     {"name": "inventory_count_drift", "mutation": "inventory_count", "expect": "inventory file_count differs"},

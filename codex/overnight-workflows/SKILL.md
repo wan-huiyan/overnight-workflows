@@ -58,3 +58,11 @@ does not enter an execution route. A route choice never grants commit, push,
 pull-request, merge, deploy, network, paid-call, or external-write authority.
 Translate Claude schedules, RemoteTrigger, model tiers, and workflow schemas
 into the goal, automation, wait, and agent facilities actually available.
+
+Before release, run `scripts/check_large_queue_guidance.py --self-test
+--release-gate /path/to/codex`. This calls Codex 0.147.0 app-server
+`skills/list(forceReload=true)` and retrieves every deterministic positive and
+negative route contract through the loaded umbrella. An unavailable real loader
+fails the local release gate. Implicit route selection by an unpinned model is
+`UNCHECKED`; do not claim model-selection accuracy without a separately
+authorized pinned-model evaluation.

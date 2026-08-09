@@ -22,6 +22,16 @@ date: 2026-08-08
 
 # Overnight Multi-Issue Implementation
 
+## Contents
+
+- [Overview](#overview)
+- [When to use](#when-to-use)
+- [Large mixed live queue](#variant-large-mixed-live-queue)
+- [Authority](#authority-before-any-command)
+- [Issue-cluster procedure](#issue-cluster-procedure)
+- [Verification](#verification)
+- [References](#references)
+
 ## Overview
 
 This skill has two input shapes:

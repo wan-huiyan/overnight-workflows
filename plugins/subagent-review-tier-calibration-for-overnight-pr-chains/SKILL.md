@@ -19,11 +19,27 @@ description: |
   subagents in one session when 14 × 1 + 5 × 0 would have caught the same
   bugs in half the wall time.
 author: Claude Code
-version: 1.0.1
-date: 2026-05-28
+version: 1.0.2
+date: 2026-08-09
 ---
 
 # Subagent Review-Tier Calibration for Overnight PR Chains
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Solution](#solution)
+- [Decision rubric](#decision-rubric-apply-per-pr-in-the-chain)
+- [Verification](#verification)
+- [Example](#example-s75-bold-editorial-redesign-real)
+- [Notes and references](#notes)
+- [Changelog](#changelog)
+
+## Changelog
+
+- **1.0.2 (2026-08-09):** adds the top contents list required by the routed
+  Codex `WORKFLOW.md` edition. Plugin release: 1.0.1.
 
 ## Problem
 
