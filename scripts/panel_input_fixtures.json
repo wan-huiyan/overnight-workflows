@@ -152,5 +152,14 @@
     {"name": "receipt_size_race", "target": "receipt", "kind": "size_race", "expect": "changed identity or size while being read"},
     {"name": "state_symlink", "target": "state", "kind": "symlink", "expect": "regular non-symlink single-link file"},
     {"name": "state_hardlink", "target": "state", "kind": "hardlink", "expect": "regular non-symlink single-link file"}
+  ],
+  "compatibility_cases": [
+    {"name": "schema2_same_path_baseline", "kind": "same_path", "expect": "PASS"},
+    {"name": "schema2_distinct_identical_original", "kind": "distinct_identical", "expect": "PASS"},
+    {"name": "schema2_missing_original", "kind": "missing", "expect": "PASS"},
+    {"name": "schema2_nested_digest_drift", "kind": "different_digest", "expect": "prepare_receipt.sha256 must equal outer receipt digest and loaded sealed receipt bytes"},
+    {"name": "schema2_original_byte_drift", "kind": "different_bytes", "expect": "archived original prepare receipt bytes differ from sealed copy"},
+    {"name": "schema2_malformed_original_path", "kind": "malformed_path", "expect": "prepare_receipt.path must be a normalized absolute path"},
+    {"name": "schema3_distinct_identical_rejected", "kind": "schema3_distinct", "expect": "prepare_receipt.path differs from prepare.receipt_path"}
   ]
 }

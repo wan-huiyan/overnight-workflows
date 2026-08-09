@@ -162,6 +162,15 @@ FILE_SAFETY_NAMES = {
     "manifest_size_race", "manifest_missing_final_lf", "manifest_blank_row",
     "manifest_extra_row",
 }
+COMPATIBILITY_NAMES = {
+    "schema2_same_path_baseline",
+    "schema2_distinct_identical_original",
+    "schema2_missing_original",
+    "schema2_nested_digest_drift",
+    "schema2_original_byte_drift",
+    "schema2_malformed_original_path",
+    "schema3_distinct_identical_rejected",
+}
 FIXTURE_CLASSES = {
     "omission_cases": OMISSION_NAMES,
     "drift_cases": DRIFT_NAMES,
@@ -170,6 +179,7 @@ FIXTURE_CLASSES = {
     "scope_cases": SCOPE_NAMES,
     "undeclared_cases": UNDECLARED_NAMES,
     "file_safety_cases": FILE_SAFETY_NAMES,
+    "compatibility_cases": COMPATIBILITY_NAMES,
 }
 
 
@@ -716,8 +726,74 @@ def validate_prepare_events(value: Any, errors: list[str]) -> None:
         )
 
 
+def validate_state_receipt_provenance(
+    value: Any,
+    panel_schema_version: Any,
+    sealed_receipt_path: Path,
+    sealed_receipt_sha256: Any,
+    sealed_receipt_bytes: bytes,
+    errors: list[str],
+) -> None:
+    """Validate current and archived prepare-receipt provenance.
+
+    Schema 3 binds the nested path directly to the sealed receipt copy. Archived
+    schema-2 panels may retain the producer's original absolute path instead. In
+    that case the state-bound digest, outer digest, and loaded sealed-copy digest
+    must all agree. A surviving original must also be a safe regular file with
+    byte-for-byte identical content; a missing original is tolerated because the
+    state-bound path and sealed copy retain the archived provenance.
+    """
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        errors.append("prepare state prepare_receipt must have exact path and sha256 fields")
+        return
+    original_receipt_path = absolute(value.get("path"))
+    if original_receipt_path is None:
+        errors.append("prepare state prepare_receipt.path must be a normalized absolute path")
+        return
+    loaded_sealed_digest = hashlib.sha256(sealed_receipt_bytes).hexdigest()
+    nested_digest = value.get("sha256")
+    if nested_digest != loaded_sealed_digest:
+        errors.append(
+            "prepare state prepare_receipt.sha256 differs from loaded prepare receipt bytes"
+        )
+    if not (
+        nested_digest == sealed_receipt_sha256 == loaded_sealed_digest
+    ):
+        errors.append(
+            "prepare state prepare_receipt.sha256 must equal outer receipt digest "
+            "and loaded sealed receipt bytes"
+        )
+    if panel_schema_version == 3:
+        if original_receipt_path != sealed_receipt_path:
+            errors.append(
+                "prepare state prepare_receipt.path differs from prepare.receipt_path"
+            )
+        return
+    if panel_schema_version != 2 or original_receipt_path == sealed_receipt_path:
+        return
+    try:
+        os.lstat(original_receipt_path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        errors.append(f"cannot inspect archived original prepare receipt: {exc}")
+        return
+    original_receipt_bytes = regular_bytes(
+        original_receipt_path, "archived original prepare receipt", errors
+    )
+    if (
+        original_receipt_bytes is not None
+        and original_receipt_bytes != sealed_receipt_bytes
+    ):
+        errors.append("archived original prepare receipt bytes differ from sealed copy")
+
+
 def validate_prepare(
-    value: Any, installed: Any, verify: bool, errors: list[str]
+    value: Any,
+    installed: Any,
+    panel_schema_version: Any,
+    verify: bool,
+    errors: list[str],
 ) -> None:
     if not exact_fields(value, PREPARE_FIELDS, "prepare", errors):
         return
@@ -844,26 +920,14 @@ def validate_prepare(
         )
     ):
         errors.append("prepare receipt expected_live_source differs from prepare state")
-    state_receipt = state.get("prepare_receipt")
-    if not isinstance(state_receipt, dict) or set(state_receipt) != {"path", "sha256"}:
-        errors.append("prepare state prepare_receipt must have exact path and sha256 fields")
-    else:
-        nested_receipt_path = absolute(state_receipt.get("path"))
-        if nested_receipt_path is None:
-            errors.append("prepare state prepare_receipt.path must be a normalized absolute path")
-        elif nested_receipt_path != receipt_path:
-            errors.append(
-                "prepare state prepare_receipt.path differs from prepare.receipt_path"
-            )
-        loaded_receipt_sha256 = (
-            hashlib.sha256(receipt_bytes).hexdigest()
-            if receipt_bytes is not None
-            else value.get("receipt_sha256")
-        )
-        if state_receipt.get("sha256") != loaded_receipt_sha256:
-            errors.append(
-                "prepare state prepare_receipt.sha256 differs from loaded prepare receipt bytes"
-            )
+    validate_state_receipt_provenance(
+        state.get("prepare_receipt"),
+        panel_schema_version,
+        receipt_path,
+        value.get("receipt_sha256"),
+        receipt_bytes,
+        errors,
+    )
     state_validation = state.get("validation")
     if not isinstance(state_validation, dict) or set(state_validation) != {"staged"}:
         errors.append("prepare state validation must have exactly one staged field")
@@ -996,7 +1060,9 @@ def validate_panel_input(record: Any, verify: bool = True) -> list[str]:
                 "panel input installed_source role must identify the reviewed repository "
                 "matching installed source repository/commit/tree"
             )
-    validate_prepare(record.get("prepare"), installed, verify, errors)
+    validate_prepare(
+        record.get("prepare"), installed, schema_version, verify, errors
+    )
     validate_scope(boundary, record.get("scope"), errors)
     return errors
 
@@ -1296,6 +1362,18 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                 }
             )
 
+        def write_state_only(
+            test_record: dict[str, Any], test_state: dict[str, Any]
+        ) -> None:
+            state_data = (
+                json.dumps(test_state, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            state_path.write_bytes(state_data)
+            test_record["prepare"]["state_path"] = str(state_path)
+            test_record["prepare"]["state_sha256"] = hashlib.sha256(
+                state_data
+            ).hexdigest()
+
         write_prepare_pair(record, receipt, state)
         baseline = validate_panel_input(record)
         if baseline:
@@ -1309,6 +1387,45 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                 "legacy schema-2 panel read control failed: "
                 + " | ".join(legacy_errors)
             ]
+        for case in fixtures["compatibility_cases"]:
+            compatibility_record = copy.deepcopy(record)
+            compatibility_record["schema_version"] = (
+                3 if case["kind"] == "schema3_distinct" else 2
+            )
+            if compatibility_record["schema_version"] == 2:
+                compatibility_record.pop("repository_roles")
+            compatibility_state = copy.deepcopy(state)
+            original_receipt_path = base / f"{case['name']}.original.json"
+            if case["kind"] in {
+                "distinct_identical",
+                "different_bytes",
+                "schema3_distinct",
+            }:
+                original_receipt_path.write_bytes(receipt_path.read_bytes())
+            if case["kind"] == "different_bytes":
+                original_receipt_path.write_bytes(receipt_path.read_bytes() + b"drift\n")
+            nested_path = (
+                str(base / "archive" / ".." / "malformed-original.json")
+                if case["kind"] == "malformed_path"
+                else str(original_receipt_path)
+            )
+            if case["kind"] != "same_path":
+                compatibility_state["prepare_receipt"]["path"] = nested_path
+            if case["kind"] == "different_digest":
+                compatibility_state["prepare_receipt"]["sha256"] = "0" * 64
+            write_state_only(compatibility_record, compatibility_state)
+            found = validate_panel_input(compatibility_record)
+            if case["expect"] == "PASS":
+                if found:
+                    errors.append(
+                        f"panel compatibility control {case['name']} failed: {found}"
+                    )
+            elif not any(case["expect"] in item for item in found):
+                errors.append(
+                    f"panel compatibility control {case['name']} did not fail "
+                    f"as expected: {found}"
+                )
+            write_prepare_pair(record, receipt, state)
         if os.environ.get("PANEL_EVENT_VALIDATION_MUTANT") == "1":
             mutant_record = copy.deepcopy(record)
             mutant_receipt = copy.deepcopy(receipt)

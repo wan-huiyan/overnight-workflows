@@ -1946,7 +1946,7 @@ def _prefix_identity(
 
 def _receipt_value(record: Mapping[str, Any]) -> Dict[str, Any]:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": record["schema_version"],
         "record_type": PREFIX_RECEIPT_TYPE,
         "phase": record["phase"],
         "manifest_prefix_path": record["manifest_prefix_path"],

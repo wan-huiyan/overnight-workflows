@@ -255,8 +255,16 @@ python3 -m unittest scripts/test_publish_codex_install.py -v
 python3 scripts/publish_codex_install.py self-test
 ```
 
-Panel dispatches use exact schema-2 `panel_input` records with review boundary
-`prepublication-source-and-staged-snapshot`. Every repository input
+Panel dispatches use generic schema-3 `panel_input` records with review boundary
+`prepublication-source-and-staged-snapshot`. The `repository_roles` object is
+an exact bijection—a one-to-one mapping covering every `repositories` key—from
+semantic roles to repository keys and must include `installed_source`, which
+identifies the one reviewed repository that
+matches the installed snapshot's source repository, commit, and tree.
+Controllers derive finalization `repository_heads` mechanically from that
+validated map: each role keeps its exact repository key and the corresponding
+repository's `head_sha`. New producers must not emit legacy schema-2 panel
+rows. Every repository input
 includes `target_ref`, its full `target_ref_sha_at_dispatch`, the literal
 deterministic `git diff` argv array, immutable target/merge-base/head/tree IDs,
 and the saved diff digest. The installed evidence snapshot includes the exact
@@ -344,6 +352,15 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.1**:
+  new review producers use generic schema-3 panel inputs with an exact
+  one-to-one repository-role map and mechanically derived generic-v2
+  finalization heads. Archived schema-2 panel receipts may retain a distinct
+  original producer path only when their digest and available original bytes
+  equal the sealed copy. Frozen legacy-v1 finalization prefixes and receipts
+  remain reproducible read inputs, while all new append and seal operations
+  remain v2-only. Bundle `VERSION` stays **1.5.0** because that already-unreleased
+  bundle counter is independent of this plugin patch.
 - **2026-08-09** — `overnight-review-client-delivery` → **v1.0.3** and
   `schedule-poll-orchestrator-pattern` → **v1.0.4**: the final-byte gate now
   versions its durable contract and binds the package root plus every directory,

@@ -53,6 +53,25 @@ PANEL_VALIDATOR_RESOURCES = (
 PANEL_VALIDATOR_INSTALLED_DIRECTORY = (
     "references/workflows/overnight-multi-issue-implementation/scripts"
 )
+PANEL_SCHEMA3_ROUTE_MARKERS = (
+    "New panel inputs must use generic schema 3",
+    "Set `schema_version` to `3`",
+    "exact bijection—that is, a one-to-one mapping with no omissions—from semantic "
+    "roles to the complete set of keys in `repositories`",
+    "The role map must include `installed_source`",
+    "unique reviewed repository whose repository path, `head_sha`, and `head_tree_oid` "
+    "equal the installed snapshot's `source_repository`, `source_commit`, and `source_tree`",
+    "Derive finalization `repository_heads` mechanically from the validated panel input",
+    '"repository_key": repository_key',
+    '"head_sha": repositories[repository_key]["head_sha"]',
+    "Do not create new schema-2 panel rows",
+)
+PANEL_SCHEMA3_README_MARKERS = (
+    "Panel dispatches use generic schema-3 `panel_input` records",
+    "an exact bijection—a one-to-one mapping covering every `repositories` key—from "
+    "semantic roles to repository keys",
+    "derive finalization `repository_heads` mechanically from that validated map",
+)
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
     r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?Z$"
@@ -289,6 +308,49 @@ UNCONDITIONAL_ACTION_PATTERNS = {
 def require(text: str, phrase: str, where: Path, errors: list[str]) -> None:
     if phrase not in text:
         errors.append(f"{where.relative_to(ROOT)}: missing {phrase!r}")
+
+
+def check_panel_schema3_guidance(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Require the public route to produce the generic panel/finalization join."""
+    normalized_reference = " ".join(reference.split())
+    normalized_readme = " ".join(readme.split())
+    for marker in PANEL_SCHEMA3_ROUTE_MARKERS:
+        if marker not in normalized_reference:
+            errors.append(f"panel schema-3 route guidance is missing {marker!r}")
+    for marker in PANEL_SCHEMA3_README_MARKERS:
+        if marker not in normalized_readme:
+            errors.append(f"panel schema-3 README guidance is missing {marker!r}")
+    for stale in (
+        "Panel dispatches use exact schema-2 `panel_input` records",
+        "Run that schema-2 validation before dispatch",
+    ):
+        if stale in normalized_reference or stale in normalized_readme:
+            errors.append(f"panel route still instructs new schema-2 production: {stale!r}")
+
+
+def run_panel_schema3_guidance_negative_control(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Prove a route regression from schema 3 to schema 2 is observable."""
+    marker = PANEL_SCHEMA3_ROUTE_MARKERS[1]
+    if marker not in reference:
+        errors.append("panel schema-3 regression control setup marker is absent")
+        return
+    mutated = reference.replace(
+        marker,
+        "Set `schema_version` to `2`",
+        1,
+    )
+    observed: list[str] = []
+    check_panel_schema3_guidance(mutated, readme, observed)
+    if not any("panel schema-3 route guidance is missing" in item for item in observed):
+        errors.append("panel schema-3 regression negative control did not fail")
 
 
 def read_json(path: Path, errors: list[str]) -> dict[str, Any]:
@@ -3053,6 +3115,7 @@ def named_self_test_outcomes(
             "routing.execution_authority",
             "routing.child_authority",
             "routing.final_byte_review",
+            "guidance.panel_schema3_regression",
             "routing.schedule_consolidation_latch",
             "routing.schedule_unconditional_action",
             "routing.authority.loaded_client_deny_and_exact_grants",
@@ -3201,6 +3264,7 @@ def main() -> int:
             )
     if "set(source_ids)" in reference:
         errors.append(f"{REFERENCE.relative_to(ROOT)}: filename/set coverage returned")
+    check_panel_schema3_guidance(reference, readme, errors)
 
     for phrase in (
         "<claim_yaml>",
@@ -3338,6 +3402,7 @@ def main() -> int:
     if args.self_test:
         run_install_negative_controls(mappings, errors)
         run_routing_negative_controls(routing_cases, mappings, codex, errors)
+        run_panel_schema3_guidance_negative_control(reference, readme, errors)
         run_materialized_authority_controls(mappings, routing_cases, errors)
         run_fixture_inventory_negative_controls(fixtures, errors)
     if args.installed_root:

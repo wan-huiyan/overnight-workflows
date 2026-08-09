@@ -66,6 +66,14 @@
           "payload_sha256": "707872552a7e6a33899e59115911e4dd1412435d92d1cfd2b842210bf32bd9c1",
           "file_count": 3,
           "total_bytes": 94421
+        },
+        {
+          "version": "1.5.1",
+          "content_version": "1.5.1",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "3e5da792ed2105b5fa20e8f966e2bd618a7bbbd536cf9cb24ec6db89ea767a38",
+          "file_count": 3,
+          "total_bytes": 95736
         }
       ]
     },

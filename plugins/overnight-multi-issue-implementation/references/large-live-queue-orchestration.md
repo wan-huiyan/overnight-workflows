@@ -526,6 +526,35 @@ the live discovery root and record its canonical `sha256-size-path-v1`
 inventory digest, file count, total bytes, generation ID equal to that digest,
 source commit and tree, and install-manifest digest.
 
+New panel inputs must use generic schema 3. Set `schema_version` to `3`, make
+`repositories` a nonempty object keyed by normalized repository identities,
+and add `repository_roles` as an exact bijection—that is, a one-to-one mapping
+with no omissions—from semantic roles to the complete set of keys in
+`repositories`. Duplicate values and omissions fail validation. The role map
+must include `installed_source`.
+Its value must name the unique reviewed repository whose repository path,
+`head_sha`, and `head_tree_oid` equal the installed snapshot's
+`source_repository`, `source_commit`, and `source_tree`. Role and repository
+names are generic identities; do not hardcode project names.
+
+Derive finalization `repository_heads` mechanically from the validated panel
+input. Do not independently type, rename, omit, or add roles:
+
+```python
+repository_heads = {
+    role: {
+        "repository_key": repository_key,
+        "head_sha": repositories[repository_key]["head_sha"],
+    }
+    for role, repository_key in repository_roles.items()
+}
+```
+
+The controller must place that exact derived object in the generic schema-2
+finalization `source_review_input_registered` row. Do not create new schema-2
+panel rows; schema-2 panel input is a read-only legacy format and cannot supply
+the generic role-to-head join.
+
 Resolve the panel validator from the exact `SKILL.md` path in the active
 loader record; do not scan discovery roots or guess the newest cache. An
 installed umbrella carries the validator beside this workflow. A canonical
@@ -557,7 +586,7 @@ fi
 python3 -B "$PANEL_VALIDATOR" --self-test --manifest "$PANEL_MANIFEST"
 ```
 
-Run that schema-2 validation before dispatch and again before acceptance. A
+Run that schema-3 validation before dispatch and again before acceptance. A
 missing validator or dependency, a failed self-test, missing fields, or any
 ref, argv, diff, manifest, inventory, source, or generation drift invalidates
 the affected verdict.

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import finalization_manifest as manifest  # noqa: E402
+import validate_panel_inputs as panel_inputs  # noqa: E402
 
 
 class FinalizationManifestTests(unittest.TestCase):
@@ -211,6 +213,527 @@ class FinalizationManifestTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def make_real_schema3_panel(self, root: Path) -> dict[str, object]:
+        repository = root / "panel-repository"
+        repository.mkdir()
+        subprocess.run(["git", "init", "-q", str(repository)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "config", "user.name", "Panel Test"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "config",
+                "user.email",
+                "panel@example.invalid",
+            ],
+            check=True,
+        )
+        source = repository / "source/SKILL.md"
+        source.parent.mkdir()
+        source.write_text(
+            "---\nname: test\ndescription: test\n---\n", encoding="utf-8"
+        )
+        checker = repository / "scripts/check_large_queue_guidance.py"
+        checker.parent.mkdir()
+        checker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import argparse, json\n"
+            "from pathlib import Path\n"
+            "p=argparse.ArgumentParser(); p.add_argument('--installed-root'); "
+            "p.add_argument('--self-test', action='store_true'); "
+            "p.add_argument('--json', action='store_true'); a=p.parse_args()\n"
+            "ok=(Path(a.installed_root)/'SKILL.md').read_bytes()=="
+            "b'---\\nname: test\\ndescription: test\\n---\\n'\n"
+            "v='PASS' if ok else 'FAIL'; print(json.dumps({'schema_version':1,"
+            "'status':v,'named_mutation_outcomes':{'contract.one':v,'contract.two':v}},"
+            "sort_keys=True,separators=(',',':')))\n",
+            encoding="utf-8",
+        )
+        manifest_repository_path = "codex/overnight-workflows/install-manifest.json"
+        install_manifest = repository / manifest_repository_path
+        install_manifest.parent.mkdir(parents=True)
+        install_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "mappings": [
+                        {
+                            "canonical_source": "source/SKILL.md",
+                            "installed_path": "SKILL.md",
+                        }
+                    ],
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "add",
+                "source/SKILL.md",
+                "scripts/check_large_queue_guidance.py",
+                manifest_repository_path,
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "target"], check=True
+        )
+        target = panel_inputs.git(repository, "rev-parse", "HEAD").decode().strip()
+        subprocess.run(
+            ["git", "-C", str(repository), "branch", "review-target", target],
+            check=True,
+        )
+        (repository / "review.txt").write_text("review input\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repository), "add", "review.txt"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "head"], check=True
+        )
+        head = panel_inputs.git(repository, "rev-parse", "HEAD").decode().strip()
+        tree = panel_inputs.git(repository, "rev-parse", "HEAD^{tree}").decode().strip()
+        target_tree = (
+            panel_inputs.git(repository, "rev-parse", f"{target}^{{tree}}")
+            .decode()
+            .strip()
+        )
+        snapshot = root / "panel-snapshot"
+        snapshot.mkdir()
+        shutil.copy2(source, snapshot / "SKILL.md")
+        inventory = panel_inputs.build_inventory(snapshot, ["SKILL.md"])
+        inventory_path = root / "panel-snapshot.inventory"
+        inventory_path.write_bytes(inventory.data)
+        manifest_copy = root / "panel-install-manifest.json"
+        shutil.copy2(install_manifest, manifest_copy)
+        argv = [
+            "git",
+            "-C",
+            str(repository),
+            "diff",
+            *panel_inputs.DIFF_FLAGS,
+            target,
+            head,
+            "--",
+        ]
+        diff = subprocess.run(argv, check=True, stdout=subprocess.PIPE).stdout
+        diff_path = root / "panel-source.diff"
+        diff_path.write_bytes(diff)
+        consumer_argv = [
+            "git",
+            "-C",
+            str(repository),
+            "diff",
+            *panel_inputs.DIFF_FLAGS,
+            target,
+            target,
+            "--",
+        ]
+        consumer_diff = subprocess.run(
+            consumer_argv, check=True, stdout=subprocess.PIPE
+        ).stdout
+        consumer_diff_path = root / "panel-consumer.diff"
+        consumer_diff_path.write_bytes(consumer_diff)
+        immutable_root = root / "panel-operation/immutable-source"
+        immutable_checker = immutable_root / "scripts/check_large_queue_guidance.py"
+        immutable_checker.parent.mkdir(parents=True)
+        shutil.copy2(checker, immutable_checker)
+        immutable_inventory = panel_inputs.build_inventory(
+            immutable_root, ["scripts/check_large_queue_guidance.py"]
+        )
+        immutable_inventory_path = root / "panel-immutable.inventory"
+        immutable_inventory_path.write_bytes(immutable_inventory.data)
+        exchange_slot = immutable_root.parent / "exchange-slot"
+        exchange_slot.mkdir()
+        shutil.copy2(source, exchange_slot / "SKILL.md")
+        outcomes = {"contract.one": "PASS", "contract.two": "PASS"}
+        result = {
+            "schema_version": 1,
+            "status": "PASS",
+            "named_mutation_outcomes": outcomes,
+        }
+        staged = {
+            "argv": [
+                str(Path(sys.executable).resolve()),
+                str(immutable_checker),
+                "--installed-root",
+                str(exchange_slot),
+                "--self-test",
+                "--json",
+            ],
+            "checker_sha256": hashlib.sha256(immutable_checker.read_bytes()).hexdigest(),
+            "exit_status": 0,
+            "named_mutation_outcomes": outcomes,
+            "result": result,
+            "stderr": "",
+            "stdout": json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n",
+        }
+        operation_id = "panel-prepare-test"
+        receipt_path = root / "panel-prepare.json"
+        state_path = root / "panel-state.json"
+        manifest_digest = hashlib.sha256(manifest_copy.read_bytes()).hexdigest()
+        receipt = {
+            "schema_version": 3,
+            "operation_id": operation_id,
+            "source": {
+                "repository": str(repository),
+                "commit": head,
+                "tree": tree,
+                "manifest_path": manifest_repository_path,
+                "manifest_sha256": manifest_digest,
+            },
+            "immutable_source": {
+                "root": str(immutable_root),
+                "path": str(immutable_inventory_path),
+                "format": panel_inputs.INVENTORY_FORMAT,
+                "sha256": immutable_inventory.digest,
+                "file_count": immutable_inventory.file_count,
+                "total_bytes": immutable_inventory.total_bytes,
+                "commit": head,
+                "tree": tree,
+            },
+            "expected_live_source": {
+                "commit": head,
+                "tree": tree,
+                "manifest_path": manifest_repository_path,
+                "manifest_sha256": manifest_digest,
+            },
+            "predecessor_source": {
+                "root": str(immutable_root),
+                "path": str(immutable_inventory_path),
+                "format": panel_inputs.INVENTORY_FORMAT,
+                "sha256": immutable_inventory.digest,
+                "file_count": immutable_inventory.file_count,
+                "total_bytes": immutable_inventory.total_bytes,
+                "commit": head,
+                "tree": tree,
+            },
+            "candidate_inventory": {
+                "format": panel_inputs.INVENTORY_FORMAT,
+                "sha256": inventory.digest,
+                "file_count": inventory.file_count,
+                "total_bytes": inventory.total_bytes,
+            },
+            "preflight_live_inventory": {
+                "format": panel_inputs.INVENTORY_FORMAT,
+                "sha256": inventory.digest,
+                "file_count": inventory.file_count,
+                "total_bytes": inventory.total_bytes,
+            },
+            "evidence_snapshot": {
+                "format": panel_inputs.INVENTORY_FORMAT,
+                "sha256": inventory.digest,
+                "file_count": inventory.file_count,
+                "total_bytes": inventory.total_bytes,
+            },
+            "generation_id": inventory.digest,
+            "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+            "named_mutation_outcomes": {"staged": outcomes},
+            "staged_validation": staged,
+            "prepared_at": "2026-08-09T06:00:00Z",
+        }
+        receipt_data = (
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        receipt_path.write_bytes(receipt_data)
+        receipt_digest = hashlib.sha256(receipt_data).hexdigest()
+        state = {
+            "schema_version": 2,
+            "operation_id": operation_id,
+            "status": "PREPARED",
+            "state_root": str(root / "panel-operation-state"),
+            "install_root": str(exchange_slot),
+            "evidence_root": str(root / "panel-evidence"),
+            "source_repository": str(repository),
+            "source_commit": head,
+            "source_tree": tree,
+            "expected_live_source_commit": head,
+            "expected_live_source_tree": tree,
+            "manifest_path": manifest_repository_path,
+            "manifest_sha256": manifest_digest,
+            "manifest_schema_version": 3,
+            "expected_live_manifest_sha256": manifest_digest,
+            "expected_live_manifest_schema_version": 3,
+            "generation_id": inventory.digest,
+            "candidate_expected_paths": ["SKILL.md"],
+            "preflight_expected_paths": ["SKILL.md"],
+            "immutable_source": copy.deepcopy(receipt["immutable_source"]),
+            "predecessor_source": copy.deepcopy(receipt["predecessor_source"]),
+            "candidate_inventory": copy.deepcopy(receipt["candidate_inventory"]),
+            "preflight_inventory": copy.deepcopy(receipt["preflight_live_inventory"]),
+            "evidence_snapshot": copy.deepcopy(receipt["evidence_snapshot"]),
+            "prepare_receipt": {"path": str(receipt_path), "sha256": receipt_digest},
+            "validation": {"staged": copy.deepcopy(staged)},
+            "created_at": "2026-08-09T05:59:00Z",
+            "updated_at": "2026-08-09T06:00:00Z",
+            "events": [
+                {"at": "2026-08-09T05:59:00Z", "event": "prepare_started"},
+                {"at": "2026-08-09T06:00:00Z", "event": "prepare_completed"},
+            ],
+        }
+        state_data = (
+            json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        state_path.write_bytes(state_data)
+        return {
+            "schema_version": 3,
+            "record_type": "panel_input",
+            "panel_id": "panel-test",
+            "finalization_id": "finalization-test",
+            "recorded_at": "2026-08-09T06:00:00Z",
+            "review_boundary": panel_inputs.PREPUBLICATION_BOUNDARY,
+            "repository_roles": {
+                "installed_source": "package_source",
+                "consumer": "consumer_fixture",
+            },
+            "repositories": {
+                "package_source": {
+                    "repository": str(repository),
+                    "target_ref": "refs/heads/review-target",
+                    "target_ref_sha_at_dispatch": target,
+                    "target_sha": target,
+                    "merge_base_sha": target,
+                    "head_sha": head,
+                    "head_tree_oid": tree,
+                    "diff_argv": argv,
+                    "diff_path": str(diff_path),
+                    "diff_digest_algorithm": "SHA-256",
+                    "diff_digest": hashlib.sha256(diff).hexdigest(),
+                },
+                "consumer_fixture": {
+                    "repository": str(repository),
+                    "target_ref": "refs/heads/review-target",
+                    "target_ref_sha_at_dispatch": target,
+                    "target_sha": target,
+                    "merge_base_sha": target,
+                    "head_sha": target,
+                    "head_tree_oid": target_tree,
+                    "diff_argv": consumer_argv,
+                    "diff_path": str(consumer_diff_path),
+                    "diff_digest_algorithm": "SHA-256",
+                    "diff_digest": hashlib.sha256(consumer_diff).hexdigest(),
+                },
+            },
+            "installed": {
+                "root": str(snapshot),
+                "inventory_path": str(inventory_path),
+                "inventory_format": panel_inputs.INVENTORY_FORMAT,
+                "inventory_sha256": inventory.digest,
+                "file_count": inventory.file_count,
+                "total_bytes": inventory.total_bytes,
+                "generation_id": inventory.digest,
+                "source_repository": str(repository),
+                "source_commit": head,
+                "source_tree": tree,
+                "install_manifest_path": str(manifest_copy),
+                "install_manifest_repository_path": manifest_repository_path,
+                "install_manifest_sha256": manifest_digest,
+            },
+            "prepare": {
+                "operation_id": operation_id,
+                "receipt_path": str(receipt_path),
+                "receipt_sha256": receipt_digest,
+                "state_path": str(state_path),
+                "state_sha256": hashlib.sha256(state_data).hexdigest(),
+                "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+            },
+            "scope": copy.deepcopy(panel_inputs.PREPUBLICATION_SCOPE),
+        }
+
+    def source_review_evidence(
+        self,
+        root: Path,
+        panel_record: dict[str, object],
+        repository_heads: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        root.mkdir(exist_ok=True)
+        panel_path = root / "panel-input.jsonl"
+        panel_data = (
+            json.dumps(panel_record, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        panel_path.write_bytes(panel_data)
+        raw_root = root / "raw-inputs"
+        raw_root.mkdir()
+        (raw_root / "panel-input.jsonl").write_bytes(panel_data)
+        (raw_root / "source.txt").write_bytes(b"source review input\n")
+        inventory = panel_inputs.build_inventory(raw_root)
+        inventory_path = root / "raw-input.inventory"
+        inventory_path.write_bytes(inventory.data)
+        validation_path = root / "panel-input-validation-canonical.json"
+        validation_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "PASS",
+                    "named_mutation_outcomes": {"schema3.integration": "PASS"},
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        panel_digest = hashlib.sha256(panel_data).hexdigest()
+        seal_path = root / "raw-input-seal.json"
+        seal = {
+            "schema_version": 1,
+            "record_type": "raw_input_seal",
+            "review_id": "review-test",
+            "sealed_at": "2026-08-09T06:01:00Z",
+            "inventory_format": panel_inputs.INVENTORY_FORMAT,
+            "inventory_path": str(inventory_path),
+            "inventory_sha256": inventory.digest,
+            "raw_input_max_files": 100,
+            "raw_input_max_total_bytes": 1000000,
+            "raw_input_actual_files": inventory.file_count,
+            "raw_input_actual_total_bytes": inventory.total_bytes,
+            "panel_input_path": str(panel_path),
+            "panel_input_sha256": panel_digest,
+            "panel_input_validation_sha256": hashlib.sha256(
+                validation_path.read_bytes()
+            ).hexdigest(),
+            "source_guidance_status_before_review": "NOT_REVIEWED",
+            "live_installation_status": "UNCHANGED_PREDECESSOR",
+            "live_publication_status": "NOT_RUN",
+        }
+        seal_path.write_text(
+            json.dumps(seal, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        installed = panel_record["installed"]
+        prepare = panel_record["prepare"]
+        assert isinstance(installed, dict) and isinstance(prepare, dict)
+        payload = {
+            "review_id": "review-test",
+            "panel_id": panel_record["panel_id"],
+            "review_boundary": panel_record["review_boundary"],
+            "repository_heads": repository_heads,
+            "prepared_generation_id": installed["generation_id"],
+            "prepare_receipt_sha256": prepare["receipt_sha256"],
+            "panel_input_path": str(panel_path),
+            "panel_input_sha256": panel_digest,
+            "raw_input_inventory_path": str(inventory_path),
+            "raw_input_inventory_sha256": inventory.digest,
+            "raw_input_seal_path": str(seal_path),
+            "raw_input_seal_sha256": hashlib.sha256(seal_path.read_bytes()).hexdigest(),
+            "raw_input_max_files": seal["raw_input_max_files"],
+            "raw_input_max_total_bytes": seal["raw_input_max_total_bytes"],
+            "raw_input_actual_files": inventory.file_count,
+            "raw_input_actual_total_bytes": inventory.total_bytes,
+            "expected_reports": 1,
+            "received_reports": 0,
+            "expected_challenge_responses": 1,
+            "received_challenge_responses": 0,
+            "expected_judges": 1,
+            "received_judges": 0,
+            "live_installation_status": "UNCHANGED_PREDECESSOR",
+            "source_guidance_status": "NOT_REVIEWED",
+            "state": "SOURCE_REVIEW_REGISTERED",
+            "next_action": "dispatch reviewers",
+        }
+        return payload, inventory.digest
+
+    def make_frozen_legacy_sealed_manifest(self, root: Path) -> Path:
+        """Reframe one valid three-phase v2 lifecycle as archived v1 bytes."""
+
+        path = self.make_manifest(root, "legacy-sealed.jsonl")
+        raw_digest = self.append_raw_input(path)
+        self.seal(path, "dispatch", raw_digest)
+        self.append_generic_review(path)
+        self.seal(path, "judgment", raw_digest)
+        self.append_generic_summary(path, raw_digest)
+        self.seal(path, "acceptance", raw_digest)
+        records = self.records(path)
+        for record in records:
+            record["schema_version"] = manifest.LEGACY_SCHEMA_VERSION
+            record["manifest_schema"] = manifest.LEGACY_MANIFEST_SCHEMA
+        for index, record in enumerate(records):
+            if record["record_type"] == "judge_verdict_registered":
+                dispatch = next(
+                    item
+                    for item in records[:index]
+                    if item["record_type"] == "manifest_prefix_registered"
+                    and item["phase"] == "dispatch"
+                )
+                judge_path = root / "legacy-judge.json"
+                judge_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "record_type": manifest.JUDGE_RECEIPT_TYPE,
+                            "review_id": record["review_id"],
+                            "raw_input_inventory_sha256": raw_digest,
+                            "dispatch_manifest_prefix_sha256": dispatch[
+                                "manifest_prefix_sha256"
+                            ],
+                            **manifest.judgment_input_identity(records[:index]),
+                            "judge_role": record["judge_role"],
+                            "verdict": record["verdict"],
+                            "recorded_at": "2026-08-09T00:00:03Z",
+                            "findings_unresolved": 0,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                record["path"] = str(judge_path)
+                record["sha256"] = hashlib.sha256(judge_path.read_bytes()).hexdigest()
+            if record["record_type"] != "manifest_prefix_registered":
+                continue
+            phase = str(record["phase"])
+            prefix_data = b"".join(
+                (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                for item in records[:index]
+            )
+            prefix_path = root / f"legacy-prefix.{phase}.jsonl"
+            prefix_path.write_bytes(prefix_data)
+            record.update(
+                {
+                    "manifest_prefix_path": str(prefix_path),
+                    "manifest_prefix_sha256": hashlib.sha256(prefix_data).hexdigest(),
+                    "manifest_prefix_byte_count": len(prefix_data),
+                    "manifest_prefix_record_count": index,
+                    "manifest_prefix_last_sequence": records[index - 1]["sequence"],
+                }
+            )
+            receipt = {
+                "schema_version": manifest.LEGACY_SCHEMA_VERSION,
+                "record_type": manifest.PREFIX_RECEIPT_TYPE,
+                "phase": phase,
+                "manifest_prefix_path": record["manifest_prefix_path"],
+                "manifest_prefix_sha256": record["manifest_prefix_sha256"],
+                "manifest_prefix_byte_count": record["manifest_prefix_byte_count"],
+                "manifest_prefix_record_count": record["manifest_prefix_record_count"],
+                "manifest_prefix_last_sequence": record["manifest_prefix_last_sequence"],
+                "finalization_id": record["finalization_id"],
+                "writer_controller_id": record["writer_controller_id"],
+                "review_id": record["review_id"],
+                "raw_input_inventory_sha256": record[
+                    "raw_input_inventory_sha256"
+                ],
+            }
+            receipt_path = root / f"legacy-prefix.{phase}.json"
+            receipt_path.write_text(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            record["receipt_path"] = str(receipt_path)
+            record["receipt_sha256"] = hashlib.sha256(
+                receipt_path.read_bytes()
+            ).hexdigest()
+        self.write_records(path, records)
+        return path
+
     def test_valid_controller_append_round_trips_and_exact_retry_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-manifest-") as raw:
             path = self.make_manifest(Path(raw).resolve())
@@ -280,6 +803,60 @@ class FinalizationManifestTests(unittest.TestCase):
             self.write_records(path, project_specific)
             with self.assertRaisesRegex(manifest.PublicationError, "source_review_input_registered"):
                 manifest.validate_manifest(path)
+
+    def test_real_schema3_panel_drives_generic_v2_dispatch_without_mocks(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-schema3-integration-") as raw:
+            root = Path(raw).resolve()
+            panel_record = self.make_real_schema3_panel(root)
+            self.assertEqual([], panel_inputs.validate_panel_input(panel_record, verify=True))
+            roles = panel_record["repository_roles"]
+            repositories = panel_record["repositories"]
+            assert isinstance(roles, dict) and isinstance(repositories, dict)
+            repository_heads = {
+                role: {
+                    "repository_key": repository_key,
+                    "head_sha": repositories[repository_key]["head_sha"],
+                }
+                for role, repository_key in roles.items()
+            }
+            evidence_root = root / "schema3-evidence"
+            payload, raw_digest = self.source_review_evidence(
+                evidence_root, panel_record, repository_heads
+            )
+            path = self.make_manifest(root, "schema3-finalization.jsonl")
+            manifest.append_finalization_record(
+                path,
+                record_type="source_review_input_registered",
+                writer_controller_id="controller-test",
+                payload=payload,
+            )
+            sealed = self.seal(path, "dispatch", raw_digest)
+            self.assertEqual("dispatch", sealed["record"]["phase"])
+            self.assertEqual(manifest.MANIFEST_SCHEMA, manifest.validate_manifest(path)["manifest_schema"])
+
+            archived_panel = copy.deepcopy(panel_record)
+            archived_panel["schema_version"] = 2
+            archived_panel.pop("repository_roles")
+            self.assertEqual(
+                [], panel_inputs.validate_panel_input(archived_panel, verify=True)
+            )
+            archived_evidence = root / "schema2-evidence"
+            archived_payload, archived_digest = self.source_review_evidence(
+                archived_evidence, archived_panel, repository_heads
+            )
+            archived_attempt = self.make_manifest(root, "schema2-attempt.jsonl")
+            manifest.append_finalization_record(
+                archived_attempt,
+                record_type="source_review_input_registered",
+                writer_controller_id="controller-test",
+                payload=archived_payload,
+            )
+            before = archived_attempt.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "schema-3 panel repository role map"
+            ):
+                self.seal(archived_attempt, "dispatch", archived_digest)
+            self.assertEqual(before, archived_attempt.read_bytes())
 
     def test_legacy_project_manifest_is_read_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-legacy-") as raw:
@@ -352,6 +929,73 @@ class FinalizationManifestTests(unittest.TestCase):
                     payload={"note": "must-not-append"},
                 )
             self.assertEqual(before, path.read_bytes())
+
+    def test_frozen_legacy_phase_receipts_remain_readable_but_not_writable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-legacy-sealed-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_frozen_legacy_sealed_manifest(root)
+            baseline_manifest = path.read_bytes()
+            identity = manifest.validate_manifest(path)
+            self.assertEqual(9, identity["record_count"])
+            registrations = [
+                record
+                for record in self.records(path)
+                if record["record_type"] == "manifest_prefix_registered"
+            ]
+            self.assertEqual(
+                ["dispatch", "judgment", "acceptance"],
+                [record["phase"] for record in registrations],
+            )
+            self.assertTrue(
+                all(
+                    json.loads(Path(str(record["receipt_path"])).read_text())["schema_version"]
+                    == manifest.LEGACY_SCHEMA_VERSION
+                    for record in registrations
+                )
+            )
+            with self.assertRaisesRegex(manifest.PublicationError, "read-only"):
+                manifest.seal_manifest_prefix(
+                    path,
+                    writer_controller_id="legacy-controller",
+                    review_id="review-test",
+                    phase="acceptance",
+                    raw_input_inventory_sha256=str(
+                        registrations[-1]["raw_input_inventory_sha256"]
+                    ),
+                    prefix_output=root / "forbidden-prefix.jsonl",
+                    receipt_output=root / "forbidden-receipt.json",
+                )
+            self.assertEqual(baseline_manifest, path.read_bytes())
+
+            wrong_schema = Path(str(registrations[0]["receipt_path"]))
+            baseline_receipt = wrong_schema.read_bytes()
+            receipt = json.loads(baseline_receipt)
+            receipt["schema_version"] = manifest.SCHEMA_VERSION
+            wrong_schema.write_text(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            mutated_records = self.records(path)
+            mutated_records[2]["receipt_sha256"] = hashlib.sha256(
+                wrong_schema.read_bytes()
+            ).hexdigest()
+            self.write_records(path, mutated_records)
+            with self.assertRaisesRegex(manifest.PublicationError, "does not match"):
+                manifest.validate_manifest(path)
+            wrong_schema.write_bytes(baseline_receipt)
+            path.write_bytes(baseline_manifest)
+
+            acceptance_receipt = Path(str(registrations[-1]["receipt_path"]))
+            baseline_acceptance_receipt = acceptance_receipt.read_bytes()
+            acceptance_receipt.write_bytes(baseline_acceptance_receipt + b"drift")
+            with self.assertRaisesRegex(manifest.PublicationError, "receipt digest drifted"):
+                manifest.validate_manifest(path)
+            acceptance_receipt.write_bytes(baseline_acceptance_receipt)
+
+            acceptance_prefix = Path(str(registrations[-1]["manifest_prefix_path"]))
+            acceptance_prefix.write_bytes(acceptance_prefix.read_bytes() + b"drift")
+            with self.assertRaisesRegex(manifest.PublicationError, "snapshot bytes drifted"):
+                manifest.validate_manifest(path)
 
     def test_controller_cli_initializes_and_appends_known_rows_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-cli-") as raw:
