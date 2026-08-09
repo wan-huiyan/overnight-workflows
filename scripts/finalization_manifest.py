@@ -29,8 +29,10 @@ else:
     from validate_panel_inputs import validate_panel_input
 
 
-SCHEMA_VERSION = 1
-MANIFEST_SCHEMA = "doodlerun-overnight-finalization-v1"
+LEGACY_SCHEMA_VERSION = 1
+LEGACY_MANIFEST_SCHEMA = "doodlerun-overnight-finalization-v1"
+SCHEMA_VERSION = 2
+MANIFEST_SCHEMA = "overnight-finalization-v2"
 PREFIX_RECEIPT_TYPE = "manifest_prefix_receipt"
 PHASE_ORDER = ("dispatch", "judgment", "acceptance")
 JUDGE_RECEIPT_TYPE = "finalization_judge_verdict"
@@ -49,7 +51,9 @@ JUDGE_RECEIPT_FIELDS = {
     "findings_unresolved",
 }
 HEX_64_RE = re.compile(r"[0-9a-f]{64}\Z")
+GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+REPOSITORY_IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,255}\Z")
 RFC3339_UTC_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
 )
@@ -125,15 +129,15 @@ def _fields(value: str) -> frozenset[str]:
     return frozenset(value.split())
 
 
-# Controller-owned schemas are exact.  The four source-review schemas preserve
-# the already-used durable row shapes, while the smaller artifact schemas serve
-# later postpublication panels.  Publisher rows have large, independently
-# validated nested receipts, so this grammar fixes their identity fields and
-# required joins while permitting those publisher-owned evidence fields.
+# Controller-owned schemas are exact.  New source-review input uses generic
+# repository roles; the separate legacy table below preserves the archived
+# project-specific input shape.  Smaller artifact schemas serve later
+# postpublication panels.  Publisher rows have large, independently validated
+# nested receipts, so this grammar fixes their identity fields and joins.
 RECORD_SCHEMAS: Dict[str, RecordSchema] = {
     "source_review_input_registered": RecordSchema(
         _fields(
-            "review_id panel_id review_boundary global_head_sha doodlerun_head_sha "
+            "review_id panel_id review_boundary repository_heads "
             "prepared_generation_id prepare_receipt_sha256 panel_input_path "
             "panel_input_sha256 raw_input_inventory_path raw_input_inventory_sha256 "
             "raw_input_seal_path raw_input_seal_sha256 raw_input_max_files "
@@ -279,6 +283,25 @@ RECORD_SCHEMAS: Dict[str, RecordSchema] = {
     ),
 }
 
+# The project-specific v1 grammar remains readable so archived evidence can be
+# reproduced.  New manifests and every mutation path use only the generic v2
+# schema above.
+LEGACY_RECORD_SCHEMAS: Dict[str, RecordSchema] = dict(RECORD_SCHEMAS)
+LEGACY_RECORD_SCHEMAS["source_review_input_registered"] = RecordSchema(
+    _fields(
+        "review_id panel_id review_boundary global_head_sha doodlerun_head_sha "
+        "prepared_generation_id prepare_receipt_sha256 panel_input_path "
+        "panel_input_sha256 raw_input_inventory_path raw_input_inventory_sha256 "
+        "raw_input_seal_path raw_input_seal_sha256 raw_input_max_files "
+        "raw_input_max_total_bytes raw_input_actual_files "
+        "raw_input_actual_total_bytes expected_reports received_reports "
+        "expected_challenge_responses received_challenge_responses "
+        "expected_judges received_judges live_installation_status "
+        "source_guidance_status state next_action"
+    ),
+    identity_fields=("review_id",),
+)
+
 CONTROLLER_RECORD_TYPES = frozenset(
     set(RECORD_SCHEMAS)
     - {
@@ -410,9 +433,50 @@ def _validate_artifact_identity(value: Any, label: str) -> None:
             raise PublicationError(f"finalization {label}.{field} must be nonnegative")
 
 
-def _validate_record_payload(record: Mapping[str, Any], row: int) -> None:
+def _validate_repository_heads(value: Any, label: str) -> None:
+    if not isinstance(value, dict) or not value:
+        raise PublicationError(f"{label} must be a nonempty role-to-repository map")
+    repository_keys: List[str] = []
+    for role, identity in value.items():
+        if not isinstance(role, str) or not REPOSITORY_IDENTITY_RE.fullmatch(role):
+            raise PublicationError(f"{label} role must be a normalized identity")
+        if not isinstance(identity, dict) or set(identity) != {
+            "repository_key",
+            "head_sha",
+        }:
+            raise PublicationError(
+                f"{label}.{role} must have exact repository_key and head_sha fields"
+            )
+        repository_key = identity.get("repository_key")
+        if (
+            not isinstance(repository_key, str)
+            or not REPOSITORY_IDENTITY_RE.fullmatch(repository_key)
+        ):
+            raise PublicationError(f"{label}.{role} key must be a normalized identity")
+        repository_keys.append(repository_key)
+        if not isinstance(identity.get("head_sha"), str) or not GIT_OID_RE.fullmatch(
+            identity["head_sha"]
+        ):
+            raise PublicationError(f"{label}.{role} head_sha must be a full Git object ID")
+    if len(repository_keys) != len(set(repository_keys)):
+        raise PublicationError(f"{label} repository keys must be unique")
+    if "installed_source" not in value:
+        raise PublicationError(f"{label} must declare the installed_source role")
+
+
+def _validate_record_payload(
+    record: Mapping[str, Any],
+    row: int,
+    *,
+    manifest_schema: str = MANIFEST_SCHEMA,
+) -> None:
     record_type = record["record_type"]
-    schema = RECORD_SCHEMAS.get(record_type)
+    schemas = (
+        LEGACY_RECORD_SCHEMAS
+        if manifest_schema == LEGACY_MANIFEST_SCHEMA
+        else RECORD_SCHEMAS
+    )
+    schema = schemas.get(record_type)
     if schema is None:
         raise PublicationError(
             f"finalization manifest row {row} has unknown record_type: {record_type!r}"
@@ -477,6 +541,20 @@ def _validate_record_payload(record: Mapping[str, Any], row: int) -> None:
         ):
             _require_positive_int(record[field], field)
     if record_type == "source_review_input_registered":
+        if manifest_schema == MANIFEST_SCHEMA:
+            _validate_repository_heads(
+                record.get("repository_heads"),
+                f"finalization row {row} repository_heads",
+            )
+        else:
+            for field in ("global_head_sha", "doodlerun_head_sha"):
+                if (
+                    not isinstance(record.get(field), str)
+                    or not GIT_OID_RE.fullmatch(record[field])
+                ):
+                    raise PublicationError(
+                        f"finalization legacy row {row} {field} must be a full Git object ID"
+                    )
         for field in (
             "panel_input_sha256",
             "prepare_receipt_sha256",
@@ -895,6 +973,161 @@ def judgment_input_identity(
     }
 
 
+def _raw_input_tree_closure(
+    root: Path, *, label: str
+) -> Tuple[
+    Dict[str, Path],
+    set[str],
+    Dict[str, Tuple[int, int, int, int, int]],
+    Dict[str, Tuple[int, int, int, int, int, int, int]],
+]:
+    """Enumerate one exact no-follow regular-file/directory closure."""
+    root = _safe_absolute(root, label=f"{label} root", must_exist=True)
+    root_stat = os.lstat(root)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise PublicationError(f"{label} root must be a directory")
+    files: Dict[str, Path] = {}
+    observed_files: Dict[Path, Tuple[int, int, int, int, int, int, int]] = {}
+    directories = {"."}
+    observed_directories: Dict[Path, Tuple[int, int, int, int, int]] = {
+        root: (
+            root_stat.st_dev,
+            root_stat.st_ino,
+            stat.S_IFMT(root_stat.st_mode),
+            root_stat.st_mtime_ns,
+            root_stat.st_ctime_ns,
+        )
+    }
+    pending: List[Tuple[Path, PurePosixPath]] = [(root, PurePosixPath("."))]
+    while pending:
+        directory, relative_directory = pending.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise PublicationError(f"{label} tree cannot be enumerated: {exc}") from exc
+        for entry in entries:
+            if any(ord(character) < 32 or ord(character) == 127 for character in entry.name):
+                raise PublicationError(f"{label} tree contains a control-character name")
+            relative = (
+                PurePosixPath(entry.name)
+                if relative_directory == PurePosixPath(".")
+                else relative_directory / entry.name
+            )
+            name = relative.as_posix()
+            try:
+                observed = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise PublicationError(f"{label} tree entry cannot be inspected: {name}") from exc
+            entry_path = directory / entry.name
+            if stat.S_ISLNK(observed.st_mode):
+                raise PublicationError(f"{label} tree contains a symlink: {name}")
+            if stat.S_ISDIR(observed.st_mode):
+                directories.add(name)
+                observed_directories[entry_path] = (
+                    observed.st_dev,
+                    observed.st_ino,
+                    stat.S_IFMT(observed.st_mode),
+                    observed.st_mtime_ns,
+                    observed.st_ctime_ns,
+                )
+                pending.append((entry_path, relative))
+            elif stat.S_ISREG(observed.st_mode):
+                if observed.st_nlink != 1:
+                    raise PublicationError(
+                        f"{label} tree file must be single-link: {name}"
+                    )
+                files[name] = entry_path
+                observed_files[entry_path] = (
+                    observed.st_dev,
+                    observed.st_ino,
+                    stat.S_IFMT(observed.st_mode),
+                    observed.st_nlink,
+                    observed.st_size,
+                    observed.st_mtime_ns,
+                    observed.st_ctime_ns,
+                )
+            else:
+                raise PublicationError(
+                    f"{label} tree contains a non-regular entry: {name}"
+                )
+    for directory, identity in observed_directories.items():
+        after = os.lstat(directory)
+        if (
+            after.st_dev,
+            after.st_ino,
+            stat.S_IFMT(after.st_mode),
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) != identity:
+            raise PublicationError(f"{label} tree changed while it was enumerated")
+    for path, identity in observed_files.items():
+        after = os.lstat(path)
+        if (
+            after.st_dev,
+            after.st_ino,
+            stat.S_IFMT(after.st_mode),
+            after.st_nlink,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) != identity:
+            raise PublicationError(f"{label} tree changed while it was enumerated")
+    directory_identities = {
+        (
+            "."
+            if directory == root
+            else directory.relative_to(root).as_posix()
+        ): identity
+        for directory, identity in observed_directories.items()
+    }
+    file_identities = {
+        path.relative_to(root).as_posix(): identity
+        for path, identity in observed_files.items()
+    }
+    return files, directories, directory_identities, file_identities
+
+
+def _verify_raw_input_closure(
+    root: Path,
+    entries: Sequence[Any],
+    *,
+    label: str,
+) -> int:
+    expected_files = {str(entry.path) for entry in entries}
+    expected_directories = {"."}
+    for name in expected_files:
+        relative = PurePosixPath(name)
+        for depth in range(1, len(relative.parts)):
+            expected_directories.add(PurePosixPath(*relative.parts[:depth]).as_posix())
+    files, directories, directory_identities, file_identities = _raw_input_tree_closure(
+        root, label=label
+    )
+    if set(files) != expected_files or directories != expected_directories:
+        raise PublicationError(
+            f"{label} tree differs from the exact inventory closure"
+        )
+    total_bytes = 0
+    for index, entry in enumerate(entries, 1):
+        data = _read_regular_bytes(files[str(entry.path)], label=f"{label} row {index}")
+        if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.sha256:
+            raise PublicationError(f"{label} row {index} bytes drifted")
+        total_bytes += entry.size
+    (
+        after_files,
+        after_directories,
+        after_directory_identities,
+        after_file_identities,
+    ) = _raw_input_tree_closure(root, label=label)
+    if (
+        set(after_files) != expected_files
+        or after_directories != expected_directories
+        or after_directory_identities != directory_identities
+        or after_file_identities != file_identities
+    ):
+        raise PublicationError(f"{label} tree changed while its members were read")
+    return total_bytes
+
+
 def _verify_generic_raw_input(record: Mapping[str, Any]) -> None:
     inventory_path = Path(str(record["inventory_path"]))
     inventory_data = _read_regular_bytes(
@@ -909,17 +1142,9 @@ def _verify_generic_raw_input(record: Mapping[str, Any]) -> None:
             f"postpublication raw-input inventory is malformed: {exc}"
         ) from exc
     raw_root = inventory_path.parent / "raw-inputs"
-    total_bytes = 0
-    for index, entry in enumerate(entries, 1):
-        data = _read_regular_bytes(
-            raw_root.joinpath(*PurePosixPath(entry.path).parts),
-            label=f"postpublication raw-input row {index}",
-        )
-        if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.sha256:
-            raise PublicationError(
-                f"postpublication raw-input inventory row {index} bytes drifted"
-            )
-        total_bytes += entry.size
+    total_bytes = _verify_raw_input_closure(
+        raw_root, entries, label="postpublication raw-input"
+    )
     if (
         len(entries) != record["raw_input_actual_files"]
         or total_bytes != record["raw_input_actual_total_bytes"]
@@ -991,60 +1216,20 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
     )
     if hashlib.sha256(inventory_data).hexdigest() != record["raw_input_inventory_sha256"]:
         raise PublicationError("source-review raw-input inventory digest drifted")
-    if not inventory_data or not inventory_data.endswith(b"\n") or inventory_data.endswith(b"\n\n"):
-        raise PublicationError("source-review raw-input inventory framing is invalid")
     root = inventory_path.parent / "raw-inputs"
-    names: List[str] = []
-    inventory_members: Dict[str, bytes] = {}
-    total_bytes = 0
-    for row, line in enumerate(inventory_data[:-1].split(b"\n"), 1):
-        try:
-            digest_raw, size_raw, name_raw = line.split(b"\t")
-            digest = digest_raw.decode("ascii")
-            size_text = size_raw.decode("ascii")
-            name = name_raw.decode("utf-8")
-        except (ValueError, UnicodeError) as exc:
-            raise PublicationError(
-                f"source-review raw-input inventory row {row} is malformed"
-            ) from exc
-        _require_sha256(digest, f"raw-input row {row} SHA-256")
-        if not size_text.isascii() or not size_text.isdigit() or (
-            len(size_text) > 1 and size_text.startswith("0")
-        ):
-            raise PublicationError(
-                f"source-review raw-input inventory row {row} size is malformed"
-            )
-        size = int(size_text)
-        relative = PurePosixPath(name)
-        if (
-            not name
-            or relative.is_absolute()
-            or relative.as_posix() != name
-            or any(part in {"", ".", ".."} for part in relative.parts)
-            or any(ord(character) < 32 or ord(character) == 127 for character in name)
-        ):
-            raise PublicationError(
-                f"source-review raw-input inventory row {row} path is unsafe"
-            )
-        artifact_path = root.joinpath(*relative.parts)
-        artifact = _read_regular_bytes(
-            artifact_path, label=f"source-review raw-input row {row}"
-        )
-        if len(artifact) != size or hashlib.sha256(artifact).hexdigest() != digest:
-            raise PublicationError(
-                f"source-review raw-input inventory row {row} bytes drifted"
-            )
-        names.append(name)
-        inventory_members[name] = artifact
-        total_bytes += size
-    if names != sorted(names, key=lambda value: value.encode("utf-8")) or len(names) != len(
-        set(names)
-    ):
-        raise PublicationError("source-review raw-input inventory paths are not canonical")
+    try:
+        entries = parse_inventory(inventory_data)
+    except PublicationError as exc:
+        raise PublicationError(
+            f"source-review raw-input inventory is malformed: {exc}"
+        ) from exc
+    total_bytes = _verify_raw_input_closure(
+        root, entries, label="source-review raw-input"
+    )
     if (
-        len(names) != record["raw_input_actual_files"]
+        len(entries) != record["raw_input_actual_files"]
         or total_bytes != record["raw_input_actual_total_bytes"]
-        or len(names) > record["raw_input_max_files"]
+        or len(entries) > record["raw_input_max_files"]
         or total_bytes > record["raw_input_max_total_bytes"]
     ):
         raise PublicationError("source-review raw-input inventory counts drifted")
@@ -1054,7 +1239,14 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
         record.get("panel_input_sha256"),
         "source-review panel input",
     )
-    if inventory_members.get("panel-input.jsonl") != panel_data:
+    reviewer_panel_path = root / "panel-input.jsonl"
+    if (
+        "panel-input.jsonl" not in {entry.path for entry in entries}
+        or _read_regular_bytes(
+            reviewer_panel_path, label="source-review reviewer panel input"
+        )
+        != panel_data
+    ):
         raise PublicationError(
             "source-review raw inputs must contain the exact reviewer panel-input copy"
         )
@@ -1079,6 +1271,30 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
             "source-review panel input fails its canonical contract: "
             + " | ".join(panel_errors)
         )
+    if "repository_heads" in record:
+        repositories = panel_record.get("repositories")
+        roles = panel_record.get("repository_roles")
+        if (
+            panel_record.get("schema_version") != 3
+            or not isinstance(repositories, dict)
+            or not isinstance(roles, dict)
+        ):
+            raise PublicationError(
+                "generic source review requires a schema-3 panel repository role map"
+            )
+        reproduced_heads = {
+            role: {
+                "repository_key": repository_key,
+                "head_sha": repositories.get(repository_key, {}).get("head_sha")
+                if isinstance(repositories.get(repository_key), dict)
+                else None,
+            }
+            for role, repository_key in roles.items()
+        }
+        if record.get("repository_heads") != reproduced_heads:
+            raise PublicationError(
+                "source-review repository_heads differ from the validated panel role map"
+            )
     seal_path = Path(str(record["raw_input_seal_path"]))
     seal_data = _read_regular_bytes(seal_path, label="source-review raw-input seal")
     if hashlib.sha256(seal_data).hexdigest() != record["raw_input_seal_sha256"]:
@@ -1585,6 +1801,8 @@ def parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     finalization_id: Optional[str] = None
     writer_controller_id: Optional[str] = None
+    manifest_schema: Optional[str] = None
+    envelope_schema_version: Optional[int] = None
     raw_digest_by_review: Dict[str, str] = {}
     seen_identities: Dict[Tuple[Any, ...], Mapping[str, Any]] = {}
     for row, raw_line in enumerate(data[:-1].split(b"\n"), 1):
@@ -1601,9 +1819,26 @@ def parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
         for field in ENVELOPE_FIELDS:
             if field not in value:
                 raise PublicationError(f"finalization manifest row {row} lacks {field}")
-        if type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA_VERSION:
+        if row == 1:
+            if type(value.get("schema_version")) is not int:
+                raise PublicationError(
+                    "finalization manifest header has unsupported schema identity"
+                )
+            observed_contract = (value.get("schema_version"), value.get("manifest_schema"))
+            if observed_contract == (SCHEMA_VERSION, MANIFEST_SCHEMA):
+                envelope_schema_version, manifest_schema = observed_contract
+            elif observed_contract == (LEGACY_SCHEMA_VERSION, LEGACY_MANIFEST_SCHEMA):
+                envelope_schema_version, manifest_schema = observed_contract
+            else:
+                raise PublicationError(
+                    "finalization manifest header has unsupported schema identity"
+                )
+        elif (
+            type(value.get("schema_version")) is not int
+            or value.get("schema_version") != envelope_schema_version
+        ):
             raise PublicationError(f"finalization manifest row {row} has schema drift")
-        if value.get("manifest_schema") != MANIFEST_SCHEMA:
+        if value.get("manifest_schema") != manifest_schema:
             raise PublicationError(f"finalization manifest row {row} has manifest-schema drift")
         if type(value.get("sequence")) is not int or value["sequence"] != row:
             raise PublicationError(
@@ -1639,9 +1874,15 @@ def parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
                 raise PublicationError("finalization manifest mixes finalization IDs")
             if current_writer != writer_controller_id:
                 raise PublicationError("finalization manifest mixes writer controller IDs")
-            _validate_record_payload(value, row)
+            assert manifest_schema is not None
+            _validate_record_payload(value, row, manifest_schema=manifest_schema)
             _validate_record_lifecycle(records, value)
-            schema = RECORD_SCHEMAS[record_type]
+            schemas = (
+                LEGACY_RECORD_SCHEMAS
+                if manifest_schema == LEGACY_MANIFEST_SCHEMA
+                else RECORD_SCHEMAS
+            )
+            schema = schemas[record_type]
             identity = (record_type,) + tuple(value.get(field) for field in schema.identity_fields)
             previous = seen_identities.get(identity)
             if previous is not None and dict(previous) != value:
@@ -1697,7 +1938,7 @@ def _prefix_identity(
         "last_record_type": records[-1]["record_type"],
         "finalization_id": records[0]["finalization_id"],
         "writer_controller_id": records[0]["writer_controller_id"],
-        "manifest_schema": MANIFEST_SCHEMA,
+        "manifest_schema": records[0]["manifest_schema"],
         "review_id": review_id,
         "raw_input_inventory_sha256": raw_digest,
     }
@@ -1946,6 +2187,10 @@ def append_finalization_record(
         if os.fstat(descriptor).st_nlink != 1:
             raise PublicationError("finalization manifest gained a hard link during append")
         records = parse_finalization_jsonl(original, Path(manifest_path))
+        if records[0]["manifest_schema"] != MANIFEST_SCHEMA:
+            raise PublicationError(
+                "legacy finalization manifests are read-only; initialize a generic v2 manifest"
+            )
         _validate_registrations(Path(manifest_path), original, records)
         stable_writer = records[0]["writer_controller_id"]
         if writer_controller_id is not None and writer_controller_id != stable_writer:
@@ -2096,6 +2341,10 @@ def seal_manifest_prefix(
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         original = _read_descriptor(descriptor)
         records = parse_finalization_jsonl(original, manifest_path)
+        if records[0]["manifest_schema"] != MANIFEST_SCHEMA:
+            raise PublicationError(
+                "legacy finalization manifests are read-only; initialize a generic v2 manifest"
+            )
         _validate_registrations(manifest_path, original, records)
         if records[0]["writer_controller_id"] != writer_controller_id:
             raise PublicationError("seal writer does not match manifest header")

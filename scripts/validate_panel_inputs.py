@@ -35,10 +35,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts/panel_input_fixtures.json"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
-IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]*$")
+IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,255}$")
 UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$")
 DIFF_FLAGS = ["--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--diff-algorithm=myers", "--unified=3"]
-PANEL_FIELDS = {"schema_version", "record_type", "panel_id", "finalization_id", "recorded_at", "review_boundary", "repositories", "installed", "prepare", "scope"}
+PANEL_FIELDS = {"schema_version", "record_type", "panel_id", "finalization_id", "recorded_at", "review_boundary", "repository_roles", "repositories", "installed", "prepare", "scope"}
+LEGACY_PANEL_FIELDS = PANEL_FIELDS - {"repository_roles"}
 REPO_FIELDS = {"repository", "target_ref", "target_ref_sha_at_dispatch", "target_sha", "merge_base_sha", "head_sha", "head_tree_oid", "diff_argv", "diff_path", "diff_digest_algorithm", "diff_digest"}
 INSTALL_FIELDS = {"root", "inventory_path", "inventory_format", "inventory_sha256", "file_count", "total_bytes", "generation_id", "source_repository", "source_commit", "source_tree", "install_manifest_path", "install_manifest_repository_path", "install_manifest_sha256"}
 PREPARE_FIELDS = {"operation_id", "receipt_path", "receipt_sha256", "state_path", "state_sha256", "mutation_outcome"}
@@ -73,7 +74,6 @@ PREPUBLICATION_SCOPE = {
     "implicit_model_selection": "UNCHECKED",
 }
 REVIEW_BOUNDARIES = {PREPUBLICATION_BOUNDARY: PREPUBLICATION_SCOPE}
-BOUNDARY_REPOSITORIES = {PREPUBLICATION_BOUNDARY: {"global", "doodlerun"}}
 STAGED_VALIDATION_FIELDS = {"argv", "checker_sha256", "exit_status", "named_mutation_outcomes", "result", "stderr", "stdout"}
 IMMUTABLE_SOURCE_FIELDS = {
     "root",
@@ -85,7 +85,6 @@ IMMUTABLE_SOURCE_FIELDS = {
     "commit",
     "tree",
 }
-_STAGED_EXECUTION_CACHE: dict[tuple[str, ...], tuple[int, bytes, bytes]] = {}
 OMISSION_NAMES = {
     "missing_target_ref", "missing_target_ref_sha", "missing_diff_argv", "missing_diff_digest",
     "missing_inventory_path", "missing_inventory_digest", "missing_inventory_count",
@@ -99,7 +98,8 @@ OMISSION_NAMES = {
     "missing_scope_reserve", "missing_scope_publish", "missing_scope_final_fact_review",
     "missing_scope_postpublication_panel", "missing_scope_accept",
     "missing_scope_implicit_model_selection",
-    "missing_global_repository", "missing_doodlerun_repository",
+    "missing_repository_roles", "missing_package_source_repository",
+    "missing_consumer_fixture_repository",
 }
 DRIFT_NAMES = {
     "target_ref_drift",
@@ -117,7 +117,9 @@ DRIFT_NAMES = {
     "source_commit_drift",
     "source_tree_drift",
     "snapshot_byte_drift",
-    "installed_repository_join_drift",
+    "installed_repository_join_drift", "repository_role_key_drift",
+    "repository_role_duplicate", "installed_source_role_drift",
+    "hardcoded_repository_names_without_role_map", "repository_identity_too_long",
 }
 BOUNDARY_NAMES = {"postpublication_boundary"}
 PREPARE_NAMES = {
@@ -136,7 +138,12 @@ PREPARE_NAMES = {
     "staged_checker_exit_failure", "staged_checker_stderr_nonempty",
     "staged_checker_result_failure", "staged_checker_outcome_failure",
     "staged_checker_source_drift", "staged_checker_dropped_outcome",
-    "staged_checker_fake_launcher",
+    "staged_checker_fake_launcher", "staged_checker_exchange_slot_drift",
+    "state_prepare_receipt_path_drift", "state_prepare_receipt_sha_drift",
+    "missing_prepare_started_event", "missing_prepare_completed_event",
+    "reordered_prepare_events", "extra_reserve_event", "extra_publication_event",
+    "malformed_prepare_event_timestamp", "undeclared_prepare_event_field",
+    "removed_production_event_validation",
     "undeclared_prepare_receipt_status", "undeclared_prepare_state_status",
 }
 SCOPE_NAMES = {
@@ -651,25 +658,21 @@ def validate_staged_validation(
         and expected_checker is not None
         and checker_bytes is not None
     ):
-        cache_key = tuple(argv) + (hashlib.sha256(checker_bytes).hexdigest(),)
-        executed = _STAGED_EXECUTION_CACHE.get(cache_key)
-        if executed is None:
-            try:
-                completed = subprocess.run(
-                    argv,
-                    cwd=immutable_root,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=120,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                errors.append(f"prepare staged checker could not be re-executed: {exc}")
-            else:
-                executed = (completed.returncode, completed.stdout, completed.stderr)
-                _STAGED_EXECUTION_CACHE[cache_key] = executed
-        if executed is not None:
-            exit_status, fresh_stdout, fresh_stderr = executed
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=immutable_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"prepare staged checker could not be re-executed: {exc}")
+        else:
+            exit_status = completed.returncode
+            fresh_stdout = completed.stdout
+            fresh_stderr = completed.stderr
             try:
                 fresh_stdout_text = fresh_stdout.decode("utf-8")
                 fresh_stderr_text = fresh_stderr.decode("utf-8")
@@ -693,6 +696,24 @@ def validate_staged_validation(
                         "fresh staged checker named outcomes differ from recorded canonical set"
                     )
     return staged
+
+
+def validate_prepare_events(value: Any, errors: list[str]) -> None:
+    """Require the complete ordered prepare-only event sequence."""
+    if (
+        not isinstance(value, list)
+        or [event.get("event") if isinstance(event, dict) else None for event in value]
+        != ["prepare_started", "prepare_completed"]
+        or any(
+            not isinstance(event, dict)
+            or set(event) != {"at", "event"}
+            or not timestamp(event.get("at"))
+            for event in value
+        )
+    ):
+        errors.append(
+            "prepare state events must be exactly prepare_started then prepare_completed"
+        )
 
 
 def validate_prepare(
@@ -827,10 +848,22 @@ def validate_prepare(
     if not isinstance(state_receipt, dict) or set(state_receipt) != {"path", "sha256"}:
         errors.append("prepare state prepare_receipt must have exact path and sha256 fields")
     else:
-        if absolute(state_receipt.get("path")) is None:
+        nested_receipt_path = absolute(state_receipt.get("path"))
+        if nested_receipt_path is None:
             errors.append("prepare state prepare_receipt.path must be a normalized absolute path")
-        if state_receipt.get("sha256") != value.get("receipt_sha256"):
-            errors.append("prepare state prepare_receipt.sha256 differs from prepare.receipt_sha256")
+        elif nested_receipt_path != receipt_path:
+            errors.append(
+                "prepare state prepare_receipt.path differs from prepare.receipt_path"
+            )
+        loaded_receipt_sha256 = (
+            hashlib.sha256(receipt_bytes).hexdigest()
+            if receipt_bytes is not None
+            else value.get("receipt_sha256")
+        )
+        if state_receipt.get("sha256") != loaded_receipt_sha256:
+            errors.append(
+                "prepare state prepare_receipt.sha256 differs from loaded prepare receipt bytes"
+            )
     state_validation = state.get("validation")
     if not isinstance(state_validation, dict) or set(state_validation) != {"staged"}:
         errors.append("prepare state validation must have exactly one staged field")
@@ -851,28 +884,65 @@ def validate_prepare(
                 )
         if inventory != receipt.get(label):
             errors.append(f"prepare state {label} differs from prepare receipt")
-    events = state.get("events")
-    if (
-        not isinstance(events, list)
-        or [event.get("event") if isinstance(event, dict) else None for event in events]
-        != ["prepare_started", "prepare_completed"]
-        or any(
-            not isinstance(event, dict)
-            or set(event) != {"at", "event"}
-            or not timestamp(event.get("at"))
-            for event in events
-        )
-    ):
-        errors.append("prepare state events must be exactly prepare_started then prepare_completed")
+    validate_prepare_events(state.get("events"), errors)
+
+
+def validate_repository_roles(
+    value: Any,
+    repositories: Any,
+    errors: list[str],
+) -> Optional[dict[str, str]]:
+    if not isinstance(value, dict) or not value:
+        errors.append("panel input repository_roles must be a nonempty object")
+        return None
+    valid = True
+    repository_keys_are_valid = True
+    for role, repository_key in value.items():
+        if not isinstance(role, str) or not IDENTITY.fullmatch(role):
+            errors.append(f"panel repository role is invalid: {role!r}")
+            valid = False
+        if not isinstance(repository_key, str) or not IDENTITY.fullmatch(repository_key):
+            errors.append(
+                f"panel repository role {role!r} has an invalid repository key"
+            )
+            valid = False
+            repository_keys_are_valid = False
+    if "installed_source" not in value:
+        errors.append("panel input repository_roles must declare installed_source")
+        valid = False
+    if isinstance(repositories, dict):
+        if (
+            not repository_keys_are_valid
+            or set(value.values()) != set(repositories)
+        ):
+            errors.append(
+                "panel input repository_roles values must be exactly the repository keys"
+            )
+            valid = False
+        if (
+            len(value) != len(repositories)
+            or (
+                repository_keys_are_valid
+                and len(set(value.values())) != len(value)
+            )
+        ):
+            errors.append("panel input repository_roles must map roles one-to-one")
+            valid = False
+    return value if valid else None
 
 
 def validate_panel_input(record: Any, verify: bool = True) -> list[str]:
     errors: list[str] = []
     if not isinstance(record, dict):
         return ["panel input must be an object"]
-    exact_fields(record, PANEL_FIELDS, "panel input", errors)
-    if record.get("schema_version") != 2:
-        errors.append("panel input must declare schema_version 2")
+    schema_version = record.get("schema_version")
+    if schema_version == 3:
+        exact_fields(record, PANEL_FIELDS, "panel input", errors)
+    elif schema_version == 2:
+        exact_fields(record, LEGACY_PANEL_FIELDS, "legacy panel input", errors)
+    else:
+        exact_fields(record, PANEL_FIELDS, "panel input", errors)
+        errors.append("panel input must declare schema_version 3 or legacy schema_version 2")
     if record.get("record_type") != "panel_input":
         errors.append("panel input record_type must be panel_input")
     for field in ("panel_id", "finalization_id"):
@@ -889,17 +959,20 @@ def validate_panel_input(record: Any, verify: bool = True) -> list[str]:
     if not isinstance(repositories, dict) or not repositories:
         errors.append("panel input repositories must be a nonempty object")
     else:
-        expected_repositories = BOUNDARY_REPOSITORIES.get(boundary)
-        if expected_repositories is not None and set(repositories) != expected_repositories:
+        if schema_version == 2 and len(repositories) != 2:
             errors.append(
-                "panel input repositories must contain exactly "
-                f"{sorted(expected_repositories)} for review_boundary {boundary}"
+                "legacy schema-2 panel input repositories must contain exactly two entries"
             )
         for name, repository in repositories.items():
             if not isinstance(name, str) or not IDENTITY.fullmatch(name):
                 errors.append(f"panel repository key is invalid: {name!r}")
             else:
                 validate_repository(f"repositories.{name}", repository, verify, errors)
+    repository_roles = (
+        validate_repository_roles(record.get("repository_roles"), repositories, errors)
+        if schema_version == 3
+        else None
+    )
     installed = record.get("installed")
     validate_installed(installed, verify, errors)
     if isinstance(repositories, dict) and isinstance(installed, dict):
@@ -914,6 +987,14 @@ def validate_panel_input(record: Any, verify: bool = True) -> list[str]:
         if len(matches) != 1:
             errors.append(
                 "installed source repository/commit/tree must match exactly one reviewed repository"
+            )
+        elif (
+            repository_roles is not None
+            and repository_roles.get("installed_source") != matches[0]
+        ):
+            errors.append(
+                "panel input installed_source role must identify the reviewed repository "
+                "matching installed source repository/commit/tree"
             )
     validate_prepare(record.get("prepare"), installed, verify, errors)
     validate_scope(boundary, record.get("scope"), errors)
@@ -971,10 +1052,19 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
         source_checker.parent.mkdir()
         source_checker.write_text(
             "#!/usr/bin/env python3\n"
-            "import json\n"
-            "result = {'schema_version': 1, 'status': 'PASS', "
-            "'named_mutation_outcomes': {'contract.self_test': 'PASS', "
-            "'contract.second_control': 'PASS'}}\n"
+            "import argparse, json\n"
+            "from pathlib import Path\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('--installed-root', required=True)\n"
+            "parser.add_argument('--self-test', action='store_true')\n"
+            "parser.add_argument('--json', action='store_true')\n"
+            "args = parser.parse_args()\n"
+            "passed = (Path(args.installed_root) / 'SKILL.md').read_bytes() == "
+            "b'---\\nname: test\\ndescription: test\\n---\\n'\n"
+            "outcome = 'PASS' if passed else 'FAIL'\n"
+            "result = {'schema_version': 1, 'status': outcome, "
+            "'named_mutation_outcomes': {'contract.self_test': outcome, "
+            "'contract.second_control': outcome}}\n"
             "print(json.dumps(result, sort_keys=True, separators=(',', ':')))\n",
             encoding="utf-8",
         )
@@ -1014,14 +1104,14 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
         argv = ["git", "-C", str(repository), "diff", *DIFF_FLAGS, target, head, "--"]
         diff = subprocess.run(argv, check=True, stdout=subprocess.PIPE).stdout
         diff_path = base / "input.diff"; diff_path.write_bytes(diff)
-        doodle_argv = [
+        consumer_argv = [
             "git", "-C", str(repository), "diff", *DIFF_FLAGS, target, target, "--"
         ]
-        doodle_diff = subprocess.run(
-            doodle_argv, check=True, stdout=subprocess.PIPE
+        consumer_diff = subprocess.run(
+            consumer_argv, check=True, stdout=subprocess.PIPE
         ).stdout
-        doodle_diff_path = base / "doodle-input.diff"
-        doodle_diff_path.write_bytes(doodle_diff)
+        consumer_diff_path = base / "consumer-input.diff"
+        consumer_diff_path.write_bytes(consumer_diff)
         immutable_root = base / "operation/immutable-source"
         checker_path = immutable_root / "scripts/check_large_queue_guidance.py"
         checker_path.parent.mkdir(parents=True)
@@ -1133,11 +1223,15 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
             ],
         }
         record = {
-            "schema_version": 2, "record_type": "panel_input", "panel_id": "panel-test",
+            "schema_version": 3, "record_type": "panel_input", "panel_id": "panel-test",
             "finalization_id": "finalization-test", "recorded_at": "2026-08-09T06:00:00Z",
             "review_boundary": PREPUBLICATION_BOUNDARY,
+            "repository_roles": {
+                "installed_source": "package_source",
+                "consumer": "consumer_fixture",
+            },
             "repositories": {
-                "global": {
+                "package_source": {
                     "repository": str(repository), "target_ref": "refs/heads/review-target",
                     "target_ref_sha_at_dispatch": target, "target_sha": target,
                     "merge_base_sha": target, "head_sha": head, "head_tree_oid": tree,
@@ -1145,14 +1239,14 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                     "diff_digest_algorithm": "SHA-256",
                     "diff_digest": hashlib.sha256(diff).hexdigest(),
                 },
-                "doodlerun": {
+                "consumer_fixture": {
                     "repository": str(repository), "target_ref": "refs/heads/review-target",
                     "target_ref_sha_at_dispatch": target, "target_sha": target,
                     "merge_base_sha": target, "head_sha": target,
                     "head_tree_oid": target_tree,
-                    "diff_argv": doodle_argv, "diff_path": str(doodle_diff_path),
+                    "diff_argv": consumer_argv, "diff_path": str(consumer_diff_path),
                     "diff_digest_algorithm": "SHA-256",
-                    "diff_digest": hashlib.sha256(doodle_diff).hexdigest(),
+                    "diff_digest": hashlib.sha256(consumer_diff).hexdigest(),
                 },
             },
             "installed": {
@@ -1206,6 +1300,24 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
         baseline = validate_panel_input(record)
         if baseline:
             return errors + ["panel self-test baseline failed: " + " | ".join(baseline)]
+        legacy_record = copy.deepcopy(record)
+        legacy_record["schema_version"] = 2
+        legacy_record.pop("repository_roles")
+        legacy_errors = validate_panel_input(legacy_record)
+        if legacy_errors:
+            return errors + [
+                "legacy schema-2 panel read control failed: "
+                + " | ".join(legacy_errors)
+            ]
+        if os.environ.get("PANEL_EVENT_VALIDATION_MUTANT") == "1":
+            mutant_record = copy.deepcopy(record)
+            mutant_receipt = copy.deepcopy(receipt)
+            mutant_state = copy.deepcopy(state)
+            mutant_state["events"].pop(0)
+            write_prepare_pair(mutant_record, mutant_receipt, mutant_state)
+            if not validate_panel_input(mutant_record):
+                errors.append("production event validation mutation probe did not fail")
+            return errors
         for case in fixtures["omission_cases"]:
             mutated = copy.deepcopy(record); remove_path(mutated, case["path"])
             if not validate_panel_input(mutated, verify=False):
@@ -1213,23 +1325,23 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
         for case in fixtures["drift_cases"]:
             mutated = copy.deepcopy(record); mutation = case["mutation"]; restore = False
             if mutation == "target_ref":
-                mutated["repositories"]["global"]["target_ref_sha_at_dispatch"] = "0" * 40
-                mutated["repositories"]["global"]["target_sha"] = "0" * 40
+                mutated["repositories"]["package_source"]["target_ref_sha_at_dispatch"] = "0" * 40
+                mutated["repositories"]["package_source"]["target_sha"] = "0" * 40
             elif mutation == "raw_sha_target_ref":
-                mutated["repositories"]["global"]["target_ref"] = target
+                mutated["repositories"]["package_source"]["target_ref"] = target
             elif mutation == "dot_target_ref":
-                mutated["repositories"]["global"]["target_ref"] = "refs/heads/../review-target"
+                mutated["repositories"]["package_source"]["target_ref"] = "refs/heads/../review-target"
             elif mutation == "merge_base_not_target":
-                mutated["repositories"]["global"]["merge_base_sha"] = head
+                mutated["repositories"]["package_source"]["merge_base_sha"] = head
             elif mutation == "diff_argv":
-                mutated["repositories"]["global"]["diff_argv"] = argv[:-3] + argv[-2:]
+                mutated["repositories"]["package_source"]["diff_argv"] = argv[:-3] + argv[-2:]
             elif mutation == "diff_repository_argv":
-                mutated["repositories"]["global"]["diff_argv"][2] = str(base)
+                mutated["repositories"]["package_source"]["diff_argv"][2] = str(base)
             elif mutation == "diff_flag_order":
-                mutated["repositories"]["global"]["diff_argv"][5:7] = reversed(
-                    mutated["repositories"]["global"]["diff_argv"][5:7]
+                mutated["repositories"]["package_source"]["diff_argv"][5:7] = reversed(
+                    mutated["repositories"]["package_source"]["diff_argv"][5:7]
                 )
-            elif mutation == "diff_digest": mutated["repositories"]["global"]["diff_digest"] = "0" * 64
+            elif mutation == "diff_digest": mutated["repositories"]["package_source"]["diff_digest"] = "0" * 64
             elif mutation == "inventory_digest": mutated["installed"]["inventory_sha256"] = "0" * 64
             elif mutation == "inventory_count": mutated["installed"]["file_count"] += 1
             elif mutation == "inventory_bytes": mutated["installed"]["total_bytes"] += 1
@@ -1241,6 +1353,25 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
             elif mutation == "installed_repository_join":
                 mutated["installed"]["source_commit"] = third
                 mutated["installed"]["source_tree"] = third_tree
+            elif mutation == "repository_role_key_drift":
+                mutated["repository_roles"]["consumer"] = "missing_repository"
+            elif mutation == "repository_role_duplicate":
+                mutated["repository_roles"]["consumer"] = "package_source"
+            elif mutation == "installed_source_role_drift":
+                mutated["repository_roles"] = {
+                    "installed_source": "consumer_fixture",
+                    "consumer": "package_source",
+                }
+            elif mutation == "hardcoded_repository_names_without_role_map":
+                mutated["repositories"] = {
+                    case["repository_keys"][0]: mutated["repositories"]["package_source"],
+                    case["repository_keys"][1]: mutated["repositories"]["consumer_fixture"],
+                }
+            elif mutation == "repository_identity_too_long":
+                original_key = "consumer_fixture"
+                too_long = "r" * 257
+                mutated["repositories"][too_long] = mutated["repositories"].pop(original_key)
+                mutated["repository_roles"]["consumer"] = too_long
             found = validate_panel_input(mutated)
             if restore: shutil.copy2(source, snapshot / "SKILL.md")
             if not any(case["expect"] in item for item in found):
@@ -1277,6 +1408,7 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
             mutated_receipt = copy.deepcopy(receipt)
             mutated_state = copy.deepcopy(state)
             mutation = case["mutation"]
+            production_found: Optional[list[str]] = None
             if mutation == "fabricated_prepare":
                 missing = base / "does-not-exist"
                 mutated["prepare"].update(
@@ -1294,8 +1426,32 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                 set_path(mutated_receipt, case["path"], case["value"])
                 write_prepare_pair(mutated, mutated_receipt, mutated_state)
             elif case["target"] == "state":
-                set_path(mutated_state, case["path"], case["value"])
-                write_prepare_pair(mutated, mutated_receipt, mutated_state)
+                if mutation in {"state_receipt_path_drift", "state_receipt_sha_drift"}:
+                    write_prepare_pair(mutated, mutated_receipt, mutated_state)
+                    if mutation == "state_receipt_path_drift":
+                        mutated_state["prepare_receipt"]["path"] = str(state_path)
+                    else:
+                        mutated_state["prepare_receipt"]["sha256"] = "0" * 64
+                    state_data = (
+                        json.dumps(mutated_state, sort_keys=True, separators=(",", ":"))
+                        + "\n"
+                    ).encode()
+                    state_path.write_bytes(state_data)
+                    mutated["prepare"]["state_sha256"] = hashlib.sha256(
+                        state_data
+                    ).hexdigest()
+                elif mutation == "remove_event":
+                    mutated_state["events"].pop(case["index"])
+                elif mutation == "reverse_events":
+                    mutated_state["events"].reverse()
+                elif mutation == "append_event":
+                    mutated_state["events"].append(copy.deepcopy(case["event"]))
+                elif mutation == "add_event_field":
+                    mutated_state["events"][case["index"]][case["field"]] = case["value"]
+                else:
+                    set_path(mutated_state, case["path"], case["value"])
+                if mutation not in {"state_receipt_path_drift", "state_receipt_sha_drift"}:
+                    write_prepare_pair(mutated, mutated_receipt, mutated_state)
             elif case["target"] == "staged":
                 if mutation == "drop_self_test":
                     mutated_receipt["staged_validation"]["argv"].remove("--self-test")
@@ -1332,18 +1488,59 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                         )
                         + "\n"
                     )
+                elif mutation == "exchange_slot_drift":
+                    (exchange_slot / "SKILL.md").write_bytes(
+                        (exchange_slot / "SKILL.md").read_bytes() + b"drift\n"
+                    )
                 else:
                     set_path(
                         mutated_receipt["staged_validation"], case["path"], case["value"]
                     )
                 write_prepare_pair(mutated, mutated_receipt, mutated_state)
-            found = validate_panel_input(mutated)
+            elif case["target"] == "production":
+                source_path = Path(__file__).resolve()
+                driver = (
+                    "from pathlib import Path\n"
+                    f"path = Path({str(source_path)!r})\n"
+                    "source = path.read_text(encoding='utf-8')\n"
+                    "needle = '    validate_prepare_events(state.get(\\\"events\\\"), errors)\\n'\n"
+                    "if source.count(needle) != 1:\n"
+                    "    raise SystemExit('event validation call is not uniquely mutable')\n"
+                    "mutant = source.replace(needle, '    pass  # removed event validation\\n', 1)\n"
+                    "scope = {'__name__': '__main__', '__file__': str(path)}\n"
+                    "exec(compile(mutant, str(path), 'exec'), scope)\n"
+                )
+                mutant_environment = os.environ.copy()
+                mutant_environment["PANEL_EVENT_VALIDATION_MUTANT"] = "1"
+                completed = subprocess.run(
+                    [sys.executable, "-c", driver, "--self-test", "--json"],
+                    cwd=source_path.parent,
+                    env=mutant_environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=120,
+                    text=True,
+                )
+                combined_output = completed.stdout + completed.stderr
+                production_found = (
+                    [case["expect"]]
+                    if completed.returncode != 0 and case["expect"] in combined_output
+                    else []
+                )
+            found = (
+                production_found
+                if production_found is not None
+                else validate_panel_input(mutated)
+            )
             if not any(case["expect"] in item for item in found):
                 errors.append(
                     f"panel prepare control {case['name']} did not fail as expected: {found}"
                 )
             if mutation == "checker_source_drift":
                 shutil.copy2(source_checker, checker_path)
+            if mutation == "exchange_slot_drift":
+                shutil.copy2(source, exchange_slot / "SKILL.md")
             write_prepare_pair(record, receipt, state)
 
         for case in fixtures["file_safety_cases"]:
@@ -1496,6 +1693,8 @@ def main() -> int:
     if args.json:
         outcomes: dict[str, str] = {}
         if args.self_test:
+            outcomes["panel.schema3.non_doodle_repository_roles"] = "PASS"
+            outcomes["panel.schema2.legacy_two_repository_read"] = "PASS"
             for section in FIXTURE_CLASSES:
                 outcomes[f"panel.fixture_inventory.removed_class.{section}"] = "PASS"
                 for case in fixtures[section]:

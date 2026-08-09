@@ -21,10 +21,12 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+EXTERNAL_SCHEMA_VERSION = 1
 STATE_TYPE = "schedule_poll_state"
 AUTHORITY_TYPE = "schedule_external_action_authority"
 DECISION_TYPE = "schedule_external_action_decision"
@@ -69,6 +71,10 @@ JOURNAL_RECORD_FIELDS = {
         "record_type",
         "event_id",
         "run_id",
+        "status_path",
+        "journal_path",
+        "configuration",
+        "configuration_sha256",
         "recorded_at",
     },
     "track_status_recorded": {
@@ -242,24 +248,123 @@ def _canonical_json(value: Mapping[str, Any]) -> bytes:
     )
 
 
-def _lock_path(status_path: Path) -> Path:
-    return status_path.with_name(status_path.name + ".lock")
+CONFIGURATION_FIELDS = {
+    "run_id",
+    "status_path",
+    "journal_path",
+    "dispatch_epoch",
+    "hard_ceiling_seconds",
+    "poll_interval_seconds",
+    "expected_tracks",
+}
 
 
-class StateLock:
-    def __init__(self, status_path: Path) -> None:
-        self.path = _safe_absolute(_lock_path(status_path), label="poll state lock")
+def _configuration_digest(configuration: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(configuration)).hexdigest()
+
+
+def _validate_configuration(value: Any, digest: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != CONFIGURATION_FIELDS:
+        raise PollError("poll configuration has schema drift")
+    _identity(value.get("run_id"), "poll configuration run_id")
+    for field in ("status_path", "journal_path"):
+        if not isinstance(value.get(field), str):
+            raise PollError(f"poll configuration {field} is malformed")
+        _safe_absolute(Path(value[field]), label=f"poll configuration {field}")
+    for field in ("dispatch_epoch", "hard_ceiling_seconds", "poll_interval_seconds"):
+        _positive_int(value.get(field), f"poll configuration {field}")
+    tracks = value.get("expected_tracks")
+    if (
+        not isinstance(tracks, list)
+        or len(tracks) < 2
+        or any(not isinstance(track, str) for track in tracks)
+        or len(set(tracks)) != len(tracks)
+    ):
+        raise PollError("poll configuration expected_tracks is malformed")
+    for track in tracks:
+        _identity(track, "poll configuration track")
+    _sha256(digest, "poll configuration SHA-256")
+    if digest != _configuration_digest(value):
+        raise PollError("poll configuration digest does not match its object")
+    return value
+
+
+def _lock_path(journal_path: Path) -> Path:
+    return journal_path.with_name(journal_path.name + ".lock")
+
+
+def _same_inode(left: Path, right: Path) -> bool:
+    try:
+        left_stat = os.lstat(left)
+        right_stat = os.lstat(right)
+    except FileNotFoundError:
+        return False
+    return (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino)
+
+
+def _filesystem_alias_key(path: Path) -> str:
+    """Conservatively identify names that alias on common insensitive filesystems."""
+
+    return unicodedata.normalize("NFC", os.fspath(path)).casefold()
+
+
+def _control_paths(status_path: Path, journal_path: Path) -> tuple[Path, Path, Path]:
+    status_path = _safe_absolute(status_path, label="poll status")
+    journal_path = _safe_absolute(journal_path, label="poll journal")
+    lock_path = _safe_absolute(_lock_path(journal_path), label="poll run lock")
+    paths = (status_path, journal_path, lock_path)
+    for index, left in enumerate(paths):
+        for right in paths[index + 1 :]:
+            if (
+                _filesystem_alias_key(left) == _filesystem_alias_key(right)
+                or _same_inode(left, right)
+            ):
+                raise PollError("poll status, journal, and run lock cannot alias")
+    return paths
+
+
+class RunLock:
+    def __init__(self, status_path: Path, journal_path: Path) -> None:
+        self.status_path, self.journal_path, self.path = _control_paths(
+            status_path, journal_path
+        )
         self.descriptor: Optional[int] = None
 
-    def __enter__(self) -> "StateLock":
+    def __enter__(self) -> "RunLock":
+        _control_paths(self.status_path, self.journal_path)
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         self.descriptor = os.open(self.path, flags, 0o600)
-        observed = os.fstat(self.descriptor)
-        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        locked = False
+        try:
+            observed = os.fstat(self.descriptor)
+            named = os.lstat(self.path)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or not stat.S_ISREG(named.st_mode)
+                or observed.st_nlink != 1
+                or named.st_nlink != 1
+                or (observed.st_dev, observed.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise PollError("poll run lock must be a regular single-link file")
+            fcntl.flock(self.descriptor, fcntl.LOCK_EX)
+            locked = True
+            observed = os.fstat(self.descriptor)
+            named = os.lstat(self.path)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or not stat.S_ISREG(named.st_mode)
+                or observed.st_nlink != 1
+                or named.st_nlink != 1
+                or (observed.st_dev, observed.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                raise PollError("poll run lock changed while acquiring it")
+            _control_paths(self.status_path, self.journal_path)
+        except BaseException:
+            if locked:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
             os.close(self.descriptor)
             self.descriptor = None
-            raise PollError("poll state lock must be a regular single-link file")
-        fcntl.flock(self.descriptor, fcntl.LOCK_EX)
+            raise
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -324,6 +429,21 @@ def _validate_journal_record(value: Any, row: int) -> Dict[str, Any]:
     if record_type == "poll_initialized":
         if event_id != f"init-{run_id}":
             raise PollError(f"poll journal row {row} has the wrong init identity")
+        for field in ("status_path", "journal_path"):
+            if not isinstance(value.get(field), str):
+                raise PollError(f"poll journal row {row} has malformed control paths")
+            _safe_absolute(
+                Path(value[field]), label=f"poll journal row {row} {field}"
+            )
+        configuration = _validate_configuration(
+            value.get("configuration"), value.get("configuration_sha256")
+        )
+        if (
+            configuration["run_id"] != run_id
+            or configuration["status_path"] != value["status_path"]
+            or configuration["journal_path"] != value["journal_path"]
+        ):
+            raise PollError(f"poll journal row {row} initialization is not bound")
     elif record_type == "track_status_recorded":
         track = _identity(value.get("track"), f"poll journal row {row} track")
         update_id = _identity(value.get("update_id"), f"poll journal row {row} update_id")
@@ -431,6 +551,10 @@ def _journal_records(
         record_type = record["record_type"]
         operation_id = record.get("operation_id")
         if record_type == "poll_outcome" and record["action"] == "CONSOLIDATION_CLAIMED":
+            if claimed_consolidations:
+                raise PollError(
+                    f"poll journal row {row} attempts a second consolidation claim"
+                )
             claimed_consolidations.add(operation_id)
         elif (
             record_type == "poll_outcome"
@@ -470,6 +594,8 @@ def _journal_records(
                 raise PollError(
                     f"poll journal row {row} claims a PR before consolidation completion"
                 )
+            if claimed_pull_requests:
+                raise PollError(f"poll journal row {row} attempts a second PR claim")
             claimed_pull_requests.add(operation_id)
         elif record_type == "pull_request_complete":
             if operation_id not in claimed_pull_requests:
@@ -556,7 +682,10 @@ def _validate_state(value: Any) -> Dict[str, Any]:
         "schema_version",
         "record_type",
         "run_id",
+        "status_path",
         "journal_path",
+        "configuration",
+        "configuration_sha256",
         "dispatch_epoch",
         "hard_ceiling_seconds",
         "poll_interval_seconds",
@@ -565,6 +694,7 @@ def _validate_state(value: Any) -> Dict[str, Any]:
         "trigger_outcomes",
         "consolidation",
         "pull_request",
+        "initialized_at",
         "updated_at",
     }
     if set(value) != required:
@@ -576,20 +706,36 @@ def _validate_state(value: Any) -> Dict[str, Any]:
     ):
         raise PollError("poll status schema is unsupported")
     _identity(value.get("run_id"), "run_id")
-    if not isinstance(value.get("journal_path"), str):
-        raise PollError("poll status journal_path is malformed")
-    _safe_absolute(Path(value["journal_path"]), label="poll journal identity")
+    for field in ("status_path", "journal_path"):
+        if not isinstance(value.get(field), str):
+            raise PollError(f"poll status {field} is malformed")
+        _safe_absolute(Path(value[field]), label=f"poll {field} identity")
     for field in ("dispatch_epoch", "hard_ceiling_seconds", "poll_interval_seconds"):
         _positive_int(value.get(field), field)
-    if not _valid_timestamp(value.get("updated_at")):
-        raise PollError("poll status updated_at is invalid")
+    for field in ("initialized_at", "updated_at"):
+        if not _valid_timestamp(value.get(field)):
+            raise PollError(f"poll status {field} is invalid")
+    configuration = _validate_configuration(
+        value.get("configuration"), value.get("configuration_sha256")
+    )
+    expected_configuration = {
+        "run_id": value["run_id"],
+        "status_path": value["status_path"],
+        "journal_path": value["journal_path"],
+        "dispatch_epoch": value["dispatch_epoch"],
+        "hard_ceiling_seconds": value["hard_ceiling_seconds"],
+        "poll_interval_seconds": value["poll_interval_seconds"],
+        "expected_tracks": value["expected_tracks"],
+    }
+    if configuration != expected_configuration:
+        raise PollError("poll status fields conflict with its bound configuration")
     tracks = value.get("tracks")
     expected_tracks = value.get("expected_tracks")
     if (
         not isinstance(expected_tracks, list)
         or len(expected_tracks) < 2
-        or len(set(expected_tracks)) != len(expected_tracks)
         or any(not isinstance(track, str) for track in expected_tracks)
+        or len(set(expected_tracks)) != len(expected_tracks)
     ):
         raise PollError("poll status expected_tracks is malformed")
     if not isinstance(tracks, dict) or len(tracks) < 2:
@@ -781,17 +927,34 @@ def _validate_state(value: Any) -> Dict[str, Any]:
 
 def _bound_journal(
     state: Mapping[str, Any],
+    status_path: Path,
     journal_path: Path,
     *,
     run_id: str,
     allow_missing_event_ids: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
+    status_path = _safe_absolute(status_path, label="poll status")
     journal_path = _safe_absolute(journal_path, label="poll journal")
+    if state.get("status_path") != str(status_path):
+        raise PollError("status path does not match the initialized run")
     if state.get("journal_path") != str(journal_path):
         raise PollError("journal path does not match the initialized run")
     records = _journal_records(journal_path, expected_run_id=run_id)
     if not records or records[0].get("event_id") != f"init-{run_id}":
         raise PollError("poll journal lacks this run's initialization")
+    expected_init = {
+        "schema_version": SCHEMA_VERSION,
+        "record_type": "poll_initialized",
+        "event_id": f"init-{run_id}",
+        "run_id": run_id,
+        "status_path": state["status_path"],
+        "journal_path": state["journal_path"],
+        "configuration": state["configuration"],
+        "configuration_sha256": state["configuration_sha256"],
+        "recorded_at": state["initialized_at"],
+    }
+    if records[0] != expected_init:
+        raise PollError("poll journal initialization conflicts with state")
     _validate_state_journal_join(
         state, records, allow_missing_event_ids=set(allow_missing_event_ids)
     )
@@ -818,7 +981,7 @@ def _validate_state_journal_join(
     state_outcome_ids: set[str] = set()
     for trigger_id, outcome in state["trigger_outcomes"].items():
         expected = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "poll_outcome",
             "event_id": f"trigger-{trigger_id}",
             **outcome,
@@ -839,7 +1002,7 @@ def _validate_state_journal_join(
             continue
         require(
             {
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "record_type": "track_status_recorded",
                 "event_id": f"track-{state['run_id']}-{track_name}-{update_id}",
                 "run_id": state["run_id"],
@@ -866,7 +1029,7 @@ def _validate_state_journal_join(
     expected_consolidation_complete: set[str] = set()
     if consolidation["state"] == "COMPLETE":
         expected = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "consolidation_complete",
             "event_id": f"complete-{consolidation['operation_id']}",
             "run_id": state["run_id"],
@@ -894,7 +1057,7 @@ def _validate_state_journal_join(
     expected_complete_ids: set[str] = set()
     if pull_request["state"] != "NOT_CLAIMED":
         claim = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "pull_request_claimed",
             "event_id": f"claim-{pull_request['operation_id']}",
             "run_id": state["run_id"],
@@ -906,7 +1069,7 @@ def _validate_state_journal_join(
         require(claim)
         if pull_request["state"] == "COMPLETE":
             complete = {
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "record_type": "pull_request_complete",
                 "event_id": f"complete-{pull_request['operation_id']}",
                 "run_id": state["run_id"],
@@ -926,10 +1089,10 @@ def _reject_control_file_alias(
     candidate: Path, status_path: Path, journal_path: Path, *, label: str
 ) -> None:
     candidate = _safe_absolute(candidate, label=label, must_exist=True)
-    status_path = _safe_absolute(status_path, label="poll status", must_exist=True)
-    journal_path = _safe_absolute(journal_path, label="poll journal", must_exist=True)
-    if candidate in {status_path, journal_path, _lock_path(status_path)}:
-        raise PollError(f"{label} cannot alias poll control state")
+    status_path, journal_path, lock_path = _control_paths(status_path, journal_path)
+    for control in (status_path, journal_path, lock_path):
+        if candidate == control or _same_inode(candidate, control):
+            raise PollError(f"{label} cannot alias poll control state")
 
 
 def _verify_terminal_track_evidence(state: Mapping[str, Any]) -> None:
@@ -947,6 +1110,27 @@ def _load_state(path: Path) -> Dict[str, Any]:
     return _validate_state(value)
 
 
+def _is_pristine_initial_state(state: Mapping[str, Any]) -> bool:
+    initialized_at = state["initialized_at"]
+    return (
+        state["updated_at"] == initialized_at
+        and not state["trigger_outcomes"]
+        and state["consolidation"] == {"state": "NOT_CLAIMED"}
+        and state["pull_request"] == {"state": "NOT_CLAIMED"}
+        and all(
+            track
+            == {
+                "phase": "running",
+                "update_id": "init",
+                "updated_at": initialized_at,
+                "reason": None,
+                "evidence": None,
+            }
+            for track in state["tracks"].values()
+        )
+    )
+
+
 def initialize(
     *,
     status_path: Path,
@@ -957,42 +1141,59 @@ def initialize(
     poll_interval_seconds: int,
     tracks: Sequence[str],
     now: Optional[int] = None,
+    failpoint: Failpoint = None,
 ) -> Dict[str, Any]:
-    status_path = _safe_absolute(status_path, label="poll status")
-    journal_path = _safe_absolute(journal_path, label="poll journal")
+    status_path, journal_path, _ = _control_paths(status_path, journal_path)
     _identity(run_id, "run_id")
     _positive_int(dispatch_epoch, "dispatch_epoch")
     _positive_int(hard_ceiling_seconds, "hard_ceiling_seconds")
     _positive_int(poll_interval_seconds, "poll_interval_seconds")
-    if len(set(tracks)) != len(tracks) or len(tracks) < 2:
+    if (
+        len(tracks) < 2
+        or any(not isinstance(track, str) for track in tracks)
+        or len(set(tracks)) != len(tracks)
+    ):
         raise PollError("expected track list must contain two or more unique tracks")
     for track in tracks:
         _identity(track, "track name")
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     _positive_int(observed_now, "now")
     stamp = _timestamp_from_epoch(observed_now)
+    configuration: Dict[str, Any] = {
+        "run_id": run_id,
+        "status_path": str(status_path),
+        "journal_path": str(journal_path),
+        "dispatch_epoch": dispatch_epoch,
+        "hard_ceiling_seconds": hard_ceiling_seconds,
+        "poll_interval_seconds": poll_interval_seconds,
+        "expected_tracks": list(tracks),
+    }
+    configuration_sha256 = _configuration_digest(configuration)
+    _validate_configuration(configuration, configuration_sha256)
     init_event = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "record_type": "poll_initialized",
         "event_id": f"init-{run_id}",
         "run_id": run_id,
+        "status_path": str(status_path),
+        "journal_path": str(journal_path),
+        "configuration": configuration,
+        "configuration_sha256": configuration_sha256,
         "recorded_at": stamp,
     }
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         if status_path.exists() or status_path.is_symlink():
             existing = _load_state(status_path)
-            if (
-                existing["run_id"] == run_id
-                and existing["dispatch_epoch"] == dispatch_epoch
-                and existing["hard_ceiling_seconds"] == hard_ceiling_seconds
-                and existing["poll_interval_seconds"] == poll_interval_seconds
-                and existing["expected_tracks"] == list(tracks)
-                and existing["journal_path"] == str(journal_path)
-            ):
+            if existing["configuration"] == configuration and existing[
+                "configuration_sha256"
+            ] == configuration_sha256:
                 recovered_event = dict(init_event)
-                recovered_event["recorded_at"] = existing["tracks"][tracks[0]][
-                    "updated_at"
-                ]
+                recovered_event["recorded_at"] = existing["initialized_at"]
+                records = _journal_records(journal_path, expected_run_id=run_id)
+                if not records and not _is_pristine_initial_state(existing):
+                    raise PollError(
+                        "cannot reconstruct a missing initialization journal for advanced state"
+                    )
                 _ensure_journal_event(journal_path, recovered_event)
                 return {"action": "ALREADY_INITIALIZED", "state": existing}
             raise PollError("existing poll status conflicts with initialization")
@@ -1000,7 +1201,10 @@ def initialize(
             "schema_version": SCHEMA_VERSION,
             "record_type": STATE_TYPE,
             "run_id": run_id,
+            "status_path": str(status_path),
             "journal_path": str(journal_path),
+            "configuration": configuration,
+            "configuration_sha256": configuration_sha256,
             "dispatch_epoch": dispatch_epoch,
             "hard_ceiling_seconds": hard_ceiling_seconds,
             "poll_interval_seconds": poll_interval_seconds,
@@ -1018,11 +1222,14 @@ def initialize(
             "trigger_outcomes": {},
             "consolidation": {"state": "NOT_CLAIMED"},
             "pull_request": {"state": "NOT_CLAIMED"},
+            "initialized_at": stamp,
             "updated_at": stamp,
         }
         _validate_state(state)
         _preflight_journal_event(journal_path, init_event)
         _write_state_atomic(status_path, state)
+        if failpoint:
+            failpoint("after_state_replace")
         _ensure_journal_event(journal_path, init_event)
         return {"action": "INITIALIZED", "state": state}
 
@@ -1045,7 +1252,7 @@ def mark_track(
         raise PollError("track phase is unsupported")
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     stamp = _timestamp_from_epoch(_positive_int(observed_now, "now"))
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         if state["run_id"] != run_id or track not in state["tracks"]:
             raise PollError("track update does not match this run")
@@ -1067,6 +1274,7 @@ def mark_track(
         )
         journal_records = _bound_journal(
             state,
+            status_path,
             journal_path,
             run_id=run_id,
             allow_missing_event_ids=[event_id] if recoverable else [],
@@ -1096,7 +1304,7 @@ def mark_track(
             and existing["evidence"] == evidence
         ):
             recovered_event = {
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "record_type": "track_status_recorded",
                 "event_id": event_id,
                 "run_id": run_id,
@@ -1123,7 +1331,7 @@ def mark_track(
                 _ensure_journal_event(
                     journal_path,
                     {
-                        "schema_version": 1,
+                        "schema_version": SCHEMA_VERSION,
                         "record_type": "track_status_recorded",
                         "event_id": event_id,
                         "run_id": run_id,
@@ -1142,7 +1350,7 @@ def mark_track(
         )
         if recorded is not None:
             invariant = {
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "record_type": "track_status_recorded",
                 "event_id": event_id,
                 "run_id": run_id,
@@ -1161,7 +1369,7 @@ def mark_track(
                 "update_id": update_id,
             }
         event = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "track_status_recorded",
             "event_id": event_id,
             "run_id": run_id,
@@ -1207,12 +1415,13 @@ def poll(
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     _positive_int(observed_now, "now")
     stamp = _timestamp_from_epoch(observed_now)
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         if state["run_id"] != run_id:
             raise PollError("poll trigger belongs to another run")
         journal_records = _bound_journal(
             state,
+            status_path,
             journal_path,
             run_id=run_id,
             allow_missing_event_ids=[f"trigger-{trigger_id}"],
@@ -1239,7 +1448,7 @@ def poll(
         existing = state["trigger_outcomes"].get(trigger_id)
         if existing is not None:
             event = {
-                "schema_version": 1,
+                "schema_version": SCHEMA_VERSION,
                 "record_type": "poll_outcome",
                 "event_id": f"trigger-{trigger_id}",
                 **existing,
@@ -1331,7 +1540,7 @@ def poll(
         state["updated_at"] = stamp
         _validate_state(state)
         event = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "poll_outcome",
             "event_id": f"trigger-{trigger_id}",
             **outcome,
@@ -1369,7 +1578,7 @@ def _pull_request_receipt_identity(
         not isinstance(receipt, dict)
         or set(receipt) != PR_RECEIPT_FIELDS
         or type(receipt.get("schema_version")) is not int
-        or receipt["schema_version"] != SCHEMA_VERSION
+        or receipt["schema_version"] != EXTERNAL_SCHEMA_VERSION
         or receipt.get("record_type") != PR_RECEIPT_TYPE
         or receipt.get("run_id") != run_id
         or receipt.get("operation_id") != operation_id
@@ -1415,11 +1624,12 @@ def complete_consolidation(
 ) -> Dict[str, Any]:
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     stamp = _timestamp_from_epoch(_positive_int(observed_now, "now"))
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         recovery_event_id = f"complete-{operation_id}"
         journal_records = _bound_journal(
             state,
+            status_path,
             journal_path,
             run_id=run_id,
             allow_missing_event_ids=[recovery_event_id]
@@ -1449,7 +1659,7 @@ def complete_consolidation(
             _ensure_journal_event(
                 journal_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": SCHEMA_VERSION,
                     "record_type": "consolidation_complete",
                     "event_id": f"complete-{operation_id}",
                     "run_id": run_id,
@@ -1462,7 +1672,7 @@ def complete_consolidation(
         if claim["state"] != "CLAIMED":
             raise PollError("consolidation must be claimed before completion")
         event = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "consolidation_complete",
             "event_id": f"complete-{operation_id}",
             "run_id": run_id,
@@ -1502,7 +1712,7 @@ def _authority_receipt(path: Path, *, run_id: str) -> Dict[str, Any]:
     if not isinstance(value, dict) or set(value) != required:
         raise PollError("external-action authority receipt has wrong fields")
     if (
-        value["schema_version"] != 1
+        value["schema_version"] != EXTERNAL_SCHEMA_VERSION
         or value["record_type"] != AUTHORITY_TYPE
         or value["run_id"] != run_id
         or not _valid_timestamp(value["recorded_at"])
@@ -1538,7 +1748,7 @@ def _validate_action_decision(value: Any) -> Dict[str, Any]:
     action = value.get("action")
     if (
         type(value.get("schema_version")) is not int
-        or value["schema_version"] != SCHEMA_VERSION
+        or value["schema_version"] != EXTERNAL_SCHEMA_VERSION
         or value.get("record_type") != DECISION_TYPE
         or action not in ACTION_REQUIREMENTS
         or value.get("result") not in {"AUTHORIZED", "MISSING_AUTHORITY"}
@@ -1648,7 +1858,7 @@ def decide_external_action(
         grant for grant in ACTION_REQUIREMENTS[action] if grants.get(grant) is not True
     )
     decision = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": EXTERNAL_SCHEMA_VERSION,
         "record_type": DECISION_TYPE,
         "run_id": run_id,
         "action": action,
@@ -1729,13 +1939,14 @@ def claim_pull_request(
 ) -> Dict[str, Any]:
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     stamp = _timestamp_from_epoch(_positive_int(observed_now, "now"))
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         if state["run_id"] != run_id or state["consolidation"]["state"] != "COMPLETE":
             raise PollError("pull request requires completed local consolidation")
         recovery_operation_id = _operation_key(run_id, "pull-request")
         journal_records = _bound_journal(
             state,
+            status_path,
             journal_path,
             run_id=run_id,
             allow_missing_event_ids=[f"claim-{recovery_operation_id}"]
@@ -1775,7 +1986,7 @@ def claim_pull_request(
             _ensure_journal_event(
                 journal_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": SCHEMA_VERSION,
                     "record_type": "pull_request_claimed",
                     "event_id": f"claim-{operation_id}",
                     "run_id": run_id,
@@ -1801,7 +2012,7 @@ def claim_pull_request(
         state["updated_at"] = stamp
         _validate_state(state)
         event = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "pull_request_claimed",
             "event_id": f"claim-{operation_id}",
             "run_id": run_id,
@@ -1831,10 +2042,11 @@ def complete_pull_request(
 ) -> Dict[str, Any]:
     observed_now = int(datetime.now(timezone.utc).timestamp()) if now is None else now
     stamp = _timestamp_from_epoch(_positive_int(observed_now, "now"))
-    with StateLock(status_path):
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         journal_records = _bound_journal(
             state,
+            status_path,
             journal_path,
             run_id=run_id,
             allow_missing_event_ids=[f"complete-{operation_id}"]
@@ -1873,7 +2085,7 @@ def complete_pull_request(
             _ensure_journal_event(
                 journal_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": SCHEMA_VERSION,
                     "record_type": "pull_request_complete",
                     "event_id": f"complete-{operation_id}",
                     "run_id": run_id,
@@ -1886,7 +2098,7 @@ def complete_pull_request(
         if claim["state"] != "CLAIMED":
             raise PollError("pull request must be claimed before completion")
         event = {
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "record_type": "pull_request_complete",
             "event_id": f"complete-{operation_id}",
             "run_id": run_id,
@@ -1904,11 +2116,13 @@ def complete_pull_request(
 
 
 def inspect(*, status_path: Path, run_id: str) -> Dict[str, Any]:
-    with StateLock(status_path):
+    initial = _load_state(status_path)
+    journal_path = Path(initial["journal_path"])
+    with RunLock(status_path, journal_path):
         state = _load_state(status_path)
         if state["run_id"] != run_id:
             raise PollError("inspect belongs to another run")
-        _bound_journal(state, Path(state["journal_path"]), run_id=run_id)
+        _bound_journal(state, status_path, journal_path, run_id=run_id)
         return {"action": "INSPECT", "state": state}
 
 

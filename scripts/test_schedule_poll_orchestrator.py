@@ -959,7 +959,7 @@ class SchedulePollTests(unittest.TestCase):
                 evidence = root / "forged.txt"
                 evidence.write_text("forged\n", encoding="utf-8")
                 forged = {
-                    "schema_version": 1,
+                    "schema_version": poller.SCHEMA_VERSION,
                     "record_type": "consolidation_complete",
                     "event_id": "complete-forged-operation",
                     "run_id": "run-test",
@@ -1100,6 +1100,349 @@ class SchedulePollTests(unittest.TestCase):
                 trigger_id="trigger-two",
                 now=120,
             )
+
+    def test_v2_initialization_binds_status_journal_and_full_configuration(self) -> None:
+        temporary, status, journal = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        state = self.state(status)
+        expected_configuration = {
+            "run_id": "run-test",
+            "status_path": str(status),
+            "journal_path": str(journal),
+            "dispatch_epoch": 100,
+            "hard_ceiling_seconds": 100,
+            "poll_interval_seconds": 30,
+            "expected_tracks": ["track-a", "track-b", "track-c"],
+        }
+        expected_digest = hashlib.sha256(
+            (json.dumps(expected_configuration, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        ).hexdigest()
+        self.assertEqual(2, state["schema_version"])
+        self.assertEqual(str(status), state["status_path"])
+        self.assertEqual(str(journal), state["journal_path"])
+        self.assertEqual(expected_configuration, state["configuration"])
+        self.assertEqual(expected_digest, state["configuration_sha256"])
+        initialized = self.journal(journal)[0]
+        self.assertEqual(2, initialized["schema_version"])
+        self.assertEqual(str(status), initialized["status_path"])
+        self.assertEqual(str(journal), initialized["journal_path"])
+        self.assertEqual(expected_configuration, initialized["configuration"])
+        self.assertEqual(expected_digest, initialized["configuration_sha256"])
+
+        canonical_state = status.read_bytes()
+        for field, replacement in (
+            ("configuration_sha256", "0" * 64),
+            ("configuration", {**expected_configuration, "poll_interval_seconds": 31}),
+        ):
+            mutated = self.state(status)
+            mutated[field] = replacement
+            status.write_text(json.dumps(mutated, sort_keys=True) + "\n", encoding="utf-8")
+            before = status.read_bytes()
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(poller.PollError, "configuration"):
+                    poller.poll(
+                        status_path=status,
+                        journal_path=journal,
+                        run_id="run-test",
+                        trigger_id=f"trigger-{field}",
+                        now=120,
+                    )
+                self.assertEqual(before, status.read_bytes())
+            status.write_bytes(canonical_state)
+
+    def test_initialize_crash_after_state_write_recovers_one_init_and_can_poll(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="schedule-poll-init-crash-") as raw:
+            root = Path(raw).resolve()
+            status = root / "status.json"
+            journal = root / "poll.jsonl"
+
+            def crash(point: str) -> None:
+                if point == "after_state_replace":
+                    raise InjectedCrash(point)
+
+            with self.assertRaises(InjectedCrash):
+                poller.initialize(
+                    status_path=status,
+                    journal_path=journal,
+                    run_id="run-test",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b", "track-c"],
+                    now=100,
+                    failpoint=crash,
+                )
+            self.assertTrue(status.is_file())
+            self.assertFalse(journal.exists())
+            recovered = poller.initialize(
+                status_path=status,
+                journal_path=journal,
+                run_id="run-test",
+                dispatch_epoch=100,
+                hard_ceiling_seconds=100,
+                poll_interval_seconds=30,
+                tracks=["track-a", "track-b", "track-c"],
+                now=999,
+            )
+            self.assertEqual("ALREADY_INITIALIZED", recovered["action"])
+            self.assertEqual(1, len(self.journal(journal)))
+            outcome = poller.poll(
+                status_path=status,
+                journal_path=journal,
+                run_id="run-test",
+                trigger_id="trigger-after-init-recovery",
+                now=120,
+            )
+            self.assertEqual("RESCHEDULE", outcome["action"])
+
+    def test_initialize_does_not_reconstruct_a_missing_journal_for_claimed_state(self) -> None:
+        temporary, status, journal = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        self.claim_consolidation(status, journal)
+        before = status.read_bytes()
+        journal.unlink()
+        with self.assertRaisesRegex(poller.PollError, "cannot reconstruct"):
+            poller.initialize(
+                status_path=status,
+                journal_path=journal,
+                run_id="run-test",
+                dispatch_epoch=100,
+                hard_ceiling_seconds=100,
+                poll_interval_seconds=30,
+                tracks=["track-a", "track-b", "track-c"],
+                now=999,
+            )
+        self.assertEqual(before, status.read_bytes())
+        self.assertFalse(journal.exists())
+
+    def test_initialize_rejects_control_aliases_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="schedule-poll-alias-") as raw:
+            root = Path(raw).resolve()
+
+            same = root / "same.json"
+            with self.assertRaisesRegex(poller.PollError, "alias"):
+                poller.initialize(
+                    status_path=same,
+                    journal_path=same,
+                    run_id="run-test",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b"],
+                    now=100,
+                )
+            self.assertFalse(same.exists())
+            self.assertFalse((root / "same.json.lock").exists())
+
+            case_status = root / "Status.json"
+            case_journal = root / "status.json"
+            case_lock = case_journal.with_name(case_journal.name + ".lock")
+            with self.assertRaisesRegex(poller.PollError, "alias"):
+                poller.initialize(
+                    status_path=case_status,
+                    journal_path=case_journal,
+                    run_id="run-case-alias",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b"],
+                    now=100,
+                )
+            self.assertFalse(case_status.exists())
+            self.assertFalse(case_journal.exists())
+            self.assertFalse(case_lock.exists())
+
+            journal = root / "journal.jsonl"
+            run_lock = journal.with_name(journal.name + ".lock")
+            with self.assertRaisesRegex(poller.PollError, "alias"):
+                poller.initialize(
+                    status_path=run_lock,
+                    journal_path=journal,
+                    run_id="run-lock-alias",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b"],
+                    now=100,
+                )
+            self.assertFalse(journal.exists())
+            self.assertFalse(run_lock.exists())
+
+            hard_status = root / "hard-status.json"
+            hard_journal = root / "hard-journal.jsonl"
+            hard_status.write_bytes(b"unchanged\n")
+            os.link(hard_status, hard_journal)
+            before = hard_status.read_bytes()
+            hard_lock = hard_journal.with_name(hard_journal.name + ".lock")
+            with self.assertRaisesRegex(poller.PollError, "alias"):
+                poller.initialize(
+                    status_path=hard_status,
+                    journal_path=hard_journal,
+                    run_id="run-hard-alias",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b"],
+                    now=100,
+                )
+            self.assertEqual(before, hard_status.read_bytes())
+            self.assertEqual(before, hard_journal.read_bytes())
+            self.assertFalse(hard_lock.exists())
+
+            linked_journal = root / "linked-journal.jsonl"
+            linked_lock = linked_journal.with_name(linked_journal.name + ".lock")
+            linked_status = root / "linked-status.json"
+            linked_journal.write_bytes(b"journal sentinel\n")
+            os.link(linked_journal, linked_lock)
+            linked_before = linked_journal.read_bytes()
+            with self.assertRaisesRegex(poller.PollError, "alias"):
+                poller.initialize(
+                    status_path=linked_status,
+                    journal_path=linked_journal,
+                    run_id="run-linked-lock",
+                    dispatch_epoch=100,
+                    hard_ceiling_seconds=100,
+                    poll_interval_seconds=30,
+                    tracks=["track-a", "track-b"],
+                    now=100,
+                )
+            self.assertFalse(linked_status.exists())
+            self.assertEqual(linked_before, linked_journal.read_bytes())
+            self.assertEqual(linked_before, linked_lock.read_bytes())
+
+    def test_shared_journal_allows_only_one_concurrent_status_initialization(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="schedule-poll-shared-init-") as raw:
+            root = Path(raw).resolve()
+            journal = root / "poll.jsonl"
+            statuses = [root / "status-a.json", root / "status-b.json"]
+            barrier = threading.Barrier(2)
+            results: list[dict[str, object]] = []
+            errors: list[BaseException] = []
+
+            def initialize_status(path: Path) -> None:
+                try:
+                    barrier.wait(timeout=10)
+                    results.append(
+                        poller.initialize(
+                            status_path=path,
+                            journal_path=journal,
+                            run_id="run-test",
+                            dispatch_epoch=100,
+                            hard_ceiling_seconds=100,
+                            poll_interval_seconds=30,
+                            tracks=["track-a", "track-b", "track-c"],
+                            now=100,
+                        )
+                    )
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=initialize_status, args=(path,)) for path in statuses]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            self.assertEqual(1, len(results))
+            self.assertEqual(1, len(errors))
+            self.assertIsInstance(errors[0], poller.PollError)
+            self.assertEqual(1, sum(path.exists() for path in statuses))
+            self.assertEqual(1, len(self.journal(journal)))
+
+    def test_copied_status_cannot_claim_through_the_shared_journal(self) -> None:
+        temporary, status, journal = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        for index, track in enumerate(("track-a", "track-b", "track-c"), 1):
+            self.mark_complete(status, journal, track, now=100 + index)
+        copied = Path(temporary.name).resolve() / "copied-status.json"
+        copied.write_bytes(status.read_bytes())
+        copied_before = copied.read_bytes()
+        barrier = threading.Barrier(2)
+        results: list[dict[str, object]] = []
+        errors: list[BaseException] = []
+
+        def claim(path: Path, trigger_id: str) -> None:
+            try:
+                barrier.wait(timeout=10)
+                results.append(
+                    poller.poll(
+                        status_path=path,
+                        journal_path=journal,
+                        run_id="run-test",
+                        trigger_id=trigger_id,
+                        now=110,
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=claim, args=(status, "trigger-primary")),
+            threading.Thread(target=claim, args=(copied, "trigger-copied")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(1, len(results))
+        self.assertEqual("CONSOLIDATION_CLAIMED", results[0]["action"])
+        self.assertEqual(1, len(errors))
+        self.assertIsInstance(errors[0], poller.PollError)
+        self.assertEqual(copied_before, copied.read_bytes())
+        self.assertEqual(
+            1,
+            sum(row.get("action") == "CONSOLIDATION_CLAIMED" for row in self.journal(journal)),
+        )
+
+    def test_legacy_claimed_state_is_rejected_without_migration_or_rewrite(self) -> None:
+        temporary, status, journal = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        self.claim_consolidation(status, journal)
+        legacy = self.state(status)
+        legacy["schema_version"] = 1
+        legacy.pop("status_path", None)
+        legacy.pop("configuration", None)
+        legacy.pop("configuration_sha256", None)
+        legacy.pop("initialized_at", None)
+        status.write_text(json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8")
+        before = status.read_bytes()
+        with self.assertRaisesRegex(poller.PollError, "schema|missing or undeclared"):
+            poller.poll(
+                status_path=status,
+                journal_path=journal,
+                run_id="run-test",
+                trigger_id="trigger-legacy",
+                now=120,
+            )
+        self.assertEqual(before, status.read_bytes())
+
+    def test_journal_rejects_a_second_consolidation_claim(self) -> None:
+        temporary, status, journal = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        first = self.claim_consolidation(status, journal)
+        state = self.state(status)
+        forged = {
+            "schema_version": poller.SCHEMA_VERSION,
+            "record_type": "poll_outcome",
+            "event_id": "trigger-trigger-second-claim",
+            "action": "CONSOLIDATION_CLAIMED",
+            "trigger_id": "trigger-second-claim",
+            "run_id": "run-test",
+            "recorded_at": "1970-01-01T00:01:51Z",
+            "operation_id": first["operation_id"],
+            "phases": {name: "complete" for name in state["expected_tracks"]},
+        }
+        with journal.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n")
+        before = status.read_bytes()
+        with self.assertRaisesRegex(poller.PollError, "second consolidation claim"):
+            poller.poll(
+                status_path=status,
+                journal_path=journal,
+                run_id="run-test",
+                trigger_id="trigger-after-second-claim",
+                now=120,
+            )
+        self.assertEqual(before, status.read_bytes())
 
 
 if __name__ == "__main__":

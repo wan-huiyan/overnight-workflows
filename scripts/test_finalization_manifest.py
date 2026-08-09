@@ -222,6 +222,137 @@ class FinalizationManifestTests(unittest.TestCase):
             self.assertEqual(2, identity["record_count"])
             self.assertEqual("controller-test", identity["writer_controller_id"])
 
+    def test_new_manifest_is_generic_and_rejects_project_specific_head_fields(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-generic-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_manifest(root)
+            self.assertEqual(manifest.MANIFEST_SCHEMA, self.records(path)[0]["manifest_schema"])
+            payload = {
+                "review_id": "review-test",
+                "panel_id": "panel-test",
+                "review_boundary": "prepublication-source-and-staged-snapshot",
+                "repository_heads": {
+                    "installed_source": {
+                        "repository_key": "acme/package-source",
+                        "head_sha": "1" * 40,
+                    },
+                    "consumer": {
+                        "repository_key": "example/sample-consumer",
+                        "head_sha": "2" * 40,
+                    },
+                },
+                "prepared_generation_id": "3" * 64,
+                "prepare_receipt_sha256": "4" * 64,
+                "panel_input_path": str(root / "panel-input.jsonl"),
+                "panel_input_sha256": "5" * 64,
+                "raw_input_inventory_path": str(root / "raw-input.inventory"),
+                "raw_input_inventory_sha256": "6" * 64,
+                "raw_input_seal_path": str(root / "raw-input-seal.json"),
+                "raw_input_seal_sha256": "7" * 64,
+                "raw_input_max_files": 20,
+                "raw_input_max_total_bytes": 1000,
+                "raw_input_actual_files": 2,
+                "raw_input_actual_total_bytes": 20,
+                "expected_reports": 1,
+                "received_reports": 0,
+                "expected_challenge_responses": 1,
+                "received_challenge_responses": 0,
+                "expected_judges": 1,
+                "received_judges": 0,
+                "live_installation_status": "UNCHANGED_PREDECESSOR",
+                "source_guidance_status": "NOT_REVIEWED",
+                "state": "SOURCE_REVIEW_REGISTERED",
+                "next_action": "dispatch reviewers",
+            }
+            manifest.append_finalization_record(
+                path,
+                record_type="source_review_input_registered",
+                writer_controller_id="controller-test",
+                payload=payload,
+            )
+            self.assertEqual(2, manifest.validate_manifest(path)["record_count"])
+
+            project_specific = copy.deepcopy(self.records(path))
+            source = project_specific[1]
+            source.pop("repository_heads")
+            source["global_head_sha"] = "1" * 40
+            source["doodlerun_head_sha"] = "2" * 40
+            self.write_records(path, project_specific)
+            with self.assertRaisesRegex(manifest.PublicationError, "source_review_input_registered"):
+                manifest.validate_manifest(path)
+
+    def test_legacy_project_manifest_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-legacy-") as raw:
+            root = Path(raw).resolve()
+            path = root / "legacy.jsonl"
+            envelope = {
+                "schema_version": manifest.LEGACY_SCHEMA_VERSION,
+                "manifest_schema": manifest.LEGACY_MANIFEST_SCHEMA,
+                "recorded_at": "2026-08-09T00:00:00Z",
+                "finalization_id": "legacy-finalization",
+                "writer_controller_id": "legacy-controller",
+            }
+            source = {
+                **envelope,
+                "sequence": 2,
+                "record_type": "source_review_input_registered",
+                "review_id": "legacy-review",
+                "panel_id": "legacy-panel",
+                "review_boundary": "prepublication-source-and-staged-snapshot",
+                "global_head_sha": "1" * 40,
+                "doodlerun_head_sha": "2" * 40,
+                "prepared_generation_id": "3" * 64,
+                "prepare_receipt_sha256": "4" * 64,
+                "panel_input_path": str(root / "panel.jsonl"),
+                "panel_input_sha256": "5" * 64,
+                "raw_input_inventory_path": str(root / "raw.inventory"),
+                "raw_input_inventory_sha256": "6" * 64,
+                "raw_input_seal_path": str(root / "seal.json"),
+                "raw_input_seal_sha256": "7" * 64,
+                "raw_input_max_files": 10,
+                "raw_input_max_total_bytes": 1000,
+                "raw_input_actual_files": 1,
+                "raw_input_actual_total_bytes": 1,
+                "expected_reports": 1,
+                "received_reports": 0,
+                "expected_challenge_responses": 1,
+                "received_challenge_responses": 0,
+                "expected_judges": 1,
+                "received_judges": 0,
+                "live_installation_status": "UNCHANGED_PREDECESSOR",
+                "source_guidance_status": "NOT_REVIEWED",
+                "state": "SOURCE_REVIEW_REGISTERED",
+                "next_action": "dispatch",
+            }
+            records = [
+                {
+                    **envelope,
+                    "sequence": 1,
+                    "record_type": "manifest_header",
+                    "state": "PREPARING",
+                },
+                source,
+                *[
+                    {
+                        **envelope,
+                        "sequence": sequence,
+                        "record_type": "external_panel_note",
+                        "note": f"legacy-note-{sequence}",
+                    }
+                    for sequence in range(3, 6)
+                ],
+            ]
+            self.write_records(path, records)
+            self.assertEqual(5, manifest.validate_manifest(path)["record_count"])
+            before = path.read_bytes()
+            with self.assertRaisesRegex(manifest.PublicationError, "read-only"):
+                manifest.append_finalization_record(
+                    path,
+                    record_type="external_panel_note",
+                    payload={"note": "must-not-append"},
+                )
+            self.assertEqual(before, path.read_bytes())
+
     def test_controller_cli_initializes_and_appends_known_rows_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-cli-") as raw:
             root = Path(raw).resolve()
@@ -380,7 +511,7 @@ class FinalizationManifestTests(unittest.TestCase):
             for state, digest in (("FIRST", "3" * 64), ("SECOND", "4" * 64)):
                 records = self.records(path)
                 record = {
-                    "schema_version": 1,
+                    "schema_version": manifest.SCHEMA_VERSION,
                     "manifest_schema": manifest.MANIFEST_SCHEMA,
                     "sequence": len(records) + 1,
                     "recorded_at": "2026-08-09T00:00:01Z",
@@ -448,6 +579,79 @@ class FinalizationManifestTests(unittest.TestCase):
             self.write_records(sealed, sealed_records)
             with self.assertRaises(manifest.PublicationError):
                 manifest.validate_manifest(sealed)
+
+    def test_raw_input_inventory_is_the_exact_recursive_tree_closure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-raw-closure-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_manifest(root)
+            raw_digest = self.append_raw_input(path)
+            raw_root = root / "raw-inputs"
+            before = path.read_bytes()
+
+            extra = raw_root / "undeclared.txt"
+            extra.write_bytes(b"not inventoried\n")
+            with self.assertRaisesRegex(manifest.PublicationError, "closure"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            extra.unlink()
+
+            empty = raw_root / "undeclared-empty-directory"
+            empty.mkdir()
+            with self.assertRaisesRegex(manifest.PublicationError, "closure"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            empty.rmdir()
+
+            target = raw_root / "generic-input.txt"
+            saved = target.read_bytes()
+            target.unlink()
+            target.mkdir()
+            with self.assertRaises(manifest.PublicationError):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            target.rmdir()
+            target.write_bytes(saved)
+
+            hardlink = raw_root / "undeclared-hardlink"
+            os.link(target, hardlink)
+            with self.assertRaisesRegex(manifest.PublicationError, "single-link"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            hardlink.unlink()
+
+            linked = raw_root / "undeclared-link"
+            linked.symlink_to(target)
+            with self.assertRaisesRegex(manifest.PublicationError, "symlink"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            linked.unlink()
+
+            fifo = raw_root / "undeclared-fifo"
+            os.mkfifo(fifo)
+            with self.assertRaisesRegex(manifest.PublicationError, "non-regular"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            fifo.unlink()
+
+            target = raw_root / "generic-input.txt"
+            stable_bytes = target.read_bytes()
+            original_reader = manifest._read_regular_bytes
+
+            def mutate_after_read(candidate: Path, *, label: str) -> bytes:
+                data = original_reader(candidate, label=label)
+                if candidate == target and "raw-input row" in label:
+                    target.write_bytes(data + b"changed after read")
+                return data
+
+            with mock.patch.object(
+                manifest, "_read_regular_bytes", side_effect=mutate_after_read
+            ):
+                with self.assertRaisesRegex(
+                    manifest.PublicationError, "changed while its members were read"
+                ):
+                    self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(before, path.read_bytes())
+            target.write_bytes(stable_bytes)
 
     def test_phase_seals_require_raw_input_and_complete_review_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-lifecycle-negative-") as raw:
@@ -663,7 +867,25 @@ class FinalizationManifestTests(unittest.TestCase):
             raw_file = raw_root / "input.txt"
             raw_file.write_bytes(b"historical raw input\n")
             panel_input = root / "panel-input.jsonl"
-            panel_input.write_bytes(b'{"schema_version":2}\n')
+            panel_input.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "repository_roles": {
+                            "installed_source": "package-source",
+                            "consumer": "sample-consumer",
+                        },
+                        "repositories": {
+                            "package-source": {"head_sha": "1" * 40},
+                            "sample-consumer": {"head_sha": "2" * 40},
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             reviewer_panel_input = raw_root / "panel-input.jsonl"
             reviewer_panel_input.write_bytes(panel_input.read_bytes())
             raw_inventory.write_text(
@@ -741,8 +963,16 @@ class FinalizationManifestTests(unittest.TestCase):
                         "review_id": "review-test",
                         "panel_id": "panel-test",
                         "review_boundary": "prepublication-source-and-staged-snapshot",
-                        "global_head_sha": "1" * 40,
-                        "doodlerun_head_sha": "2" * 40,
+                        "repository_heads": {
+                            "installed_source": {
+                                "repository_key": "package-source",
+                                "head_sha": "1" * 40,
+                            },
+                            "consumer": {
+                                "repository_key": "sample-consumer",
+                                "head_sha": "2" * 40,
+                            },
+                        },
                         "prepared_generation_id": "3" * 64,
                         "prepare_receipt_sha256": "4" * 64,
                         "panel_input_path": str(panel_input),
@@ -837,6 +1067,14 @@ class FinalizationManifestTests(unittest.TestCase):
                 self.seal(path, "dispatch", raw_digest)
             self.assertEqual(original_manifest, path.read_bytes())
             panel_validator.return_value = []
+            head_mutation = self.records(path)
+            head_mutation[1]["repository_heads"]["consumer"]["head_sha"] = "9" * 40
+            self.write_records(path, head_mutation)
+            mutated_head_bytes = path.read_bytes()
+            with self.assertRaisesRegex(manifest.PublicationError, "panel role map"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(mutated_head_bytes, path.read_bytes())
+            path.write_bytes(original_manifest)
             for label, target in (
                 ("raw entry", raw_file),
                 ("panel input", panel_input),
@@ -851,6 +1089,18 @@ class FinalizationManifestTests(unittest.TestCase):
                         self.seal(path, "dispatch", raw_digest)
                     self.assertEqual(original_manifest, path.read_bytes())
                 target.write_bytes(original_bytes)
+            undeclared = raw_root / "undeclared.txt"
+            undeclared.write_bytes(b"not inventoried\n")
+            with self.assertRaisesRegex(manifest.PublicationError, "closure"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(original_manifest, path.read_bytes())
+            undeclared.unlink()
+            undeclared_empty = raw_root / "undeclared-empty"
+            undeclared_empty.mkdir()
+            with self.assertRaisesRegex(manifest.PublicationError, "closure"):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(original_manifest, path.read_bytes())
+            undeclared_empty.rmdir()
             original_raw = raw_file.read_bytes()
             raw_file.unlink()
             with self.assertRaises(manifest.PublicationError):

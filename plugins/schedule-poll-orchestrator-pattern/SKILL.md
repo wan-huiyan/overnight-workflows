@@ -16,7 +16,7 @@ description: |
   (in-session parent polling a subagent) — this is for scheduled-trigger
   orchestrators that need to survive session ends.
 author: Claude Code
-version: 1.0.3
+version: 1.0.4
 date: 2026-08-09
 ---
 
@@ -90,12 +90,16 @@ python3 -B "$POLL_HELPER" init \
 ```
 
 Do not hand-edit `status.json`. Each track records its terminal result through
-`mark-track`; the helper holds a deterministic lock, validates the complete
-track set, atomically replaces status, and appends one locked journal event.
-Missing, corrupt, linked, truncated, or undeclared state fails closed.
-The initialized status binds the one absolute journal path. A nonterminal
+`mark-track`; the helper holds one journal-derived run lock, validates the
+complete track set, atomically replaces status, and appends one locked journal
+event. The exact-schema-2 status and initialization row bind the normalized
+absolute status path, journal path, and full initialization configuration plus
+its digest. Missing, corrupt, linked, truncated, aliased, copied, or undeclared
+state fails closed before another operation can be claimed. A nonterminal
 `running` heartbeat also requires a caller-supplied stable `--update-id`; an
-exact retry reuses that ID and cannot split or overwrite the journal.
+exact retry reuses that ID and cannot split or overwrite the journal. Schema-1
+poll state is not migrated: inspect it manually and initialize a reviewed new
+run instead of carrying an old `CLAIMED` state forward.
 
 ```bash
 python3 -B "$POLL_HELPER" mark-track \
@@ -224,6 +228,10 @@ linked or partial journals, and one durable consolidation/PR claim. Also check:
 5. Reintroducing an inline consolidation/PR call, an unlocked/truncating write,
    or the invalid `Path.write_text(..., mode="a")` example fails the source
    checker and tests.
+6. Alternate or copied status files sharing a journal cannot initialize or
+   claim; status/journal/lock aliases fail before any control-file write.
+7. A crash after the initialized state is written but before its journal row
+   retries to exactly one initialization row and a usable poll state.
 
 ## Example
 
@@ -256,6 +264,10 @@ consolidation operation. No PR is implied.
 
 ## Version history
 
+- **v1.0.4** (2026-08-09) — Bound exact-schema-2 state and initialization to
+  one normalized status path, journal path, full configuration digest, and
+  journal-derived run lock. Alternate, copied, aliased, and legacy claimed
+  state now fails closed; initialization can repair its one missing crash row.
 - **v1.0.3** (2026-08-09) — Replaced the non-executable polling sketch with
   the installed, mutation-tested state machine. It atomically records one
   consolidation/PR claim and requires separate authority for every external

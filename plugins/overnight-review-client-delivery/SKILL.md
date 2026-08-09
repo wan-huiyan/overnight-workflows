@@ -14,7 +14,7 @@ description: |
   drops. NOT for: synchronous code review (use ce:review or claude-code-guide instead), single-task
   overnight automation (use scheduled-tasks or cron), or work that requires user input mid-stream.
 author: wan-huiyan + Claude Code (extracted from a causal-impact project)
-version: 1.0.2
+version: 1.0.3
 date: 2026-08-09
 ---
 
@@ -170,6 +170,7 @@ python3 -B "$FINAL_REVIEW_HELPER" freeze \
 ```
 
 `freeze` writes `FINAL_REVIEW_PENDING`, a sorted SHA-256/byte-count inventory,
+the package root and every directory identity (including empty directories),
 and one create-once read-only `snapshot_root` that preserves every recorded
 relative path, basename, and extension. This keeps HTML/CSS/image packages
 renderable while isolating them from mutable source paths. It also records a
@@ -188,7 +189,7 @@ Dispatch an independent reviewer who did not author or fix the deliverables.
 Give that reviewer only the exact read-only package at `snapshot_root`, whose
 inventory entries bind each `relative_path` and `snapshot_path`, not the mutable
 source paths. Also give the inventory digest, cycle, and freeze ID.
-The reviewer writes one exact JSON report with schema 1, record type
+The reviewer writes one exact JSON report with schema 2, record type
 `frozen_final_byte_review`, the review ID, cycle, freeze ID, reviewer ID,
 frozen-inventory SHA-256, `verdict: PASS`, UTC `reviewed_at`, nonempty summary,
 and a findings array. Then run:

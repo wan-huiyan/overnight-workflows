@@ -64,7 +64,7 @@ class FinalByteReviewTests(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": gate.SCHEMA_VERSION,
                     "record_type": gate.REPORT_TYPE,
                     "review_id": frozen["review_id"],
                     "cycle": frozen["cycle"],
@@ -203,6 +203,59 @@ class FinalByteReviewTests(unittest.TestCase):
                     artifact_root=package,
                 )
             self.assertFalse((root / "gate.json").exists())
+
+    def test_package_membership_and_directory_history_are_frozen(self) -> None:
+        temporary, state, first, second = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        package = first.parent
+        empty = package / "empty-section"
+        empty.mkdir()
+        frozen = self.freeze(state, first, second)
+        inventory = frozen["frozen_inventory"]
+        assert isinstance(inventory, dict)
+        self.assertEqual(
+            [".", "empty-section"],
+            [entry["relative_path"] for entry in inventory["directories"]],
+        )
+        report = self.report(root, frozen)
+        gate.approve(state, report_path=report)
+
+        added = package / "late.txt"
+        added.write_bytes(b"not reviewed\n")
+        with self.assertRaisesRegex(gate.GateError, "deliverable drift"):
+            gate.check(state)
+        self.assertEqual(gate.INVALIDATED, self.state(state)["status"])
+
+    def test_create_then_delete_member_after_approval_still_invalidates(self) -> None:
+        temporary, state, first, second = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        frozen = self.freeze(state, first, second)
+        report = self.report(root, frozen)
+        gate.approve(state, report_path=report)
+        transient = first.parent / "created-then-deleted.txt"
+        transient.write_bytes(b"transient unreviewed member\n")
+        transient.unlink()
+        with self.assertRaisesRegex(gate.GateError, "deliverable drift"):
+            gate.check(state)
+        self.assertEqual(gate.INVALIDATED, self.state(state)["status"])
+
+    def test_legacy_approval_is_never_carried_into_v2(self) -> None:
+        temporary, state, first, second = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        frozen = self.freeze(state, first, second)
+        gate.approve(state, report_path=self.report(root, frozen))
+        legacy = self.state(state)
+        legacy["schema_version"] = 1
+        state.write_text(json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(gate.GateError, "contract drift"):
+            gate.check(state)
+        refrozen = self.freeze(state, first, second)
+        self.assertEqual(gate.SCHEMA_VERSION, refrozen["schema_version"])
+        self.assertEqual(gate.PENDING, refrozen["status"])
+        self.assertIsNone(refrozen["final_report"])
 
     def test_change_and_restore_after_approval_is_still_detected(self) -> None:
         temporary, state, first, second = self.fixture()

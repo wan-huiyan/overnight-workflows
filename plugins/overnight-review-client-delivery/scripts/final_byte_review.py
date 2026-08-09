@@ -25,10 +25,10 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
 import uuid
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_TYPE = "client_delivery_final_byte_gate"
 REPORT_TYPE = "frozen_final_byte_review"
-INVENTORY_FORMAT = "sha256-size-independent-source-and-snapshot-stat-v5"
+INVENTORY_FORMAT = "sha256-size-independent-file-and-directory-stat-v6"
 PENDING = "FINAL_REVIEW_PENDING"
 APPROVED = "FINAL_REVIEW_APPROVED"
 INVALIDATED = "FINAL_REVIEW_INVALIDATED"
@@ -58,6 +58,7 @@ INVENTORY_FIELDS = {
     "artifact_root",
     "snapshot_root",
     "entries",
+    "directories",
 }
 ENTRY_FIELDS = {
     "path",
@@ -65,6 +66,21 @@ ENTRY_FIELDS = {
     "snapshot_path",
     "sha256",
     "bytes",
+    "device",
+    "inode",
+    "mode",
+    "mtime_ns",
+    "ctime_ns",
+    "snapshot_device",
+    "snapshot_inode",
+    "snapshot_mode",
+    "snapshot_mtime_ns",
+    "snapshot_ctime_ns",
+}
+DIRECTORY_FIELDS = {
+    "path",
+    "relative_path",
+    "snapshot_path",
     "device",
     "inode",
     "mode",
@@ -196,13 +212,34 @@ def _regular_bytes(path: Path, *, label: str) -> bytes:
     return _regular_bytes_and_stat(path, label=label)[0]
 
 
-def _discover_package_files(root: Path) -> list[Path]:
+def _directory_identity(path: Path, relative_path: str) -> Dict[str, Any]:
+    observed = os.lstat(path)
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+        raise GateError(f"deliverable package contains an unsafe directory: {path}")
+    return {
+        "path": str(path),
+        "relative_path": relative_path,
+        "device": observed.st_dev,
+        "inode": observed.st_ino,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "mtime_ns": observed.st_mtime_ns,
+        "ctime_ns": observed.st_ctime_ns,
+    }
+
+
+def _discover_package_closure(root: Path) -> tuple[list[Path], list[Dict[str, Any]]]:
     root = _absolute(root, label="deliverable package root", must_exist=True)
-    if not root.is_dir():
+    root_observed = os.lstat(root)
+    if stat.S_ISLNK(root_observed.st_mode) or not stat.S_ISDIR(root_observed.st_mode):
         raise GateError("deliverable package root must be a directory")
     discovered: list[Path] = []
+    directory_identities: list[Dict[str, Any]] = []
     for directory, directories, files in os.walk(root, topdown=True, followlinks=False):
         current = Path(directory)
+        relative_current = current.relative_to(root).as_posix()
+        if relative_current == ".":
+            relative_current = "."
+        directory_identities.append(_directory_identity(current, relative_current))
         safe_directories: list[str] = []
         for name in sorted(directories, key=lambda item: item.encode("utf-8")):
             child = current / name
@@ -223,12 +260,28 @@ def _discover_package_files(root: Path) -> list[Path]:
             discovered.append(child)
     if not discovered:
         raise GateError("deliverable package must contain at least one file")
-    return sorted(discovered, key=lambda item: str(item).encode("utf-8"))
+    directory_identities.sort(
+        key=lambda item: str(item["relative_path"]).encode("utf-8")
+    )
+    for identity in directory_identities:
+        reproduced = _directory_identity(
+            Path(str(identity["path"])), str(identity["relative_path"])
+        )
+        if reproduced != identity:
+            raise GateError("deliverable package directories changed during enumeration")
+    return (
+        sorted(discovered, key=lambda item: str(item).encode("utf-8")),
+        directory_identities,
+    )
+
+
+def _discover_package_files(root: Path) -> list[Path]:
+    return _discover_package_closure(root)[0]
 
 
 def _live_entries(
     paths: Sequence[Path], artifact_root: Optional[Path]
-) -> tuple[Path, list[Dict[str, Any]]]:
+) -> tuple[Path, list[Dict[str, Any]], list[Dict[str, Any]]]:
     if not paths:
         raise GateError("freeze requires at least one deliverable")
     normalized = [_absolute(path, label="deliverable", must_exist=True) for path in paths]
@@ -240,7 +293,7 @@ def _live_entries(
     normalized_root = _absolute(
         artifact_root, label="deliverable package root", must_exist=True
     )
-    discovered = _discover_package_files(normalized_root)
+    discovered, directories = _discover_package_closure(normalized_root)
     if normalized != discovered and sorted(normalized, key=lambda item: str(item).encode("utf-8")) != discovered:
         supplied = {str(path) for path in normalized}
         complete = {str(path) for path in discovered}
@@ -274,7 +327,7 @@ def _live_entries(
             "ctime_ns": observed.st_ctime_ns,
         }
         entries.append(entry)
-    return normalized_root, entries
+    return normalized_root, entries, directories
 
 
 def _fsync_directory(path: Path) -> None:
@@ -288,6 +341,7 @@ def _fsync_directory(path: Path) -> None:
 def _snapshot_inventory(
     state_path: Path,
     live_entries: Sequence[Mapping[str, Any]],
+    live_directories: Sequence[Mapping[str, Any]],
     *,
     artifact_root: Path,
     cycle: int,
@@ -315,6 +369,17 @@ def _snapshot_inventory(
     _fsync_directory(snapshot_root)
     entries: list[Dict[str, Any]] = []
     framed = bytearray()
+    for live_directory in sorted(
+        live_directories,
+        key=lambda item: (
+            len(Path(str(item["relative_path"])).parts),
+            str(item["relative_path"]).encode("utf-8"),
+        ),
+    ):
+        relative = str(live_directory["relative_path"])
+        if relative == ".":
+            continue
+        os.mkdir(snapshot_directory.joinpath(*Path(relative).parts), 0o700)
     for live in live_entries:
         source_path = Path(str(live["path"]))
         data, source_stat = _regular_bytes_and_stat(
@@ -337,7 +402,6 @@ def _snapshot_inventory(
         snapshot_path = snapshot_directory.joinpath(
             *Path(str(live["relative_path"])).parts
         )
-        snapshot_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor = os.open(
             snapshot_path,
             os.O_WRONLY
@@ -379,7 +443,7 @@ def _snapshot_inventory(
         }
         entries.append(entry)
         framed.extend(
-            f"{digest}\t{len(data)}\t{stat_identity['device']}\t{stat_identity['inode']}\t"
+            f"F\t{digest}\t{len(data)}\t{stat_identity['device']}\t{stat_identity['inode']}\t"
             f"{stat_identity['mode']}\t{stat_identity['mtime_ns']}\t{stat_identity['ctime_ns']}\t"
             f"{snapshot_identity['snapshot_device']}\t{snapshot_identity['snapshot_inode']}\t"
             f"{snapshot_identity['snapshot_mode']}\t{snapshot_identity['snapshot_mtime_ns']}\t"
@@ -393,6 +457,46 @@ def _snapshot_inventory(
         _fsync_directory(current)
         os.chmod(current, 0o500)
     _fsync_directory(snapshot_root)
+    directory_entries: list[Dict[str, Any]] = []
+    for live in live_directories:
+        source_path = Path(str(live["path"]))
+        reproduced = _directory_identity(source_path, str(live["relative_path"]))
+        if reproduced != dict(live):
+            raise GateError(
+                "deliverable package directory changed while its snapshot was created"
+            )
+        relative = str(live["relative_path"])
+        snapshot_path = (
+            snapshot_directory
+            if relative == "."
+            else snapshot_directory.joinpath(*Path(relative).parts)
+        )
+        snapshot_observed = os.lstat(snapshot_path)
+        if stat.S_ISLNK(snapshot_observed.st_mode) or not stat.S_ISDIR(
+            snapshot_observed.st_mode
+        ):
+            raise GateError("frozen snapshot directory closure is unsafe")
+        snapshot_identity = {
+            "snapshot_device": snapshot_observed.st_dev,
+            "snapshot_inode": snapshot_observed.st_ino,
+            "snapshot_mode": stat.S_IMODE(snapshot_observed.st_mode),
+            "snapshot_mtime_ns": snapshot_observed.st_mtime_ns,
+            "snapshot_ctime_ns": snapshot_observed.st_ctime_ns,
+        }
+        directory_entry = {
+            **dict(live),
+            "snapshot_path": str(snapshot_path),
+            **snapshot_identity,
+        }
+        directory_entries.append(directory_entry)
+        framed.extend(
+            f"D\t{live['device']}\t{live['inode']}\t{live['mode']}\t"
+            f"{live['mtime_ns']}\t{live['ctime_ns']}\t"
+            f"{snapshot_identity['snapshot_device']}\t{snapshot_identity['snapshot_inode']}\t"
+            f"{snapshot_identity['snapshot_mode']}\t{snapshot_identity['snapshot_mtime_ns']}\t"
+            f"{snapshot_identity['snapshot_ctime_ns']}\t{relative}\t{source_path}\t"
+            f"{snapshot_path}\n".encode("utf-8")
+        )
     return {
         "format": INVENTORY_FORMAT,
         "sha256": hashlib.sha256(framed).hexdigest(),
@@ -401,16 +505,53 @@ def _snapshot_inventory(
         "artifact_root": str(artifact_root),
         "snapshot_root": str(snapshot_directory),
         "entries": entries,
+        "directories": directory_entries,
     }
 
 
 def _verify_frozen_inventory(value: Mapping[str, Any]) -> None:
     _validate_inventory(value)
     artifact_root = Path(value["artifact_root"])
-    discovered = [str(path) for path in _discover_package_files(artifact_root)]
+    discovered_files, discovered_directories = _discover_package_closure(artifact_root)
+    discovered = [str(path) for path in discovered_files]
     recorded = [entry["path"] for entry in value["entries"]]
     if discovered != recorded:
         raise GateError("live deliverable package membership differs from the frozen inventory")
+    recorded_directories = [
+        {
+            key: entry[key]
+            for key in (
+                "path",
+                "relative_path",
+                "device",
+                "inode",
+                "mode",
+                "mtime_ns",
+                "ctime_ns",
+            )
+        }
+        for entry in value["directories"]
+    ]
+    if discovered_directories != recorded_directories:
+        raise GateError(
+            "live deliverable package directory closure differs from the frozen inventory"
+        )
+    for entry in value["directories"]:
+        snapshot_path = Path(str(entry["snapshot_path"]))
+        observed = os.lstat(snapshot_path)
+        if stat.S_ISLNK(observed.st_mode) or not stat.S_ISDIR(observed.st_mode):
+            raise GateError("frozen deliverable snapshot directory is unsafe")
+        observed_identity = {
+            "snapshot_device": observed.st_dev,
+            "snapshot_inode": observed.st_ino,
+            "snapshot_mode": stat.S_IMODE(observed.st_mode),
+            "snapshot_mtime_ns": observed.st_mtime_ns,
+            "snapshot_ctime_ns": observed.st_ctime_ns,
+        }
+        if observed_identity != {key: entry[key] for key in observed_identity}:
+            raise GateError(
+                "frozen deliverable snapshot directory changed after freeze"
+            )
     for entry in value["entries"]:
         for field, label in (
             ("path", "live deliverable"),
@@ -500,7 +641,7 @@ def _validate_inventory(value: Any) -> None:
         snapshot_paths.append(snapshot_path)
         total += size
         framed.extend(
-            f"{digest}\t{size}\t{entry['device']}\t{entry['inode']}\t{entry['mode']}\t"
+            f"F\t{digest}\t{size}\t{entry['device']}\t{entry['inode']}\t{entry['mode']}\t"
             f"{entry['mtime_ns']}\t{entry['ctime_ns']}\t{entry['snapshot_device']}\t"
             f"{entry['snapshot_inode']}\t{entry['snapshot_mode']}\t"
             f"{entry['snapshot_mtime_ns']}\t{entry['snapshot_ctime_ns']}\t"
@@ -521,6 +662,80 @@ def _validate_inventory(value: Any) -> None:
         not Path(path).is_relative_to(Path(artifact_root)) for path in paths
     ):
         raise GateError("frozen inventory source path escapes its package root")
+    directories = value.get("directories")
+    if not isinstance(directories, list) or not directories:
+        raise GateError("frozen inventory directories must include the package root")
+    directory_relatives: list[str] = []
+    directory_paths: list[str] = []
+    directory_snapshot_paths: list[str] = []
+    for entry in directories:
+        if not isinstance(entry, dict) or set(entry) != DIRECTORY_FIELDS:
+            raise GateError("frozen inventory directory entry has schema drift")
+        relative = entry.get("relative_path")
+        path = entry.get("path")
+        snapshot_path = entry.get("snapshot_path")
+        if (
+            not isinstance(relative, str)
+            or (relative != "." and (
+                Path(relative).is_absolute()
+                or Path(relative).as_posix() != relative
+                or any(part in {"", ".", ".."} for part in Path(relative).parts)
+            ))
+        ):
+            raise GateError("frozen inventory directory relative path is unsafe")
+        if not isinstance(path, str) or not Path(path).is_absolute():
+            raise GateError("frozen inventory directory path must be absolute")
+        if not isinstance(snapshot_path, str) or not Path(snapshot_path).is_absolute():
+            raise GateError("frozen inventory snapshot directory path must be absolute")
+        expected_path = (
+            Path(artifact_root)
+            if relative == "."
+            else Path(artifact_root).joinpath(*Path(relative).parts)
+        )
+        expected_snapshot = (
+            Path(str(value["snapshot_root"]))
+            if relative == "."
+            else Path(str(value["snapshot_root"])).joinpath(*Path(relative).parts)
+        )
+        if Path(path) != expected_path or Path(snapshot_path) != expected_snapshot:
+            raise GateError("frozen inventory directory path does not reproduce")
+        _absolute(Path(path), label="frozen inventory directory")
+        _absolute(Path(snapshot_path), label="frozen inventory snapshot directory")
+        for field in DIRECTORY_FIELDS - {"path", "relative_path", "snapshot_path"}:
+            if (
+                type(entry.get(field)) is not int
+                or entry[field] < 0
+                or (field in {"mode", "snapshot_mode"} and entry[field] > 0o7777)
+            ):
+                raise GateError(f"frozen inventory directory {field} is invalid")
+        directory_relatives.append(relative)
+        directory_paths.append(path)
+        directory_snapshot_paths.append(snapshot_path)
+        framed.extend(
+            f"D\t{entry['device']}\t{entry['inode']}\t{entry['mode']}\t"
+            f"{entry['mtime_ns']}\t{entry['ctime_ns']}\t{entry['snapshot_device']}\t"
+            f"{entry['snapshot_inode']}\t{entry['snapshot_mode']}\t"
+            f"{entry['snapshot_mtime_ns']}\t{entry['snapshot_ctime_ns']}\t"
+            f"{relative}\t{path}\t{snapshot_path}\n".encode("utf-8")
+        )
+    if (
+        directory_relatives
+        != sorted(directory_relatives, key=lambda item: item.encode("utf-8"))
+        or directory_relatives[0] != "."
+        or len(directory_relatives) != len(set(directory_relatives))
+        or len(directory_paths) != len(set(directory_paths))
+        or len(directory_snapshot_paths) != len(set(directory_snapshot_paths))
+    ):
+        raise GateError("frozen inventory directories must be sorted and distinct")
+    expected_directory_relatives = {"."}
+    for relative in relative_paths:
+        parts = Path(relative).parts
+        for depth in range(1, len(parts)):
+            expected_directory_relatives.add(Path(*parts[:depth]).as_posix())
+    # Empty directories are valid and are therefore allowed in addition to
+    # the parents implied by files; every declared directory is still bound.
+    if not expected_directory_relatives.issubset(set(directory_relatives)):
+        raise GateError("frozen inventory omits a file parent directory")
     if value.get("file_count") != len(entries) or value.get("total_bytes") != total:
         raise GateError("frozen inventory counts do not reproduce")
     digest = hashlib.sha256(framed).hexdigest()
@@ -658,6 +873,37 @@ def _load_state(path: Path) -> Dict[str, Any]:
     return _validate_state(value)
 
 
+def _legacy_state_invalidation(path: Path, review_id: str) -> tuple[int, Dict[str, Any]]:
+    """Read only enough v1 identity to invalidate it; never inherit approval."""
+    data = _regular_bytes(path, label="legacy final-byte state")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise GateError("legacy final-byte state is invalid JSON") from exc
+    inventory = value.get("frozen_inventory") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("record_type") != STATE_TYPE
+        or value.get("review_id") != review_id
+        or type(value.get("cycle")) is not int
+        or value["cycle"] <= 0
+        or not isinstance(value.get("freeze_id"), str)
+        or not IDENTITY.fullmatch(value["freeze_id"])
+        or not isinstance(inventory, dict)
+        or not isinstance(inventory.get("sha256"), str)
+        or not SHA256.fullmatch(inventory["sha256"])
+    ):
+        raise GateError("legacy final-byte state cannot be safely invalidated")
+    return value["cycle"], {
+        "cycle": value["cycle"],
+        "freeze_id": value["freeze_id"],
+        "invalidated_at": utc_now(),
+        "reason": "legacy v1 final-byte state requires a complete v2 refreeze and review",
+        "frozen_inventory_sha256": inventory["sha256"],
+    }
+
+
 def _persist(path: Path, state: Mapping[str, Any]) -> None:
     path = _absolute(path, label="final-byte state")
     value = _validate_state(dict(state))
@@ -721,14 +967,29 @@ def freeze(
         raise GateError("freeze requires at least one author or fixer identity")
     state_path = _absolute(state_path, label="final-byte state")
     with _locked(state_path):
-        normalized_root, live_entries = _live_entries(artifacts, artifact_root)
+        normalized_root, live_entries, live_directories = _live_entries(
+            artifacts, artifact_root
+        )
         prior_invalidations: list[Dict[str, Any]] = []
         cycle = 1
         if state_path.exists():
-            current = _load_state(state_path)
-            if current["review_id"] != review_id:
+            try:
+                current = _load_state(state_path)
+            except GateError as exc:
+                try:
+                    legacy_cycle, legacy_invalidation = _legacy_state_invalidation(
+                        state_path, review_id
+                    )
+                except GateError:
+                    raise exc
+                prior_invalidations = [legacy_invalidation]
+                cycle = legacy_cycle + 1
+                current = None
+            if current is None:
+                pass
+            elif current["review_id"] != review_id:
                 raise GateError("existing final-byte state belongs to another review")
-            same = (
+            elif (
                 current["contributors"] == normalized_contributors
                 and [
                     {
@@ -745,20 +1006,37 @@ def freeze(
                     for entry in current["frozen_inventory"]["entries"]
                 ]
                 == live_entries
-            )
-            if same and current["status"] in {PENDING, APPROVED}:
+                and [
+                    {
+                        key: entry[key]
+                        for key in (
+                            "path",
+                            "relative_path",
+                            "device",
+                            "inode",
+                            "mode",
+                            "mtime_ns",
+                            "ctime_ns",
+                        )
+                    }
+                    for entry in current["frozen_inventory"]["directories"]
+                ]
+                == live_directories
+            ) and current["status"] in {PENDING, APPROVED}:
                 _verify_frozen_inventory(current["frozen_inventory"])
                 return {"action": current["status"], "state": current, "changed": False}
-            prior_invalidations = list(current["prior_invalidations"])
-            prior = current.get("invalidation") or _invalidation(
-                current, "deliverable set, bytes, or contributors changed before Phase C"
-            )
-            prior_invalidations.append(prior)
-            cycle = current["cycle"] + 1
+            elif current is not None:
+                prior_invalidations = list(current["prior_invalidations"])
+                prior = current.get("invalidation") or _invalidation(
+                    current, "deliverable set, bytes, or contributors changed before Phase C"
+                )
+                prior_invalidations.append(prior)
+                cycle = current["cycle"] + 1
         freeze_id = uuid.uuid4().hex
         inventory = _snapshot_inventory(
             state_path,
             live_entries,
+            live_directories,
             artifact_root=normalized_root,
             cycle=cycle,
             freeze_id=freeze_id,

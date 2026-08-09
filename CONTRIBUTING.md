@@ -7,7 +7,8 @@ applies to its always-resident skill listing.
 
 ## What runs automatically
 
-**CI** (`.github/workflows/ci.yml`) runs eleven checks on every PR and push:
+**CI** (`.github/workflows/ci.yml`) runs eleven checks on every pull request and on pushes
+to `main`:
 
 1. `.github/scripts/validate_plugins.py --self-test` — marketplace/plugin
    structure plus the payload/version release ledger and its negative controls.

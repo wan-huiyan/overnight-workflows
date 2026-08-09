@@ -203,12 +203,15 @@ the ordered renewal and per-exchange attestation histories.
 
 `scripts/finalization_manifest.py` is the one grammar, validator, and locked
 appender for controller and publisher finalization records. It requires exact
-schema-1 rows, a single canonical header, contiguous sequences, stable
+generic schema-2 rows, a single canonical header, contiguous sequences, stable
 finalization/writer identities, strict UTC timestamps, exact record-specific
 fields, and one final LF. Unknown types, undeclared fields, duplicate
 identities, partial rows, links, and changed inodes fail closed. The controller
 must use its `init`, `append`, and `seal-prefix` commands instead of building
-JSONL directly. The publisher imports the same parser and appender.
+JSONL directly. New source-review rows bind an arbitrary, exact repository-role
+map instead of project names. The publisher imports the same parser and
+appender. The prior project-specific schema-1 grammar remains available only
+to reproduce archived manifests; it cannot be appended or sealed.
 
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
@@ -341,6 +344,21 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-09** — `overnight-review-client-delivery` → **v1.0.3** and
+  `schedule-poll-orchestrator-pattern` → **v1.0.4**: the final-byte gate now
+  versions its durable contract and binds the package root plus every directory,
+  including empty directories, so create/delete membership changes invalidate
+  approval. Schedule-poll now versions and binds its full run configuration,
+  status path, journal path, and one journal-derived lock; alternate status
+  files, control-path aliases, duplicate claims, and incomplete initialization
+  recovery fail closed. The shared finalization writer now creates generic
+  schema-2 manifests with arbitrary repository role/key identities while
+  retaining the project-specific schema-1 reader only for archived evidence.
+  The panel validator similarly writes/validates generic schema-3 role maps,
+  removes the staged-result process cache, and strengthens receipt and event
+  controls. The 44-file source package remains source-only and is not published
+  by these changes. The release ledger pins the preceding payloads to commit
+  `e99eefd4` and binds these two new patch payloads.
 - **2026-08-09** — `overnight-review-client-delivery` → **v1.0.2** and
   `schedule-poll-orchestrator-pattern` → **v1.0.3**: routing is explicitly
   non-authorizing, and commit, push, pull-request, merge, deploy, network,

@@ -3818,7 +3818,7 @@ class PublicationTests(unittest.TestCase):
             json.loads(line)
             for line in manifest.read_text(encoding="utf-8").splitlines()
         ]
-        records[0]["schema_version"] = 2
+        records[0]["schema_version"] = 999
         manifest.write_text(
             "".join(
                 json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
@@ -3832,7 +3832,7 @@ class PublicationTests(unittest.TestCase):
         prepare_before = prepare_path.read_bytes()
         manifest_before = manifest.read_bytes()
 
-        with self.assertRaisesRegex(publisher.PublicationError, "schema drift"):
+        with self.assertRaisesRegex(publisher.PublicationError, "schema identity"):
             harness.reserve(operation, finalization_manifest=manifest)
 
         self.assertEqual(state_before, paths["state"].read_bytes())
