@@ -146,32 +146,74 @@ pinned-model evaluation was authorized for this release.
 ### Safe canonical publication
 
 Use `scripts/publish_codex_install.py` to prepare an immutable-commit candidate,
-reserve a package-wide writer lock, and publish only during recorded reader
-quiescence or a maintenance window. It stages outside skill-discovery roots,
-retains the prior generation, and requires Darwin whole-directory
-`RENAME_SWAP`; an unavailable exchange is `UNCHECKED`, with no per-file live
-fallback. Both staged and live generations run
-`check_large_queue_guidance.py --installed-root ... --self-test --json` and bind
-every named mutation outcome. `prepare` requires
+reserve a package-wide writer lock, and publish only under a current external
+reader-quiescence attestation. The publisher validates the recorded claim; it
+does not discover readers or prove the unknowable state of every process. The
+schema-2 JSON record has these exact fields (undeclared fields fail):
+
+```text
+schema_version: 2
+record_type: external_reader_quiescence_attestation
+operation_id, authorized_by
+publisher_validation_scope: publisher-validates-recorded-external-claim-not-unknowable-world-truth
+maintenance_window: {id, starts_at, ends_at}
+known_reader_inventory: {
+  scope: all-known-codex-skill-readers,
+  method, evidence_reference, inventory_complete: true,
+  known_reader_count: nonnegative integer,
+  known_active_reader_count: 0,
+  unknown_reader_policy: STOP_IF_UNKNOWN,
+  unknown_reader_status: NONE_OBSERVED,
+  checked_at, expires_at
+}
+controller: {id, state: ACTIVE, owner: {host, pid, process_start_identity}}
+```
+
+All text identities are normalized and control-free; `pid` is positive and
+reader counts are nonnegative. Timestamps use exact UTC
+`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`. The check and maintenance window must nest in
+order, must each be no longer than 15 minutes, and use an exclusive
+`expires_at`. Reserve validates the record twice. The publisher then re-reads,
+re-hashes, and revalidates it as the final action before every atomic exchange.
+A changed, stale, incomplete, active-reader, or unknown-reader claim blocks the
+exchange.
+
+Publication stages outside skill-discovery roots, retains the prior generation,
+and requires Darwin whole-directory `RENAME_SWAP`; an unavailable exchange is
+`UNCHECKED`, with no per-file live fallback. Both staged and live generations
+run `check_large_queue_guidance.py --installed-root ... --self-test --json` and
+bind every named mutation outcome. `prepare` requires
 `--expected-live-source-commit`: the live tree must exactly match that commit's
 installed paths and bytes, independently of the candidate paths and bytes. This
 permits an exact nested `SKILL.md` to `WORKFLOW.md` migration without treating
-the removed path as drift. Mutating `recover` additionally requires a durable
-`--takeover-authorization` proving that the reserved owner was inspected and is
-`STOPPED` or `SUPERSEDED`, with its process and tool session both inactive.
-Receipts bind both source commits/trees, both exact identities, the named live
-mutation outcome, and the recovery authorization when one was used.
+the removed path as drift. Mutating `recover` requires both a durable
+`--takeover-authorization` proving the reserved owner is `STOPPED` or
+`SUPERSEDED` and a fresh `--reader-quiescence-record`. Fresh means its byte
+digest differs from every earlier attestation and its `checked_at` is strictly
+later. Renewal records preserve the precise binding time inside that claim's
+current bounds and no later than any exchange that cites them. They are
+append-linked to the exact generation, reservation, takeover authorization,
+recovery action, and prior renewal. Read-only `recover --action inspect`
+rejects a reader record. Receipts bind both source commits/trees, both exact
+identities, the named live mutation outcome, the recovery authorization, and
+the ordered renewal and per-exchange attestation histories.
+
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
-active, the canonical `inventory --phase dispatch|judgment|acceptance --output
-<absolute-evidence-path>` command records the exact live
-`sha256-size-path-v1` inventory and the bounded prefix (byte count, digest, and
-last sequence) of the finalization manifest. Only an explicit `accept` command,
-bound to the acceptance-phase inventory receipt, reviewer identity, reason,
-and the unchanged manifest prefix, appends panel acceptance and releases the
-reservation.
+active, exactly one inventory chain must run in order: `dispatch`, then
+`judgment`, then `acceptance`. Each schema-2 receipt records the exact live
+`sha256-size-path-v1` inventory and binds the preceding receipt plus the prior
+and current bounded finalization-manifest prefixes. Skipped, reordered, or
+duplicate artifacts fail. An exact same-path replay of an already committed
+phase returns its existing receipt; a crash retry may reuse only the same phase
+and exact output path recorded by the durable pending intent. Only an explicit
+`accept` command with the complete chain's acceptance receipt, reviewer
+identity, reason, and unchanged acceptance prefix appends panel acceptance and
+releases the reservation.
 
 ```bash
+python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase dispatch --output /abs/evidence/dispatch-live.json
+python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase judgment --output /abs/evidence/judgment-live.json
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase acceptance --output /abs/evidence/acceptance-live.json
 python3 scripts/publish_codex_install.py accept --operation OP --state-root /abs/state --lock /abs/state/package.lock --finalization-manifest /abs/finalization.jsonl --acceptance-inventory-receipt /abs/evidence/acceptance-live.json --accepted-by REVIEWER --acceptance-reason "panel accepted"
 ```
@@ -182,7 +224,8 @@ uses real `RENAME_SWAP` only between temporary directories, proving that a
 reader holding an opened old directory descriptor sees the complete old
 generation while a new path reader sees the complete new one. It never
 performs a live installation; unknown readers still require recorded
-quiescence or maintenance authorization. Run:
+quiescence or maintenance authorization. This is a safe temporary-directory
+control, not a claim about concurrent readers of a live installation. Run:
 
 ```bash
 python3 -m unittest scripts/test_publish_codex_install.py -v
@@ -279,7 +322,10 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
   `overnight-multi-issue-implementation` remains at its already-unreleased
   **1.5.0**. The release ledger reproduces every prior payload from fixed
   published commit `3df43c37` and binds every current payload/version. The
-  routed Codex package keeps the seven
+  ledger, plugin manifests, and this release note are the canonical release
+  history; runtime skill bodies keep their navigation and, where useful, one
+  concise current-version line instead of duplicating historical changelogs.
+  The routed Codex package keeps the seven
   canonical plugin `SKILL.md` entrypoints but installs them as ordinary
   `WORKFLOW.md` references, leaving only the umbrella model-visible. Bundle
   `VERSION` remains **1.5.0** because that bundle release is still unreleased.
@@ -287,8 +333,11 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
   Codex 0.147.0 loader inventory probe, exact routing cases, immutable panel
   input/snapshot validation, and an atomic generation publisher with rollback
   and deterministic concurrency/drift/failure controls. Terminal validation
-  retains the package reservation through panel acceptance; locked live
-  inventory receipts and the separate acceptance command bind and release it.
+  retains the package reservation through panel acceptance; an exact
+  dispatch-to-judgment-to-acceptance inventory chain and the separate
+  acceptance command bind and release it. Bounded external reader attestations
+  are revalidated at every atomic exchange, with append-linked renewals for
+  inspected recovery.
   No live package is published by these repository changes.
 - **2026-08-08** — `overnight-multi-issue-implementation` → **v1.5.0** and bundle `VERSION` → **1.5.0**: adds `references/large-live-queue-orchestration.md` for mixed indexes and backlogs whose rows may be stale, partly complete, owner-gated, or blocked by shared files. The procedure requires occurrence-aware parent-row reconciliation with child slices, separate authority grants, per-item budgets and latest starts, an explicit contention matrix, separate classification/task/reason/verification/disposition state, separate controller-liveness, execution-lease, and repository-relative exact-path-reservation records joined by ID, inspected crashed-controller takeover, durable recovery, complete review artifacts, deterministic target/merge-base/head/diff review, and serial integration. It adds a tracked canonical source, machine-checked state contract, and complete 38-file transitive install manifest for the concise Codex umbrella plus a focused CI contract gate. The umbrella preserves each workflow's directory shape and verifies local links in canonical and installed layouts. It also starts sequential tasks from a fresh target worktree instead of broadly resetting an unknown tree; honors a recorded merge-on-green grant while stopping when merge authority is absent; inspects a yielded process before retrying it; preserves the old discovery suite and adds large-queue trigger cases; and removes agent, workflow, and wall-time totals the source handoff did not verify.
 - **2026-08-07** — `overnight-multi-issue-implementation` → **v1.4.0** (SKILL + both manifests; bundle `VERSION` already reads 1.4.0 from the 2026-08-06 release below and is unchanged — it is the bundle's own counter, not a mirror of this plugin's): adds **"Pre-flight: stale-base audit — what your OWN branch deletes"**, the inward mirror of the parallel-branch collision audit it now sits beside. That audit looks outward at branches that might conflict with you; this one looks at the branch you are about to merge. **The evidence is one incident.** A pull request merged from a branch created before several other pull requests landed and never rebased; its conflict resolution took its own side across the whole tree — **59 files, 1,891 insertions, 5,081 deletions** — reverting **11 files and 15 tracker entries belonging to three other sessions**, plus a function two surviving files still imported. Nothing failed: no conflict, green PR, schema validator passed, site still rendered. All three sessions had finished a wrap-up that morning and their work *was* on `main`, for between 6 and 90 minutes; the fastest discovery took 16 minutes 36 seconds and was an accident. The merged content was legitimate and had to stand, so `git revert` was the wrong tool — it would have destroyed everything merged after it. **What the section adds beyond "rebase before merge":** a pre-merge recipe that reads the DELETIONS, plus a total-deletions threshold set low enough to force a read — and it uses **`git diff origin/main..HEAD` with two dots, not three**, which is a correction the drafting turned up rather than a restatement. The three-dot form everyone reaches for diffs from the *merge base*, so on a branch that never took `main`'s newer commits a file added to `main` after the branch point is absent from both sides and reports as **no change at all**; verified on a two-commit synthetic repo where three-dot prints nothing and two-dot prints the file. Rebase first — the order is load-bearing — and note that a *plain* merge of a stale branch is harmless (git keeps what only `main` has); the damage needs the branch's tree to win wholesale, via a merge of `main` into the branch resolved to its own side, `-X ours`, or a squash of the branch tree. Also an audit-after recipe built on the finding most checklists miss — **`git cat-file -e` is the weak check**, because a file can be present with its contents rolled back and no existence check, id check or validator will say a word. Audit instead for a marker your change ADDED. The worked example is measured rather than argued: a page of seven interactive widgets whose option lists are single-quoted HTML attributes, three of them holding an apostrophe behind a one-character `&#39;`. Roll that escape back on the fourth widget and the file exists, the HTML is valid, all seven widgets are in the markup, every committed check passes — and four of the seven are silently dead, because the truncated attribute throws inside the one `forEach` that builds them all. Loading the real page with each escape rolled back in turn gives three working, or **none** if the first widget is the one broken. Recovery is a splice-forward (`git show <sha>:<path>`), never a revert, with the three things that bite during one: restore what the restored file imports, re-check state before each restore because parallel sessions are repairing at the same time, and re-measure any figure a restored file carries rather than reconciling two versions by eye.

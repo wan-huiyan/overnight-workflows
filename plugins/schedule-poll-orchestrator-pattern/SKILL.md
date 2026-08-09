@@ -31,12 +31,6 @@ date: 2026-08-09
 - [Example](#example)
 - [Notes and references](#notes)
 - [Version history](#version-history)
-- [Changelog](#changelog)
-
-## Changelog
-
-- **1.0.2 (2026-08-09):** adds the top contents list required by the routed
-  Codex `WORKFLOW.md` edition.
 
 ## Problem
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import errno
 import fcntl
 import hashlib
@@ -41,11 +41,23 @@ RENAME_SWAP = 0x00000002
 OPERATION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 HEX_40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX_64_RE = re.compile(r"[0-9a-f]{64}\Z")
+RFC3339_UTC_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
+)
 SAFE_COMPONENT_FORBIDDEN = {"", ".", ".."}
 MUTATION_NO_LIVE_CHANGE = "NO_LIVE_MUTATION_PREPARED"
 MUTATION_PUBLISHED = "PUBLISHED_CANDIDATE_GENERATION"
 MUTATION_ROLLED_BACK = "ROLLED_BACK_TO_PREFLIGHT_GENERATION"
-LIVE_INVENTORY_PHASES = {"dispatch", "judgment", "acceptance"}
+LIVE_INVENTORY_PHASE_ORDER = ("dispatch", "judgment", "acceptance")
+LIVE_INVENTORY_PHASES = set(LIVE_INVENTORY_PHASE_ORDER)
+READER_QUIESCENCE_SCHEMA_VERSION = 2
+READER_QUIESCENCE_MAX_WINDOW = timedelta(minutes=15)
+READER_QUIESCENCE_SCOPE = "all-known-codex-skill-readers"
+READER_UNKNOWN_POLICY = "STOP_IF_UNKNOWN"
+READER_UNKNOWN_STATUS_CLEAR = "NONE_OBSERVED"
+EXTERNAL_CLAIM_VALIDATION_SCOPE = (
+    "publisher-validates-recorded-external-claim-not-unknowable-world-truth"
+)
 
 
 class PublicationError(RuntimeError):
@@ -658,7 +670,54 @@ def _make_tree_read_only(root: Path) -> None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return _utc_datetime_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _utc_datetime_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _format_precise_utc_timestamp(value: datetime) -> str:
+    """Serialize the exact UTC instant used for a time-sensitive validation."""
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise PublicationError("publisher clock must be timezone-aware UTC")
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise PublicationError(f"{label} must be a non-empty RFC3339 UTC timestamp")
+    if not RFC3339_UTC_RE.fullmatch(value):
+        raise PublicationError(
+            f"{label} must use exact YYYY-MM-DDTHH:MM:SS[.ffffff]Z syntax"
+        )
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise PublicationError(f"{label} is not a parseable RFC3339 timestamp") from exc
+    if parsed.utcoffset() != timedelta(0):
+        raise PublicationError(f"{label} is not UTC")
+    return parsed
+
+
+def _require_exact_keys(
+    value: Mapping[str, Any], expected: Set[str], *, label: str
+) -> None:
+    observed = set(value)
+    if observed != expected:
+        missing = sorted(expected - observed)
+        undeclared = sorted(observed - expected)
+        raise PublicationError(
+            f"{label} keys are not exact; missing={missing}, undeclared={undeclared}"
+        )
+
+
+def _validated_attestation_text(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise PublicationError(f"{label} must be a non-empty normalized string")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise PublicationError(f"{label} contains a control character")
+    return value
 
 
 def _operation_paths(state_root: Path, operation: str) -> Dict[str, Path]:
@@ -1255,29 +1314,201 @@ def prepare_operation(
             raise
 
 
-def _validate_maintenance_receipt(path: Path, operation: str) -> Tuple[Dict[str, Any], str]:
-    receipt = _read_json_file(path, label="maintenance authorization receipt")
-    required_strings = (
-        "authorized_by",
-        "maintenance_window_id",
-        "reader_quiescence_checked_at",
-        "controller_id",
-        "owner_host",
-        "owner_process_start_identity",
+def _reader_attestation_summary(receipt: Mapping[str, Any]) -> Dict[str, Any]:
+    """Keep the exact bounded external claim in durable publisher state."""
+    return {
+        "authorized_by": receipt["authorized_by"],
+        "maintenance_window": receipt["maintenance_window"],
+        "known_reader_inventory": receipt["known_reader_inventory"],
+        "publisher_validation_scope": receipt["publisher_validation_scope"],
+    }
+
+
+def _validate_maintenance_receipt(
+    path: Path,
+    operation: str,
+    *,
+    require_current: bool = True,
+    now: Optional[datetime] = None,
+) -> Tuple[Dict[str, Any], str]:
+    """Validate a bounded external claim, not the unknowable reader world itself."""
+    path = _safe_absolute(path, label="reader-quiescence record", must_exist=True)
+    observed = os.lstat(path)
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise PublicationError(
+            "reader-quiescence record must be a single-link regular file"
+        )
+    raw = _read_regular_bytes(path, label="reader-quiescence record")
+    after = os.lstat(path)
+    if (
+        (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_size,
+            observed.st_mtime_ns,
+            observed.st_ctime_ns,
+        )
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        or after.st_nlink != 1
+    ):
+        raise PublicationError("reader-quiescence record changed during validation")
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"reader-quiescence record is invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PublicationError("reader-quiescence record must contain one JSON object")
+    receipt = value
+    _require_exact_keys(
+        receipt,
+        {
+            "schema_version",
+            "record_type",
+            "operation_id",
+            "authorized_by",
+            "maintenance_window",
+            "known_reader_inventory",
+            "publisher_validation_scope",
+            "controller",
+        },
+        label="reader-quiescence record",
     )
-    if receipt.get("schema_version") != 1 or receipt.get("operation_id") != operation:
-        raise PublicationError("maintenance receipt schema or operation ID is wrong")
-    if receipt.get("reader_quiescence_status") != "QUIESCENT":
-        raise PublicationError("known Codex readers are not recorded as QUIESCENT")
-    if receipt.get("controller_state") != "ACTIVE":
-        raise PublicationError("maintenance receipt controller_state is not ACTIVE")
-    owner_pid = receipt.get("owner_pid")
+    if (
+        receipt.get("schema_version") != READER_QUIESCENCE_SCHEMA_VERSION
+        or receipt.get("record_type") != "external_reader_quiescence_attestation"
+        or receipt.get("operation_id") != operation
+    ):
+        raise PublicationError(
+            "reader-quiescence record schema, type, or operation ID is wrong"
+        )
+    _validated_attestation_text(
+        receipt.get("operation_id"), label="reader-quiescence operation_id"
+    )
+    _validated_attestation_text(
+        receipt.get("authorized_by"), label="reader-quiescence authorized_by"
+    )
+    if receipt.get("publisher_validation_scope") != EXTERNAL_CLAIM_VALIDATION_SCOPE:
+        raise PublicationError(
+            "reader-quiescence record must state that the publisher validates only "
+            "the recorded external claim, not unknowable world truth"
+        )
+
+    window = receipt.get("maintenance_window")
+    if not isinstance(window, dict):
+        raise PublicationError("reader-quiescence record lacks maintenance_window")
+    _require_exact_keys(
+        window, {"id", "starts_at", "ends_at"}, label="maintenance_window"
+    )
+    _validated_attestation_text(window.get("id"), label="maintenance_window.id")
+    window_start = _parse_utc_timestamp(
+        window.get("starts_at"), label="maintenance_window.starts_at"
+    )
+    window_end = _parse_utc_timestamp(
+        window.get("ends_at"), label="maintenance_window.ends_at"
+    )
+    if window_start >= window_end:
+        raise PublicationError("maintenance window must end after it starts")
+    if window_end - window_start > READER_QUIESCENCE_MAX_WINDOW:
+        raise PublicationError("maintenance window exceeds the 15-minute maximum")
+
+    inventory = receipt.get("known_reader_inventory")
+    if not isinstance(inventory, dict):
+        raise PublicationError("reader-quiescence record lacks known_reader_inventory")
+    _require_exact_keys(
+        inventory,
+        {
+            "scope",
+            "method",
+            "evidence_reference",
+            "inventory_complete",
+            "known_reader_count",
+            "known_active_reader_count",
+            "unknown_reader_policy",
+            "unknown_reader_status",
+            "checked_at",
+            "expires_at",
+        },
+        label="known_reader_inventory",
+    )
+    required_inventory_strings = ("method", "evidence_reference")
+    for key in required_inventory_strings:
+        _validated_attestation_text(
+            inventory.get(key), label=f"known_reader_inventory.{key}"
+        )
+    if inventory.get("scope") != READER_QUIESCENCE_SCOPE:
+        raise PublicationError("known-reader inventory scope is incomplete or unknown")
+    if inventory.get("inventory_complete") is not True:
+        raise PublicationError("known-reader inventory is not recorded as complete")
+    known_count = inventory.get("known_reader_count")
+    active_count = inventory.get("known_active_reader_count")
+    if (
+        not isinstance(known_count, int)
+        or isinstance(known_count, bool)
+        or known_count < 0
+        or not isinstance(active_count, int)
+        or isinstance(active_count, bool)
+        or active_count < 0
+        or active_count > known_count
+    ):
+        raise PublicationError("known-reader inventory counts are malformed")
+    if active_count != 0:
+        raise PublicationError("known active reader count must be zero")
+    if inventory.get("unknown_reader_policy") != READER_UNKNOWN_POLICY:
+        raise PublicationError("unknown-reader policy must be STOP_IF_UNKNOWN")
+    if inventory.get("unknown_reader_status") != READER_UNKNOWN_STATUS_CLEAR:
+        raise PublicationError("unknown-reader status is not clear; publication must stop")
+    checked_at = _parse_utc_timestamp(
+        inventory.get("checked_at"), label="known_reader_inventory.checked_at"
+    )
+    expires_at = _parse_utc_timestamp(
+        inventory.get("expires_at"), label="known_reader_inventory.expires_at"
+    )
+    if not (window_start <= checked_at < expires_at <= window_end):
+        raise PublicationError(
+            "reader attestation checked_at/expires_at are outside the maintenance window"
+        )
+    if expires_at - checked_at > READER_QUIESCENCE_MAX_WINDOW:
+        raise PublicationError("reader attestation exceeds the 15-minute maximum")
+
+    controller = receipt.get("controller")
+    owner = controller.get("owner") if isinstance(controller, dict) else None
+    if not isinstance(controller, dict) or not isinstance(owner, dict):
+        raise PublicationError("reader-quiescence controller or owner is malformed")
+    _require_exact_keys(controller, {"id", "state", "owner"}, label="controller")
+    _require_exact_keys(
+        owner,
+        {"host", "pid", "process_start_identity"},
+        label="controller.owner",
+    )
+    if controller.get("state") != "ACTIVE":
+        raise PublicationError("reader-quiescence controller state is not ACTIVE")
+    for container, key, label in (
+        (controller, "id", "controller.id"),
+        (owner, "host", "controller.owner.host"),
+        (owner, "process_start_identity", "controller.owner.process_start_identity"),
+    ):
+        _validated_attestation_text(
+            container.get(key), label=f"reader-quiescence {label}"
+        )
+    owner_pid = owner.get("pid")
     if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
-        raise PublicationError("maintenance receipt owner_pid must be a positive integer")
-    for key in required_strings:
-        if not isinstance(receipt.get(key), str) or not receipt[key].strip():
-            raise PublicationError(f"maintenance receipt lacks non-empty {key}")
-    raw = _read_regular_bytes(path, label="maintenance authorization receipt")
+        raise PublicationError("reader-quiescence controller.owner.pid must be positive")
+
+    if require_current:
+        observed_now = _utc_datetime_now() if now is None else now
+        if observed_now.tzinfo is None or observed_now.utcoffset() != timedelta(0):
+            raise PublicationError("publisher clock must be timezone-aware UTC")
+        if not (window_start <= observed_now < window_end):
+            raise PublicationError("current time is outside the maintenance window")
+        if not (checked_at <= observed_now < expires_at):
+            raise PublicationError("reader-quiescence attestation is stale or not yet valid")
+
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
@@ -1660,7 +1891,9 @@ def reserve_operation(
     )
     if _is_within(maintenance_receipt, Path(state["install_root"])):
         raise PublicationError("maintenance receipt must be outside the installed skill root")
-    receipt, receipt_digest = _validate_maintenance_receipt(maintenance_receipt, operation)
+    receipt, receipt_digest = _validate_maintenance_receipt(
+        maintenance_receipt, operation, require_current=True
+    )
     manifest_path: Optional[Path] = None
     if finalization_manifest is not None:
         manifest_path = _validate_finalization_manifest_path(
@@ -1679,6 +1912,13 @@ def reserve_operation(
         if state.get("status") != "PREPARED":
             raise PublicationError(f"operation is not PREPARED: {state.get('status')}")
         _verify_prepare_evidence(state)
+        current_receipt, current_receipt_digest = _validate_maintenance_receipt(
+            maintenance_receipt, operation, require_current=True
+        )
+        if current_receipt_digest != receipt_digest or current_receipt != receipt:
+            raise PublicationError(
+                "reader-quiescence record changed during reservation acquisition"
+            )
         if paths["reservation"].exists() or paths["reservation"].is_symlink():
             raise PublicationError(
                 "package reservation already exists; expiry or malformed ownership never permits takeover"
@@ -1694,7 +1934,7 @@ def reserve_operation(
             intent_payload = {
                 "operation_id": operation,
                 "generation_id": state["generation_id"],
-                "installer": receipt["controller_id"],
+                "installer": receipt["controller"]["id"],
                 "installed_root": state["install_root"],
                 "lock_path": str(paths["reservation"]),
                 "prepare_receipt_path": str(prepare_receipt),
@@ -1724,17 +1964,15 @@ def reserve_operation(
             "generation_id": state["generation_id"],
             "created_at": _utc_now(),
             "owner": {
-                "host": receipt["owner_host"],
-                "pid": receipt["owner_pid"],
-                "process_start_identity": receipt["owner_process_start_identity"],
-                "controller_id": receipt["controller_id"],
-                "controller_state": receipt["controller_state"],
+                "host": receipt["controller"]["owner"]["host"],
+                "pid": receipt["controller"]["owner"]["pid"],
+                "process_start_identity": receipt["controller"]["owner"]
+                ["process_start_identity"],
+                "controller_id": receipt["controller"]["id"],
+                "controller_state": receipt["controller"]["state"],
             },
             "maintenance": {
-                "authorized_by": receipt["authorized_by"],
-                "maintenance_window_id": receipt["maintenance_window_id"],
-                "reader_quiescence_status": receipt["reader_quiescence_status"],
-                "reader_quiescence_checked_at": receipt["reader_quiescence_checked_at"],
+                **_reader_attestation_summary(receipt),
                 "receipt_path": str(maintenance_receipt),
                 "receipt_sha256": receipt_digest,
             },
@@ -1791,8 +2029,6 @@ def _load_reservation(
         raise PublicationError("package reservation owner or maintenance record is malformed")
     if owner.get("controller_state") != "ACTIVE":
         raise PublicationError("reservation controller state is not ACTIVE")
-    if maintenance.get("reader_quiescence_status") != "QUIESCENT":
-        raise PublicationError("reservation does not record quiescent readers")
     recorded_reservation = state.get("reservation")
     if not isinstance(recorded_reservation, dict) or reservation != recorded_reservation:
         raise PublicationError(
@@ -1817,11 +2053,128 @@ def _load_reservation(
         raise PublicationError("reservation lacks maintenance receipt path")
     receipt_file = Path(receipt_path)
     _safe_absolute(receipt_file, label="maintenance receipt", must_exist=True)
-    if hashlib.sha256(
-        _read_regular_bytes(receipt_file, label="maintenance authorization receipt")
-    ).hexdigest() != maintenance.get("receipt_sha256"):
-        raise PublicationError("maintenance authorization receipt drifted after reservation")
+    receipt, receipt_digest = _validate_maintenance_receipt(
+        receipt_file, operation, require_current=False
+    )
+    if receipt_digest != maintenance.get("receipt_sha256"):
+        raise PublicationError("reader-quiescence record drifted after reservation")
+    if _reader_attestation_summary(receipt) != {
+        key: value
+        for key, value in maintenance.items()
+        if key not in {"receipt_path", "receipt_sha256"}
+    }:
+        raise PublicationError(
+            "reservation reader-quiescence claim differs from its external record"
+        )
     return reservation
+
+
+def _original_reader_attestation_binding(
+    reservation: Mapping[str, Any]
+) -> Dict[str, Any]:
+    maintenance = reservation.get("maintenance")
+    if not isinstance(maintenance, dict):
+        raise PublicationError("reservation reader-quiescence record is malformed")
+    return dict(maintenance)
+
+
+def _revalidate_reader_attestation_before_exchange(
+    reader_attestation: Mapping[str, Any],
+    *,
+    operation: str,
+    purpose: str,
+) -> Dict[str, Any]:
+    """Re-read the exact external claim at the final boundary before exchange."""
+    validation_now = _utc_datetime_now()
+    if not isinstance(reader_attestation.get("receipt_path"), str):
+        raise PublicationError("reader-quiescence attestation binding is malformed")
+    receipt_path = _safe_absolute(
+        Path(str(reader_attestation["receipt_path"])),
+        label="reader-quiescence record",
+        must_exist=True,
+    )
+    receipt, receipt_digest = _validate_maintenance_receipt(
+        receipt_path, operation, require_current=True, now=validation_now
+    )
+    if receipt_digest != reader_attestation.get("receipt_sha256"):
+        raise PublicationError(
+            "reader-quiescence record changed before atomic exchange"
+        )
+    if _reader_attestation_summary(receipt) != {
+        key: value
+        for key, value in reader_attestation.items()
+        if key not in {"receipt_path", "receipt_sha256"}
+    }:
+        raise PublicationError(
+            "reader-quiescence claim changed before atomic exchange"
+        )
+    return {
+        "validation_scope": EXTERNAL_CLAIM_VALIDATION_SCOPE,
+        "purpose": purpose,
+        "validated_at": _format_precise_utc_timestamp(validation_now),
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": receipt_digest,
+        "maintenance_window": receipt["maintenance_window"],
+        "checked_at": receipt["known_reader_inventory"]["checked_at"],
+        "expires_at": receipt["known_reader_inventory"]["expires_at"],
+        "known_active_reader_count": receipt["known_reader_inventory"]
+        ["known_active_reader_count"],
+        "unknown_reader_policy": receipt["known_reader_inventory"]
+        ["unknown_reader_policy"],
+        "unknown_reader_status": receipt["known_reader_inventory"]
+        ["unknown_reader_status"],
+    }
+
+
+def _exchange_after_current_reader_attestation(
+    *,
+    reader_attestation: Mapping[str, Any],
+    operation: str,
+    purpose: str,
+    binding_context: Mapping[str, Any],
+    exchanger: "AtomicExchanger",
+    left: Path,
+    right: Path,
+) -> Dict[str, Any]:
+    """Make the attestation re-read/re-hash the final action before exchange."""
+    attestation = _revalidate_reader_attestation_before_exchange(
+        reader_attestation, operation=operation, purpose=purpose
+    )
+    attestation["binding_context"] = dict(binding_context)
+    exchanger.exchange(left, right)
+    return attestation
+
+
+def _atomic_exchange_attestation_identity(
+    record: Mapping[str, Any]
+) -> Dict[str, Any]:
+    encoded = (json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    return {
+        "record_type": "atomic_exchange_reader_attestation",
+        "sequence": record.get("sequence"),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _record_atomic_exchange_attestation(
+    state: Dict[str, Any], attestation: Mapping[str, Any]
+) -> Dict[str, Any]:
+    history = state.setdefault("atomic_exchange_reader_attestations", [])
+    if not isinstance(history, list):
+        raise PublicationError("atomic exchange reader-attestation history is malformed")
+    predecessor = (
+        _atomic_exchange_attestation_identity(history[-1]) if history else None
+    )
+    record = {
+        "sequence": len(history) + 1,
+        "predecessor_attestation": predecessor,
+        **dict(attestation),
+    }
+    history.append(record)
+    state["atomic_exchange_reader_attestation"] = record
+    return record
 
 
 class AtomicExchanger:
@@ -1993,10 +2346,39 @@ def _rollback_after_validation_failure(
     preflight_paths: Sequence[str],
     exchanger: AtomicExchanger,
     reason: str,
+    reader_attestation_binding: Optional[Mapping[str, Any]] = None,
+    reader_attestation_context: Optional[Mapping[str, Any]] = None,
 ) -> None:
+    reservation = state.get("reservation")
+    if not isinstance(reservation, dict):
+        raise PublicationError(
+            "automatic rollback lacks its exact package reservation"
+        )
     _record_event(state, "rollback_started", reason=reason)
     _persist_state(paths["state"], state, "ROLLBACK_PENDING")
-    exchanger.exchange(paths["previous"], install_root)
+    exchange_attestation = _exchange_after_current_reader_attestation(
+        reader_attestation=(
+            dict(reader_attestation_binding)
+            if reader_attestation_binding is not None
+            else _original_reader_attestation_binding(reservation)
+        ),
+        operation=str(state["operation_id"]),
+        purpose="automatic-validation-failure-rollback",
+        binding_context=(
+            dict(reader_attestation_context)
+            if reader_attestation_context is not None
+            else {"kind": "original_reservation_attestation"}
+        ),
+        exchanger=exchanger,
+        left=paths["previous"],
+        right=install_root,
+    )
+    _record_atomic_exchange_attestation(state, exchange_attestation)
+    _record_event(
+        state,
+        "reader_attestation_revalidated_immediately_before_exchange",
+        purpose="automatic-validation-failure-rollback",
+    )
     old_inventory = build_inventory(install_root, preflight_paths)
     failed_inventory = build_inventory(paths["previous"], candidate_paths)
     if old_inventory.digest != state["preflight_inventory"]["sha256"]:
@@ -2031,6 +2413,7 @@ def publish_operation(
     checker_runner: CheckerRunner = run_installed_checker,
     failpoint: Failpoint = None,
     recovery_takeover_authorization: Optional[Mapping[str, Any]] = None,
+    recovery_reader_attestation_renewal: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Recheck the reservation/digests and atomically publish one generation."""
     state_root = _safe_absolute(state_root, label="state root", must_exist=True)
@@ -2047,6 +2430,26 @@ def publish_operation(
                 if state.get("recovery_takeover_authorization") != recovery_takeover_authorization:
                     raise PublicationError("recovery takeover authorization drifted before resume")
                 _verify_recorded_takeover_authorization(state, reservation)
+            reader_attestation_binding = _original_reader_attestation_binding(
+                reservation
+            )
+            reader_attestation_context: Dict[str, Any] = {
+                "kind": "original_reservation_attestation"
+            }
+            if recovery_reader_attestation_renewal is not None:
+                renewal = _require_active_recovery_reader_attestation_renewal(
+                    paths=paths,
+                    state=state,
+                    reservation=reservation,
+                    renewal=recovery_reader_attestation_renewal,
+                )
+                reader_attestation_binding = dict(renewal["attestation"])
+                reader_attestation_context = {
+                    "kind": "recovery_reader_attestation_renewal",
+                    "renewal_identity": _recovery_reader_attestation_renewal_identity(
+                        renewal
+                    ),
+                }
             candidate_paths = state.get("candidate_expected_paths")
             preflight_paths = state.get("preflight_expected_paths")
             if (
@@ -2115,7 +2518,21 @@ def publish_operation(
             _persist_state(paths["state"], state, "SWAP_PENDING")
             if failpoint:
                 failpoint("before_exchange")
-            exchanger.exchange(slot, install_root)
+            exchange_attestation = _exchange_after_current_reader_attestation(
+                reader_attestation=reader_attestation_binding,
+                operation=operation,
+                purpose="publish",
+                binding_context=reader_attestation_context,
+                exchanger=exchanger,
+                left=slot,
+                right=install_root,
+            )
+            _record_atomic_exchange_attestation(state, exchange_attestation)
+            _record_event(
+                state,
+                "reader_attestation_revalidated_immediately_before_exchange",
+                purpose="publish",
+            )
             state["exchange_primitive"] = exchanger.name
             _record_event(state, "atomic_exchange_completed")
             _persist_state(paths["state"], state, "SWAPPED")
@@ -2149,6 +2566,8 @@ def publish_operation(
                     preflight_paths=preflight_paths,
                     exchanger=exchanger,
                     reason=str(exc),
+                    reader_attestation_binding=reader_attestation_binding,
+                    reader_attestation_context=reader_attestation_context,
                 )
                 raise
             accepted_live = build_inventory(install_root, candidate_paths)
@@ -2261,6 +2680,578 @@ def _verify_recorded_takeover_authorization(
     return observed
 
 
+def _recovery_reader_attestation_renewal_identity(
+    renewal: Mapping[str, Any]
+) -> Dict[str, Any]:
+    encoded = (json.dumps(dict(renewal), sort_keys=True, separators=(",", ":")) + "\n").encode(
+        "utf-8"
+    )
+    return {
+        "record_type": "recovery_reader_attestation_renewal",
+        "sequence": renewal.get("sequence"),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _original_reader_attestation_predecessor(
+    reservation_identity: Mapping[str, Any], reservation: Mapping[str, Any]
+) -> Dict[str, Any]:
+    original = _original_reader_attestation_binding(reservation)
+    return {
+        "record_type": "original_reservation_reader_attestation",
+        "reservation_sha256": reservation_identity.get("sha256"),
+        "receipt_path": original.get("receipt_path"),
+        "receipt_sha256": original.get("receipt_sha256"),
+    }
+
+
+def _validate_recovery_reader_attestation_renewal_chain(
+    *,
+    state: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+    reservation_identity: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    renewals = state.get("reader_attestation_renewals", [])
+    if not isinstance(renewals, list):
+        raise PublicationError("recovery reader-attestation renewal chain is malformed")
+    predecessor: Mapping[str, Any] = _original_reader_attestation_predecessor(
+        reservation_identity, reservation
+    )
+    previous_attestation: Mapping[str, Any] = _original_reader_attestation_binding(
+        reservation
+    )
+    prior_receipt_digests = {str(previous_attestation.get("receipt_sha256"))}
+    validated: List[Dict[str, Any]] = []
+    seen_paths: Set[str] = set()
+    previous_bound_at: Optional[datetime] = None
+    expected_keys = {
+        "schema_version",
+        "record_type",
+        "sequence",
+        "operation_id",
+        "generation_id",
+        "action",
+        "bound_at",
+        "reservation",
+        "takeover_authorization",
+        "predecessor_renewal",
+        "attestation",
+    }
+    for index, value in enumerate(renewals):
+        if not isinstance(value, dict):
+            raise PublicationError("recovery reader-attestation renewal is not an object")
+        _require_exact_keys(
+            value, expected_keys, label="recovery reader-attestation renewal"
+        )
+        attestation = value.get("attestation")
+        takeover = value.get("takeover_authorization")
+        if (
+            value.get("schema_version") != 1
+            or value.get("record_type") != "recovery_reader_attestation_renewal"
+            or value.get("sequence") != index + 1
+            or value.get("operation_id") != state.get("operation_id")
+            or value.get("generation_id") != state.get("generation_id")
+            or value.get("action") not in {"complete", "rollback"}
+            or value.get("reservation") != reservation_identity
+            or value.get("predecessor_renewal") != predecessor
+            or not isinstance(takeover, dict)
+            or set(takeover) != {"path", "sha256"}
+            or not isinstance(attestation, dict)
+            or set(attestation)
+            != {
+                "authorized_by",
+                "maintenance_window",
+                "known_reader_inventory",
+                "publisher_validation_scope",
+                "receipt_path",
+                "receipt_sha256",
+            }
+            or not isinstance(attestation.get("receipt_path"), str)
+            or not HEX_64_RE.fullmatch(str(attestation.get("receipt_sha256")))
+        ):
+            raise PublicationError(
+                "recovery reader-attestation renewal chain binding is malformed"
+            )
+        bound_at = _parse_utc_timestamp(
+            value.get("bound_at"), label="recovery reader-attestation renewal bound_at"
+        )
+        takeover_path = _safe_absolute(
+            Path(str(takeover["path"])),
+            label="recovery takeover authorization",
+            must_exist=True,
+        )
+        observed_takeover = _validate_takeover_authorization(
+            takeover_path, state=state, reservation=reservation
+        )
+        if {
+            "path": observed_takeover["path"],
+            "sha256": observed_takeover["sha256"],
+        } != takeover:
+            raise PublicationError(
+                "recovery reader-attestation renewal takeover identity drifted"
+            )
+        receipt_path = Path(attestation["receipt_path"])
+        if str(receipt_path) in seen_paths:
+            raise PublicationError(
+                "recovery reader-attestation renewal reuses an earlier receipt path"
+            )
+        seen_paths.add(str(receipt_path))
+        receipt, receipt_digest = _validate_maintenance_receipt(
+            receipt_path,
+            str(state["operation_id"]),
+            require_current=False,
+        )
+        expected_attestation = {
+            **_reader_attestation_summary(receipt),
+            "receipt_path": str(receipt_path),
+            "receipt_sha256": receipt_digest,
+        }
+        if attestation != expected_attestation:
+            raise PublicationError(
+                "recovery reader-attestation renewal receipt identity drifted"
+            )
+        maintenance_window = receipt["maintenance_window"]
+        reader_inventory = receipt["known_reader_inventory"]
+        window_start = _parse_utc_timestamp(
+            maintenance_window["starts_at"],
+            label="recovery reader-attestation renewal maintenance starts_at",
+        )
+        window_end = _parse_utc_timestamp(
+            maintenance_window["ends_at"],
+            label="recovery reader-attestation renewal maintenance ends_at",
+        )
+        checked_at = _parse_utc_timestamp(
+            reader_inventory["checked_at"],
+            label="recovery reader-attestation renewal checked_at",
+        )
+        expires_at = _parse_utc_timestamp(
+            reader_inventory["expires_at"],
+            label="recovery reader-attestation renewal expires_at",
+        )
+        if not (
+            window_start <= bound_at < window_end
+            and checked_at <= bound_at < expires_at
+            and (previous_bound_at is None or previous_bound_at <= bound_at)
+        ):
+            raise PublicationError(
+                "recovery reader-attestation renewal bound_at is outside its "
+                "attestation bounds or time order"
+            )
+        previous_inventory = previous_attestation.get("known_reader_inventory")
+        if not isinstance(previous_inventory, dict):
+            raise PublicationError(
+                "prior recovery reader attestation lacks checked_at"
+            )
+        previous_checked_at = _parse_utc_timestamp(
+            previous_inventory.get("checked_at"),
+            label="prior recovery reader attestation checked_at",
+        )
+        renewed_checked_at = _parse_utc_timestamp(
+            receipt["known_reader_inventory"]["checked_at"],
+            label="recovery reader attestation checked_at",
+        )
+        if (
+            receipt_digest in prior_receipt_digests
+            or renewed_checked_at <= previous_checked_at
+        ):
+            raise PublicationError(
+                "recovery reader-attestation renewal is not a fresh later claim"
+            )
+        validated_value = dict(value)
+        validated.append(validated_value)
+        predecessor = _recovery_reader_attestation_renewal_identity(validated_value)
+        previous_attestation = attestation
+        previous_bound_at = bound_at
+        prior_receipt_digests.add(receipt_digest)
+    return validated
+
+
+def _bind_recovery_reader_attestation_renewal(
+    *,
+    paths: Mapping[str, Path],
+    state: Dict[str, Any],
+    reservation: Mapping[str, Any],
+    takeover: Mapping[str, Any],
+    action: str,
+    reader_quiescence_record: Path,
+) -> Dict[str, Any]:
+    reservation_identity = _reservation_identity(paths, reservation)
+    renewals = _validate_recovery_reader_attestation_renewal_chain(
+        state=state,
+        reservation=reservation,
+        reservation_identity=reservation_identity,
+    )
+    reader_quiescence_record = _safe_absolute(
+        reader_quiescence_record,
+        label="recovery reader-quiescence record",
+        must_exist=True,
+    )
+    protected_roots = {
+        "state root": paths["state"].parents[2],
+        "operation evidence root": Path(str(state["evidence_root"])),
+        "installed skill root": Path(str(state["install_root"])),
+        "source repository": Path(str(state["source_repository"])),
+    }
+    for label, protected in protected_roots.items():
+        protected = _safe_absolute(protected, label=label, must_exist=True)
+        if _is_within(reader_quiescence_record, protected):
+            raise PublicationError(
+                f"recovery reader-quiescence record must be outside the protected {label}"
+            )
+    original = _original_reader_attestation_binding(reservation)
+    if reader_quiescence_record == Path(str(original["receipt_path"])):
+        raise PublicationError(
+            "recovery reader-quiescence record must be a fresh path, not the original record"
+        )
+    if reader_quiescence_record == Path(str(takeover.get("path"))):
+        raise PublicationError(
+            "recovery reader-quiescence record and takeover authorization must differ"
+        )
+    binding_now = _utc_datetime_now()
+    receipt, receipt_digest = _validate_maintenance_receipt(
+        reader_quiescence_record,
+        str(state["operation_id"]),
+        require_current=True,
+        now=binding_now,
+    )
+    attestation = {
+        **_reader_attestation_summary(receipt),
+        "receipt_path": str(reader_quiescence_record),
+        "receipt_sha256": receipt_digest,
+    }
+    takeover_identity = {
+        "path": takeover.get("path"),
+        "sha256": takeover.get("sha256"),
+    }
+    if renewals:
+        last = renewals[-1]
+        if (
+            last.get("action") == action
+            and last.get("reservation") == reservation_identity
+            and last.get("takeover_authorization") == takeover_identity
+            and last.get("attestation") == attestation
+        ):
+            state["active_recovery_reader_attestation_renewal"] = last
+            return last
+        previous_attestation = last["attestation"]
+        predecessor: Mapping[str, Any] = (
+            _recovery_reader_attestation_renewal_identity(last)
+        )
+    else:
+        previous_attestation = original
+        predecessor = _original_reader_attestation_predecessor(
+            reservation_identity, reservation
+        )
+    if any(
+        renewal.get("attestation", {}).get("receipt_path")
+        == str(reader_quiescence_record)
+        for renewal in renewals
+    ):
+        raise PublicationError(
+            "a later recovery renewal must use a fresh retained receipt path"
+        )
+    previous_inventory = previous_attestation.get("known_reader_inventory")
+    if not isinstance(previous_inventory, dict):
+        raise PublicationError(
+            "prior reader attestation lacks its checked_at identity"
+        )
+    previous_checked_at = _parse_utc_timestamp(
+        previous_inventory.get("checked_at"),
+        label="prior reader attestation checked_at",
+    )
+    renewed_checked_at = _parse_utc_timestamp(
+        receipt["known_reader_inventory"]["checked_at"],
+        label="recovery reader attestation checked_at",
+    )
+    prior_digests = {str(original.get("receipt_sha256"))}
+    prior_digests.update(
+        str(value["attestation"]["receipt_sha256"]) for value in renewals
+    )
+    if receipt_digest in prior_digests or renewed_checked_at <= previous_checked_at:
+        raise PublicationError(
+            "recovery reader-quiescence record is not a fresh later attestation"
+        )
+    renewal = {
+        "schema_version": 1,
+        "record_type": "recovery_reader_attestation_renewal",
+        "sequence": len(renewals) + 1,
+        "operation_id": state["operation_id"],
+        "generation_id": state["generation_id"],
+        "action": action,
+        "bound_at": _format_precise_utc_timestamp(binding_now),
+        "reservation": reservation_identity,
+        "takeover_authorization": takeover_identity,
+        "predecessor_renewal": predecessor,
+        "attestation": attestation,
+    }
+    state.setdefault("reader_attestation_renewals", []).append(renewal)
+    state["active_recovery_reader_attestation_renewal"] = renewal
+    _record_event(
+        state,
+        "recovery_reader_attestation_renewed",
+        renewal_sequence=renewal["sequence"],
+        renewal_sha256=_recovery_reader_attestation_renewal_identity(renewal)[
+            "sha256"
+        ],
+        action=action,
+    )
+    return renewal
+
+
+def _require_active_recovery_reader_attestation_renewal(
+    *,
+    paths: Mapping[str, Path],
+    state: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+    renewal: Mapping[str, Any],
+) -> Dict[str, Any]:
+    reservation_identity = _reservation_identity(paths, reservation)
+    renewals = _validate_recovery_reader_attestation_renewal_chain(
+        state=state,
+        reservation=reservation,
+        reservation_identity=reservation_identity,
+    )
+    active = state.get("active_recovery_reader_attestation_renewal")
+    if (
+        not renewals
+        or renewals[-1] != renewal
+        or active != renewal
+        or renewal.get("action") != "complete"
+    ):
+        raise PublicationError(
+            "pre-swap recovery lacks its exact active reader-attestation renewal"
+        )
+    return dict(renewals[-1])
+
+
+def _validate_atomic_exchange_reader_attestation_history(
+    *,
+    state: Mapping[str, Any],
+    reservation: Mapping[str, Any],
+    renewals: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Validate the ordered external-claim evidence for every recorded exchange."""
+    history = state.get("atomic_exchange_reader_attestations", [])
+    if not isinstance(history, list) or not history:
+        raise PublicationError("atomic exchange reader-attestation history is malformed")
+    if len(history) > 2:
+        raise PublicationError(
+            "atomic exchange reader-attestation history has too many exchanges"
+        )
+    renewals_by_identity = {
+        json.dumps(
+            _recovery_reader_attestation_renewal_identity(renewal),
+            sort_keys=True,
+            separators=(",", ":"),
+        ): renewal
+        for renewal in renewals
+    }
+    predecessor: Optional[Dict[str, Any]] = None
+    previous_validated_at: Optional[datetime] = None
+    validated: List[Dict[str, Any]] = []
+    expected_keys = {
+        "sequence",
+        "predecessor_attestation",
+        "validation_scope",
+        "purpose",
+        "validated_at",
+        "receipt_path",
+        "receipt_sha256",
+        "maintenance_window",
+        "checked_at",
+        "expires_at",
+        "known_active_reader_count",
+        "unknown_reader_policy",
+        "unknown_reader_status",
+        "binding_context",
+    }
+    for index, value in enumerate(history):
+        if not isinstance(value, dict):
+            raise PublicationError("atomic exchange reader-attestation entry is not an object")
+        _require_exact_keys(
+            value, expected_keys, label="atomic exchange reader-attestation entry"
+        )
+        context = value.get("binding_context")
+        if (
+            value.get("sequence") != index + 1
+            or value.get("predecessor_attestation") != predecessor
+            or value.get("validation_scope") != EXTERNAL_CLAIM_VALIDATION_SCOPE
+            or value.get("purpose")
+            not in {
+                "publish",
+                "automatic-validation-failure-rollback",
+                "explicit-recovery-rollback",
+            }
+            or not HEX_64_RE.fullmatch(str(value.get("receipt_sha256")))
+            or value.get("known_active_reader_count") != 0
+            or value.get("unknown_reader_policy") != READER_UNKNOWN_POLICY
+            or value.get("unknown_reader_status") != READER_UNKNOWN_STATUS_CLEAR
+            or not isinstance(context, dict)
+        ):
+            raise PublicationError(
+                "atomic exchange reader-attestation chain binding is malformed"
+            )
+        validated_at = _parse_utc_timestamp(
+            value.get("validated_at"),
+            label="atomic exchange reader-attestation validated_at",
+        )
+        renewal_bound_at: Optional[datetime] = None
+        if context.get("kind") == "original_reservation_attestation":
+            _require_exact_keys(
+                context, {"kind"}, label="original reader-attestation binding context"
+            )
+            binding = _original_reader_attestation_binding(reservation)
+        elif context.get("kind") == "recovery_reader_attestation_renewal":
+            _require_exact_keys(
+                context,
+                {"kind", "renewal_identity"},
+                label="recovery reader-attestation binding context",
+            )
+            renewal_key = json.dumps(
+                context.get("renewal_identity"),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            renewal = renewals_by_identity.get(renewal_key)
+            if renewal is None:
+                raise PublicationError(
+                    "atomic exchange refers to an unknown recovery attestation renewal"
+                )
+            renewal_bound_at = _parse_utc_timestamp(
+                renewal.get("bound_at"),
+                label="atomic exchange recovery renewal bound_at",
+            )
+            binding = renewal["attestation"]
+        else:
+            raise PublicationError(
+                "atomic exchange lacks an exact reader-attestation binding context"
+            )
+        receipt_path = _safe_absolute(
+            Path(str(binding.get("receipt_path"))),
+            label="atomic exchange reader-quiescence record",
+            must_exist=True,
+        )
+        receipt, receipt_digest = _validate_maintenance_receipt(
+            receipt_path, str(state["operation_id"]), require_current=False
+        )
+        checked_at = _parse_utc_timestamp(
+            receipt["known_reader_inventory"]["checked_at"],
+            label="atomic exchange reader attestation checked_at",
+        )
+        expires_at = _parse_utc_timestamp(
+            receipt["known_reader_inventory"]["expires_at"],
+            label="atomic exchange reader attestation expires_at",
+        )
+        window_start = _parse_utc_timestamp(
+            receipt["maintenance_window"]["starts_at"],
+            label="atomic exchange maintenance window starts_at",
+        )
+        window_end = _parse_utc_timestamp(
+            receipt["maintenance_window"]["ends_at"],
+            label="atomic exchange maintenance window ends_at",
+        )
+        if not (
+            window_start <= validated_at < window_end
+            and checked_at <= validated_at < expires_at
+            and (renewal_bound_at is None or renewal_bound_at <= validated_at)
+            and (
+                previous_validated_at is None
+                or previous_validated_at <= validated_at
+            )
+        ):
+            raise PublicationError(
+                "atomic exchange reader-attestation timestamp is outside its bound"
+            )
+        expected_evidence = {
+            "receipt_path": str(receipt_path),
+            "receipt_sha256": receipt_digest,
+            "maintenance_window": receipt["maintenance_window"],
+            "checked_at": receipt["known_reader_inventory"]["checked_at"],
+            "expires_at": receipt["known_reader_inventory"]["expires_at"],
+            "known_active_reader_count": receipt["known_reader_inventory"]
+            ["known_active_reader_count"],
+            "unknown_reader_policy": receipt["known_reader_inventory"]
+            ["unknown_reader_policy"],
+            "unknown_reader_status": receipt["known_reader_inventory"]
+            ["unknown_reader_status"],
+        }
+        if any(value.get(key) != expected for key, expected in expected_evidence.items()):
+            raise PublicationError(
+                "atomic exchange reader-attestation evidence drifted from its bound record"
+            )
+        if (
+            binding.get("receipt_path") != str(receipt_path)
+            or binding.get("receipt_sha256") != receipt_digest
+            or _reader_attestation_summary(receipt)
+            != {
+                key: item
+                for key, item in binding.items()
+                if key not in {"receipt_path", "receipt_sha256"}
+            }
+        ):
+            raise PublicationError(
+                "atomic exchange reader-attestation binding differs from its record"
+            )
+        purpose = value["purpose"]
+        if index == 0 and purpose != "publish":
+            raise PublicationError(
+                "atomic exchange reader-attestation history must begin with publish"
+            )
+        if index == 1 and purpose not in {
+            "automatic-validation-failure-rollback",
+            "explicit-recovery-rollback",
+        }:
+            raise PublicationError(
+                "second atomic exchange reader attestation must be a rollback"
+            )
+        if context["kind"] == "original_reservation_attestation":
+            if purpose == "explicit-recovery-rollback":
+                raise PublicationError(
+                    "explicit recovery rollback lacks its recovery renewal binding"
+                )
+        else:
+            renewal_action = renewal["action"]
+            expected_action = (
+                "rollback" if purpose == "explicit-recovery-rollback" else "complete"
+            )
+            if renewal_action != expected_action:
+                raise PublicationError(
+                    "atomic exchange purpose differs from its recovery renewal action"
+                )
+        validated_value = dict(value)
+        validated.append(validated_value)
+        predecessor = _atomic_exchange_attestation_identity(validated_value)
+        previous_validated_at = validated_at
+    latest = state.get("atomic_exchange_reader_attestation")
+    if latest != (validated[-1] if validated else None):
+        raise PublicationError(
+            "latest atomic exchange reader attestation differs from its ordered history"
+        )
+    terminal_state = state.get("terminal_state")
+    if terminal_state not in {"PUBLISHED", "ROLLED_BACK"}:
+        status = state.get("status")
+        terminal_state = status if status in {"PUBLISHED", "ROLLED_BACK"} else None
+    if terminal_state == "PUBLISHED" and (
+        len(validated) != 1 or validated[-1]["purpose"] != "publish"
+    ):
+        raise PublicationError(
+            "published terminal state lacks exactly one bound publish exchange"
+        )
+    if terminal_state == "ROLLED_BACK" and (
+        len(validated) != 2
+        or validated[0]["purpose"] != "publish"
+        or validated[-1]["purpose"]
+        not in {
+            "automatic-validation-failure-rollback",
+            "explicit-recovery-rollback",
+        }
+    ):
+        raise PublicationError(
+            "rolled-back terminal state lacks its bound publish and rollback exchanges"
+        )
+    return validated
+
+
 def recover_operation(
     *,
     state_root: Path,
@@ -2269,7 +3260,9 @@ def recover_operation(
     exchanger: AtomicExchanger,
     lock_path: Optional[Path] = None,
     takeover_authorization: Optional[Path] = None,
+    reader_quiescence_record: Optional[Path] = None,
     checker_runner: CheckerRunner = run_installed_checker,
+    failpoint: Failpoint = None,
 ) -> Dict[str, Any]:
     """Inspect first; complete or roll back only an unambiguous complete-tree state."""
     state_root = _safe_absolute(state_root, label="state root", must_exist=True)
@@ -2283,7 +3276,17 @@ def recover_operation(
         _verify_recorded_takeover_authorization(state, reservation)
         inspection = classify_generation_state(state_root, operation)
         if action == "inspect":
+            if reader_quiescence_record is not None:
+                raise PublicationError(
+                    "inspect recovery does not accept --reader-quiescence-record"
+                )
             return inspection
+        if action not in {"complete", "rollback"}:
+            raise PublicationError(f"unsupported recovery action: {action}")
+        if reader_quiescence_record is None:
+            raise PublicationError(
+                "mutating recovery requires --reader-quiescence-record"
+            )
         takeover = _validate_takeover_authorization(
             takeover_authorization, state=state, reservation=reservation
         )
@@ -2300,6 +3303,50 @@ def recover_operation(
             _record_event(state, "ambiguous_recovery_refused")
             _persist_state(paths["state"], state, "UNCHECKED")
             raise PublicationError("recovery state is ambiguous; reservation and all trees were preserved")
+        recorded_exchanges = state.get("atomic_exchange_reader_attestations", [])
+        if not isinstance(recorded_exchanges, list):
+            raise PublicationError(
+                "recovery atomic exchange reader-attestation history is malformed"
+            )
+        post_swap = inspection["classification"] in {
+            "POST_SWAP_SLOT",
+            "POST_SWAP_RETAINED",
+        }
+        missing_prior_exchange_evidence = post_swap and not recorded_exchanges
+        if missing_prior_exchange_evidence and action == "complete":
+            state["last_inspection"] = inspection
+            _record_event(
+                state,
+                "post_swap_completion_refused_without_exchange_attestation",
+            )
+            _persist_state(paths["state"], state, "UNCHECKED")
+            raise PublicationError(
+                "post-swap completion lacks durable reader-attestation evidence "
+                "for the exchange; preserve and inspect"
+            )
+        if post_swap and recorded_exchanges:
+            reservation_identity = _reservation_identity(paths, reservation)
+            existing_renewals = _validate_recovery_reader_attestation_renewal_chain(
+                state=state,
+                reservation=reservation,
+                reservation_identity=reservation_identity,
+            )
+            _validate_atomic_exchange_reader_attestation_history(
+                state=state,
+                reservation=reservation,
+                renewals=existing_renewals,
+            )
+        renewal = _bind_recovery_reader_attestation_renewal(
+            paths=paths,
+            state=state,
+            reservation=reservation,
+            takeover=takeover,
+            action=action,
+            reader_quiescence_record=reader_quiescence_record,
+        )
+        _persist_state(paths["state"], state)
+        if failpoint:
+            failpoint("after_recovery_attestation_renewal_bound")
         candidate_paths = state["candidate_expected_paths"]
         preflight_paths = state["preflight_expected_paths"]
         install_root = Path(state["install_root"])
@@ -2336,15 +3383,36 @@ def recover_operation(
                         state, paths["source"], install_root, checker_runner
                     )
                 except ValidationFailure as exc:
-                    _rollback_after_validation_failure(
-                        paths=paths,
-                        state=state,
-                        install_root=install_root,
-                        candidate_paths=candidate_paths,
-                        preflight_paths=preflight_paths,
-                        exchanger=exchanger,
-                        reason=str(exc),
-                    )
+                    try:
+                        _rollback_after_validation_failure(
+                            paths=paths,
+                            state=state,
+                            install_root=install_root,
+                            candidate_paths=candidate_paths,
+                            preflight_paths=preflight_paths,
+                            exchanger=exchanger,
+                            reason=str(exc),
+                            reader_attestation_binding=renewal["attestation"],
+                            reader_attestation_context={
+                                "kind": "recovery_reader_attestation_renewal",
+                                "renewal_identity": (
+                                    _recovery_reader_attestation_renewal_identity(
+                                        renewal
+                                    )
+                                ),
+                            },
+                        )
+                    except Exception as rollback_exc:
+                        _record_event(
+                            state,
+                            "recovery_rollback_stopped_unchecked",
+                            validation_error=str(exc),
+                            rollback_error=str(rollback_exc),
+                        )
+                        _persist_state(paths["state"], state, "UNCHECKED")
+                        raise PublicationError(
+                            "recovery validation failed and rollback could not be proved"
+                        ) from rollback_exc
                     raise
                 checked_live = build_inventory(install_root, candidate_paths)
                 checked_previous = build_inventory(paths["previous"], preflight_paths)
@@ -2362,14 +3430,37 @@ def recover_operation(
                 _persist_state(paths["state"], state, "PUBLISHED")
                 return state
         if action == "rollback":
+            exchange_left: Path
             if inspection["classification"] == "POST_SWAP_SLOT":
-                exchanger.exchange(paths["slot"], install_root)
-                _move_complete_tree(paths["slot"], paths["failed"])
+                exchange_left = paths["slot"]
             elif inspection["classification"] == "POST_SWAP_RETAINED":
-                exchanger.exchange(paths["previous"], install_root)
-                _move_complete_tree(paths["previous"], paths["failed"])
+                exchange_left = paths["previous"]
             else:
                 raise PublicationError(f"cannot roll back from {inspection['classification']}")
+            exchange_attestation = _exchange_after_current_reader_attestation(
+                reader_attestation=renewal["attestation"],
+                operation=operation,
+                purpose="explicit-recovery-rollback",
+                binding_context={
+                    "kind": "recovery_reader_attestation_renewal",
+                    "renewal_identity": _recovery_reader_attestation_renewal_identity(
+                        renewal
+                    ),
+                },
+                exchanger=exchanger,
+                left=exchange_left,
+                right=install_root,
+            )
+            if inspection["classification"] == "POST_SWAP_SLOT":
+                _move_complete_tree(paths["slot"], paths["failed"])
+            elif inspection["classification"] == "POST_SWAP_RETAINED":
+                _move_complete_tree(paths["previous"], paths["failed"])
+            _record_atomic_exchange_attestation(state, exchange_attestation)
+            _record_event(
+                state,
+                "reader_attestation_revalidated_immediately_before_exchange",
+                purpose="explicit-recovery-rollback",
+            )
             restored = build_inventory(install_root, preflight_paths)
             if restored.digest != state["preflight_inventory"]["sha256"]:
                 raise PublicationError("recovery rollback did not restore the old generation")
@@ -2389,6 +3480,23 @@ def recover_operation(
             state["previous_generation"] = None
             state["mutation_outcome"] = MUTATION_ROLLED_BACK
             _record_event(state, "rollback_completed_by_recovery")
+            if missing_prior_exchange_evidence:
+                state["unrecorded_prior_atomic_exchange"] = {
+                    "classification": inspection["classification"],
+                    "reason": (
+                        "the exact old generation was restored, but the prior successful "
+                        "exchange returned no durable reader-attestation record"
+                    ),
+                }
+                _record_event(
+                    state,
+                    "rollback_restored_but_prior_exchange_evidence_unchecked",
+                )
+                _persist_state(paths["state"], state, "UNCHECKED")
+                raise PublicationError(
+                    "rollback restored the preflight generation, but prior exchange "
+                    "attestation evidence is missing"
+                )
             _persist_state(paths["state"], state, "ROLLED_BACK")
             return state
         if action != "complete":
@@ -2400,6 +3508,7 @@ def recover_operation(
             exchanger=exchanger,
             checker_runner=checker_runner,
             recovery_takeover_authorization=takeover,
+            recovery_reader_attestation_renewal=renewal,
         )
     raise PublicationError("recovery did not select a complete-tree action")
 
@@ -2440,6 +3549,48 @@ def _reject_receipt_output_overlap(
             raise PublicationError(
                 "final receipt output collides with the maintenance authorization receipt"
             )
+        renewals = state.get("reader_attestation_renewals", [])
+        if not isinstance(renewals, list):
+            raise PublicationError("recovery reader-attestation renewal chain is malformed")
+        for renewal in renewals:
+            attestation = renewal.get("attestation") if isinstance(renewal, dict) else None
+            takeover_identity = (
+                renewal.get("takeover_authorization")
+                if isinstance(renewal, dict)
+                else None
+            )
+            renewal_path_text = (
+                attestation.get("receipt_path") if isinstance(attestation, dict) else None
+            )
+            takeover_path_text = (
+                takeover_identity.get("path")
+                if isinstance(takeover_identity, dict)
+                else None
+            )
+            if not isinstance(renewal_path_text, str) or not isinstance(
+                takeover_path_text, str
+            ):
+                raise PublicationError(
+                    "recovery reader-attestation renewal evidence path is malformed"
+                )
+            renewal_path = _safe_absolute(
+                Path(renewal_path_text),
+                label="recovery reader-quiescence record",
+                must_exist=True,
+            )
+            if receipt_output == renewal_path:
+                raise PublicationError(
+                    "final receipt output collides with a recovery reader-quiescence record"
+                )
+            renewal_takeover_path = _safe_absolute(
+                Path(takeover_path_text),
+                label="recovery takeover authorization",
+                must_exist=True,
+            )
+            if receipt_output == renewal_takeover_path:
+                raise PublicationError(
+                    "final receipt output collides with the takeover authorization"
+                )
     takeover = state.get("recovery_takeover_authorization")
     if isinstance(takeover, dict) and isinstance(takeover.get("path"), str):
         takeover_path = _safe_absolute(
@@ -2560,8 +3711,29 @@ def _complete_pending_terminal_finalization(
             "manifest_sha256": state["expected_live_manifest_sha256"],
         }
         or receipt.get("evidence_snapshot") != state.get("evidence_snapshot")
+        or receipt.get("reader_attestation_validation_scope")
+        != EXTERNAL_CLAIM_VALIDATION_SCOPE
     ):
         raise PublicationError("pending terminal receipt differs from current exact state")
+    reservation_identity = _reservation_identity(paths, reservation)
+    renewals = _validate_recovery_reader_attestation_renewal_chain(
+        state=state,
+        reservation=reservation,
+        reservation_identity=reservation_identity,
+    )
+    exchange_attestations = _validate_atomic_exchange_reader_attestation_history(
+        state=state,
+        reservation=reservation,
+        renewals=renewals,
+    )
+    if (
+        receipt.get("reader_attestation_renewals") != renewals
+        or receipt.get("atomic_exchange_reader_attestations")
+        != exchange_attestations
+    ):
+        raise PublicationError(
+            "pending terminal receipt reader-attestation history differs from exact state"
+        )
     named_outcomes = receipt.get("named_mutation_outcomes")
     if not isinstance(named_outcomes, dict) or not named_outcomes:
         raise PublicationError("pending terminal receipt lacks named mutation outcomes")
@@ -2782,6 +3954,21 @@ def finalize_operation(
             raise PublicationError(
                 "terminal state lacks its exact named live mutation outcome"
             )
+        reservation_identity = _reservation_identity(paths, reservation)
+        reader_attestation_renewals = (
+            _validate_recovery_reader_attestation_renewal_chain(
+                state=state,
+                reservation=reservation,
+                reservation_identity=reservation_identity,
+            )
+        )
+        atomic_exchange_reader_attestations = (
+            _validate_atomic_exchange_reader_attestation_history(
+                state=state,
+                reservation=reservation,
+                renewals=reader_attestation_renewals,
+            )
+        )
         terminal_inventory_path = evidence_root / "terminal-validation-live.inventory"
         receipt = {
             "schema_version": RECEIPT_SCHEMA_VERSION,
@@ -2816,6 +4003,11 @@ def finalize_operation(
             "mutation_outcome": expected_mutation_outcome,
             "recovery_takeover_authorization": state.get(
                 "recovery_takeover_authorization"
+            ),
+            "reader_attestation_validation_scope": EXTERNAL_CLAIM_VALIDATION_SCOPE,
+            "reader_attestation_renewals": reader_attestation_renewals,
+            "atomic_exchange_reader_attestations": (
+                atomic_exchange_reader_attestations
             ),
             "reservation_state": "RETAINED_PENDING_PANEL_ACCEPTANCE",
             "finalization_manifest": str(manifest_path) if manifest_path else None,
@@ -2970,10 +4162,6 @@ def _live_inventory_report_paths(
     inventory_path = output.with_name(output.name + ".inventory")
     for candidate in (output, inventory_path):
         _safe_absolute(candidate, label="live inventory evidence output")
-        if candidate.exists() or candidate.is_symlink():
-            raise PublicationError(
-                f"live inventory evidence output already exists: {candidate}"
-            )
         if _is_within(candidate, evidence_root / "snapshot") or candidate in {
             evidence_root / "snapshot.inventory",
             evidence_root / "publication-receipt.json",
@@ -2985,6 +4173,247 @@ def _live_inventory_report_paths(
     return output, inventory_path
 
 
+def _terminal_inventory_predecessor(
+    terminal_receipt_identity: Mapping[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "record_type": "terminal_publication_receipt",
+        "path": terminal_receipt_identity.get("path"),
+        "sha256": terminal_receipt_identity.get("sha256"),
+    }
+
+
+def _live_inventory_report_identity(
+    receipt: Mapping[str, Any], receipt_path: Path, raw: bytes
+) -> Dict[str, Any]:
+    live_inventory = receipt.get("live_inventory")
+    prior_prefix = receipt.get("prior_finalization_manifest_prefix")
+    current_prefix = receipt.get("current_finalization_manifest_prefix")
+    if (
+        not isinstance(live_inventory, dict)
+        or not isinstance(prior_prefix, dict)
+        or not isinstance(current_prefix, dict)
+    ):
+        raise PublicationError("live inventory receipt identity fields are malformed")
+    return {
+        "record_type": "live_inventory_observation",
+        "phase": receipt.get("phase"),
+        "chain_position": receipt.get("chain_position"),
+        "path": str(receipt_path),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "inventory_path": live_inventory.get("path"),
+        "inventory_sha256": live_inventory.get("sha256"),
+        "prior_manifest_prefix_sha256": prior_prefix.get("prefix_sha256"),
+        "current_manifest_prefix_sha256": current_prefix.get("prefix_sha256"),
+    }
+
+
+def _inventory_from_canonical_bytes(data: bytes) -> Inventory:
+    entries = parse_inventory(data)
+    return Inventory(
+        entries=entries,
+        data=data,
+        digest=hashlib.sha256(data).hexdigest(),
+        file_count=len(entries),
+        total_bytes=sum(entry.size for entry in entries),
+    )
+
+
+def _validate_live_inventory_receipt(
+    *,
+    state: Mapping[str, Any],
+    phase: str,
+    receipt_path: Path,
+    expected_predecessor: Mapping[str, Any],
+    expected_prior_prefix: Mapping[str, Any],
+    reservation_identity: Mapping[str, Any],
+    terminal_receipt_identity: Mapping[str, Any],
+    manifest_path: Path,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Re-read one durable receipt and prove its exact chain and live identity."""
+    phase_index = LIVE_INVENTORY_PHASE_ORDER.index(phase)
+    receipt_path = _safe_absolute(
+        receipt_path, label=f"{phase} live inventory receipt", must_exist=True
+    )
+    inventory_path = receipt_path.with_name(receipt_path.name + ".inventory")
+    for candidate, label in (
+        (receipt_path, f"{phase} live inventory receipt"),
+        (inventory_path, f"{phase} live inventory sidecar"),
+    ):
+        observed = os.lstat(candidate)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+            raise PublicationError(f"{label} must be a single-link regular file")
+    raw = _read_regular_bytes(receipt_path, label=f"{phase} live inventory receipt")
+    try:
+        receipt = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise PublicationError(f"{phase} live inventory receipt is invalid: {exc}") from exc
+    if not isinstance(receipt, dict):
+        raise PublicationError(f"{phase} live inventory receipt is not an object")
+    _require_exact_keys(
+        receipt,
+        {
+            "schema_version",
+            "record_type",
+            "phase",
+            "chain_position",
+            "required_phase_order",
+            "operation_id",
+            "generation_id",
+            "terminal_state",
+            "observed_at",
+            "installed_root",
+            "source",
+            "expected_live_source",
+            "live_inventory",
+            "terminal_receipt",
+            "reservation",
+            "predecessor_receipt",
+            "prior_finalization_manifest_prefix",
+            "current_finalization_manifest_prefix",
+            "finalization_manifest_prefix",
+            "mutation_outcome",
+        },
+        label=f"{phase} live inventory receipt",
+    )
+    if (
+        receipt.get("schema_version") != 2
+        or receipt.get("record_type") != "live_inventory_observation"
+        or receipt.get("phase") != phase
+        or receipt.get("chain_position") != phase_index + 1
+        or receipt.get("required_phase_order") != list(LIVE_INVENTORY_PHASE_ORDER)
+        or receipt.get("operation_id") != state.get("operation_id")
+        or receipt.get("generation_id") != state.get("generation_id")
+        or receipt.get("terminal_state") != state.get("terminal_state")
+        or receipt.get("installed_root") != state.get("install_root")
+        or receipt.get("mutation_outcome") != state.get("mutation_outcome")
+        or receipt.get("reservation") != reservation_identity
+        or receipt.get("terminal_receipt") != terminal_receipt_identity
+        or receipt.get("predecessor_receipt") != dict(expected_predecessor)
+        or receipt.get("prior_finalization_manifest_prefix")
+        != dict(expected_prior_prefix)
+        or receipt.get("source")
+        != {
+            "commit": state.get("source_commit"),
+            "tree": state.get("source_tree"),
+            "manifest_path": state.get("manifest_path"),
+            "manifest_sha256": state.get("manifest_sha256"),
+        }
+        or receipt.get("expected_live_source")
+        != {
+            "commit": state.get("expected_live_source_commit"),
+            "tree": state.get("expected_live_source_tree"),
+            "manifest_sha256": state.get("expected_live_manifest_sha256"),
+        }
+    ):
+        raise PublicationError(
+            f"{phase} live inventory receipt is not bound to the exact ordered chain"
+        )
+    _parse_utc_timestamp(receipt.get("observed_at"), label=f"{phase}.observed_at")
+    current_prefix = receipt.get("current_finalization_manifest_prefix")
+    if (
+        not isinstance(current_prefix, dict)
+        or receipt.get("finalization_manifest_prefix") != current_prefix
+        or current_prefix.get("path") != str(manifest_path)
+    ):
+        raise PublicationError(
+            f"{phase} live inventory receipt lacks its exact current manifest prefix"
+        )
+    current_sequence = current_prefix.get("last_sequence")
+    if (
+        not isinstance(current_sequence, int)
+        or isinstance(current_sequence, bool)
+        or _finalization_manifest_prefix(
+            manifest_path,
+            through_sequence=current_sequence,
+            required_prefix=expected_prior_prefix,
+        )
+        != current_prefix
+    ):
+        raise PublicationError(
+            f"{phase} live inventory receipt manifest prefix is not a valid extension"
+        )
+
+    terminal_state, live_paths, expected_inventory = _terminal_live_identity(state)
+    if receipt.get("terminal_state") != terminal_state:
+        raise PublicationError(f"{phase} terminal state differs from the operation")
+    sidecar_data = _read_regular_bytes(
+        inventory_path, label=f"{phase} live inventory sidecar"
+    )
+    sidecar = _inventory_from_canonical_bytes(sidecar_data)
+    recorded_live = receipt.get("live_inventory")
+    if recorded_live != _path_byte_identity(sidecar, inventory_path, live_paths):
+        raise PublicationError(f"{phase} live inventory sidecar identity is malformed")
+    live = build_inventory(Path(str(state["install_root"])), live_paths)
+    if (
+        live.digest != expected_inventory.get("sha256")
+        or live.data != sidecar.data
+        or live.digest != sidecar.digest
+    ):
+        raise PublicationError(f"live generation drifted from the {phase} inventory")
+    return receipt, _live_inventory_report_identity(receipt, receipt_path, raw)
+
+
+def _load_live_inventory_report_chain(
+    *,
+    state: Mapping[str, Any],
+    reservation_identity: Mapping[str, Any],
+    terminal_receipt_identity: Mapping[str, Any],
+    require_complete: bool = False,
+) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """Validate the journal as one exact dispatch -> judgment -> acceptance chain."""
+    reports = state.get("live_inventory_reports", [])
+    if not isinstance(reports, list) or len(reports) > len(LIVE_INVENTORY_PHASE_ORDER):
+        raise PublicationError("operation live inventory report journal is malformed")
+    if require_complete and len(reports) != len(LIVE_INVENTORY_PHASE_ORDER):
+        raise PublicationError(
+            "acceptance requires the complete dispatch -> judgment -> acceptance chain"
+        )
+    if require_complete and state.get("pending_live_inventory_report") is not None:
+        raise PublicationError(
+            "acceptance refuses a phase chain with pending duplicate evidence"
+        )
+    terminal_prefix = state.get("finalization_manifest_terminal")
+    if not isinstance(terminal_prefix, dict) or not isinstance(
+        terminal_prefix.get("path"), str
+    ):
+        raise PublicationError("terminal state lacks its exact manifest prefix")
+    manifest_path = Path(terminal_prefix["path"])
+    expected_predecessor = _terminal_inventory_predecessor(
+        terminal_receipt_identity
+    )
+    expected_prior_prefix: Mapping[str, Any] = terminal_prefix
+    loaded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    seen_paths: Set[str] = set()
+    for index, report_identity in enumerate(reports):
+        expected_phase = LIVE_INVENTORY_PHASE_ORDER[index]
+        if not isinstance(report_identity, dict) or not isinstance(
+            report_identity.get("path"), str
+        ):
+            raise PublicationError("live inventory report journal entry is malformed")
+        if report_identity.get("path") in seen_paths:
+            raise PublicationError("live inventory report journal repeats a receipt path")
+        seen_paths.add(report_identity["path"])
+        receipt, observed_identity = _validate_live_inventory_receipt(
+            state=state,
+            phase=expected_phase,
+            receipt_path=Path(report_identity["path"]),
+            expected_predecessor=expected_predecessor,
+            expected_prior_prefix=expected_prior_prefix,
+            reservation_identity=reservation_identity,
+            terminal_receipt_identity=terminal_receipt_identity,
+            manifest_path=manifest_path,
+        )
+        if observed_identity != report_identity:
+            raise PublicationError(
+                f"{expected_phase} live inventory journal identity drifted"
+            )
+        loaded.append((receipt, observed_identity))
+        expected_predecessor = observed_identity
+        expected_prior_prefix = receipt["current_finalization_manifest_prefix"]
+    return loaded
+
+
 def report_live_inventory(
     *,
     state_root: Path,
@@ -2992,8 +4421,9 @@ def report_live_inventory(
     phase: str,
     output: Path,
     lock_path: Optional[Path] = None,
+    failpoint: Failpoint = None,
 ) -> Dict[str, Any]:
-    """Record an exact live inventory and manifest prefix under the reservation."""
+    """Record the next exact phase, or recover an exact same-path interrupted write."""
     if phase not in LIVE_INVENTORY_PHASES:
         raise PublicationError(f"unsupported live inventory phase: {phase!r}")
     state_root = _safe_absolute(state_root, label="state root", must_exist=True)
@@ -3019,25 +4449,127 @@ def report_live_inventory(
             raise PublicationError(
                 "terminal state lacks its durable finalization-manifest prefix"
             )
-        manifest_prefix = _finalization_manifest_prefix(
-            manifest_path, required_prefix=terminal_prefix
-        )
         terminal_receipt_identity, _ = _terminal_receipt(state, operation=operation)
+        reservation_identity = _reservation_identity(paths, reservation)
+        chain = _load_live_inventory_report_chain(
+            state=state,
+            reservation_identity=reservation_identity,
+            terminal_receipt_identity=terminal_receipt_identity,
+        )
+        pending = state.get("pending_live_inventory_report")
+        requested_index = LIVE_INVENTORY_PHASE_ORDER.index(phase)
+        if requested_index < len(chain):
+            if pending is not None:
+                raise PublicationError(
+                    "a pending live inventory phase must be resumed before an earlier phase"
+                )
+            existing_receipt, existing_identity = chain[requested_index]
+            if Path(str(existing_identity["path"])) != output:
+                raise PublicationError(
+                    f"{phase} phase is already durably recorded at a different output"
+                )
+            return existing_receipt
+        if requested_index != len(chain):
+            next_phase = LIVE_INVENTORY_PHASE_ORDER[len(chain)]
+            raise PublicationError(
+                f"live inventory phase is out of order: expected {next_phase}, got {phase}"
+            )
+        if len(chain) == len(LIVE_INVENTORY_PHASE_ORDER):
+            if pending is not None:
+                raise PublicationError(
+                    "complete live inventory chain has an impossible pending phase"
+                )
+            raise PublicationError("the live inventory phase chain is already complete")
+
+        pending_receipt: Optional[Mapping[str, Any]] = None
+        if pending is not None:
+            if not isinstance(pending, dict):
+                raise PublicationError("pending live inventory phase is malformed")
+            _require_exact_keys(
+                pending,
+                {
+                    "schema_version",
+                    "record_type",
+                    "phase",
+                    "output_path",
+                    "inventory_path",
+                    "receipt_sha256",
+                    "inventory_sha256",
+                    "receipt",
+                },
+                label="pending live inventory phase",
+            )
+            pending_receipt = pending.get("receipt")
+            if (
+                pending.get("schema_version") != 1
+                or pending.get("record_type") != "live_inventory_observation_intent"
+                or pending.get("phase") != phase
+                or pending.get("output_path") != str(output)
+                or pending.get("inventory_path") != str(inventory_path)
+                or not HEX_64_RE.fullmatch(str(pending.get("receipt_sha256")))
+                or not HEX_64_RE.fullmatch(str(pending.get("inventory_sha256")))
+                or not isinstance(pending_receipt, dict)
+            ):
+                raise PublicationError(
+                    "pending live inventory phase is bound to a different phase or output"
+                )
+
+        if chain:
+            prior_receipt, predecessor_identity = chain[-1]
+            prior_prefix = prior_receipt["current_finalization_manifest_prefix"]
+        else:
+            predecessor_identity = _terminal_inventory_predecessor(
+                terminal_receipt_identity
+            )
+            prior_prefix = terminal_prefix
+        if pending_receipt is not None:
+            recorded_pending_prefix = pending_receipt.get(
+                "current_finalization_manifest_prefix"
+            )
+            if not isinstance(recorded_pending_prefix, dict):
+                raise PublicationError(
+                    "pending live inventory phase lacks its bounded manifest prefix"
+                )
+            recorded_sequence = recorded_pending_prefix.get("last_sequence")
+            if (
+                not isinstance(recorded_sequence, int)
+                or isinstance(recorded_sequence, bool)
+                or _finalization_manifest_prefix(
+                    manifest_path,
+                    through_sequence=recorded_sequence,
+                    required_prefix=prior_prefix,
+                )
+                != recorded_pending_prefix
+            ):
+                raise PublicationError(
+                    "pending live inventory phase manifest prefix drifted"
+                )
+            manifest_prefix = recorded_pending_prefix
+        else:
+            manifest_prefix = _finalization_manifest_prefix(
+                manifest_path, required_prefix=prior_prefix
+            )
         terminal_state, live_paths, expected_inventory = _terminal_live_identity(state)
         live = build_inventory(Path(str(state["install_root"])), live_paths)
         if live.digest != expected_inventory["sha256"]:
             raise PublicationError(
                 f"live tree drifted before the {phase} inventory observation"
             )
-        reservation_identity = _reservation_identity(paths, reservation)
+        observed_at = (
+            pending_receipt.get("observed_at")
+            if pending_receipt is not None
+            else _utc_now()
+        )
         receipt = {
-            "schema_version": 1,
+            "schema_version": 2,
             "record_type": "live_inventory_observation",
             "phase": phase,
+            "chain_position": requested_index + 1,
+            "required_phase_order": list(LIVE_INVENTORY_PHASE_ORDER),
             "operation_id": operation,
             "generation_id": state["generation_id"],
             "terminal_state": terminal_state,
-            "observed_at": _utc_now(),
+            "observed_at": observed_at,
             "installed_root": state["install_root"],
             "source": {
                 "commit": state["source_commit"],
@@ -3053,37 +4585,103 @@ def report_live_inventory(
             "live_inventory": _path_byte_identity(live, inventory_path, live_paths),
             "terminal_receipt": terminal_receipt_identity,
             "reservation": reservation_identity,
+            "predecessor_receipt": predecessor_identity,
+            "prior_finalization_manifest_prefix": prior_prefix,
+            "current_finalization_manifest_prefix": manifest_prefix,
             "finalization_manifest_prefix": manifest_prefix,
             "mutation_outcome": state["mutation_outcome"],
         }
         encoded = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
-        _write_new_file(inventory_path, live.data)
+        output_exists = output.exists() or output.is_symlink()
+        inventory_exists = inventory_path.exists() or inventory_path.is_symlink()
+        pending_value = {
+            "schema_version": 1,
+            "record_type": "live_inventory_observation_intent",
+            "phase": phase,
+            "output_path": str(output),
+            "inventory_path": str(inventory_path),
+            "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+            "inventory_sha256": live.digest,
+            "receipt": receipt,
+        }
+        if pending is None:
+            if output_exists or inventory_exists:
+                raise PublicationError(
+                    "live inventory output already exists without its durable phase intent"
+                )
+            state["pending_live_inventory_report"] = pending_value
+            _record_event(
+                state,
+                "live_inventory_phase_intent_recorded",
+                phase=phase,
+                receipt_sha256=pending_value["receipt_sha256"],
+            )
+            _persist_state(paths["state"], state, "FINALIZED_RESERVED")
+            if failpoint:
+                failpoint("after_live_inventory_intent_persisted")
+        elif pending != pending_value:
+            raise PublicationError(
+                "pending live inventory phase differs from current exact evidence"
+            )
+        if output_exists and not inventory_exists:
+            orphaned_raw = _read_regular_bytes(
+                output, label=f"orphaned {phase} live inventory receipt"
+            )
+            if orphaned_raw != encoded:
+                raise PublicationError(
+                    f"orphaned {phase} receipt conflicts with this exact phase; "
+                    "preserve evidence and inspect"
+                )
+            _write_new_file(inventory_path, live.data)
+            inventory_exists = True
+        if not inventory_exists:
+            _write_new_file(inventory_path, live.data)
         persisted_inventory = _read_regular_bytes(
             inventory_path, label=f"{phase} live inventory sidecar"
         )
         if (
             persisted_inventory != live.data
             or serialize_inventory(parse_inventory(persisted_inventory)) != live.data
+            or hashlib.sha256(persisted_inventory).hexdigest()
+            != pending_value["inventory_sha256"]
         ):
             raise PublicationError(
                 f"{phase} live inventory sidecar changed before receipt commit"
             )
-        _write_new_file(output, encoded)
+        if failpoint:
+            failpoint("after_live_inventory_sidecar_write")
+        if not output_exists:
+            _write_new_file(output, encoded)
         _fsync_directory(output.parent)
         observed = _read_regular_bytes(output, label=f"{phase} live inventory receipt")
-        if observed != encoded:
-            raise PublicationError("live inventory receipt did not round-trip")
-        live_after_receipt = build_inventory(
-            Path(str(state["install_root"])), live_paths
-        )
-        sidecar_after_receipt = _read_regular_bytes(
-            inventory_path, label=f"{phase} live inventory sidecar"
-        )
         if (
-            live_after_receipt.data != live.data
-            or sidecar_after_receipt != live.data
+            observed != encoded
+            or hashlib.sha256(observed).hexdigest()
+            != pending_value["receipt_sha256"]
+        ):
+            raise PublicationError(
+                "live inventory receipt differs from its durable phase intent"
+            )
+        if failpoint:
+            failpoint("after_live_inventory_receipt_write")
+        recorded_receipt, report_identity = _validate_live_inventory_receipt(
+            state=state,
+            phase=phase,
+            receipt_path=output,
+            expected_predecessor=predecessor_identity,
+            expected_prior_prefix=prior_prefix,
+            reservation_identity=reservation_identity,
+            terminal_receipt_identity=terminal_receipt_identity,
+            manifest_path=manifest_path,
+        )
+        recorded_sequence = manifest_prefix.get("last_sequence")
+        if (
+            not isinstance(recorded_sequence, int)
+            or isinstance(recorded_sequence, bool)
             or _finalization_manifest_prefix(
-                manifest_path, required_prefix=terminal_prefix
+                manifest_path,
+                through_sequence=recorded_sequence,
+                required_prefix=prior_prefix,
             )
             != manifest_prefix
             or _reservation_identity(paths, reservation) != reservation_identity
@@ -3093,17 +4691,11 @@ def report_live_inventory(
             raise PublicationError(
                 f"{phase} evidence identity changed before report journal commit"
             )
-        report_identity = {
-            "phase": phase,
-            "path": str(output),
-            "sha256": hashlib.sha256(observed).hexdigest(),
-            "inventory_sha256": live.digest,
-            "manifest_prefix_sha256": manifest_prefix["prefix_sha256"],
-        }
         reports = state.setdefault("live_inventory_reports", [])
         if not isinstance(reports, list):
             raise PublicationError("operation live inventory report journal is malformed")
         reports.append(report_identity)
+        state.pop("pending_live_inventory_report", None)
         _record_event(
             state,
             "live_inventory_observed_under_reservation",
@@ -3111,7 +4703,9 @@ def report_live_inventory(
             receipt_sha256=report_identity["sha256"],
         )
         _persist_state(paths["state"], state, "FINALIZED_RESERVED")
-        return receipt
+        if failpoint:
+            failpoint("after_live_inventory_journal_commit")
+        return recorded_receipt
 
 
 def _load_recorded_live_inventory_report(
@@ -3129,34 +4723,21 @@ def _load_recorded_live_inventory_report(
     )
     if not _is_within(receipt_path, evidence_root):
         raise PublicationError("acceptance live inventory receipt is outside the evidence root")
-    raw = _read_regular_bytes(receipt_path, label="acceptance live inventory receipt")
-    digest = hashlib.sha256(raw).hexdigest()
-    reports = state.get("live_inventory_reports")
-    if not isinstance(reports, list) or not any(
-        isinstance(report, dict)
-        and report.get("phase") == "acceptance"
-        and report.get("path") == str(receipt_path)
-        and report.get("sha256") == digest
-        for report in reports
-    ):
-        raise PublicationError("acceptance inventory receipt is not in the operation journal")
-    try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError(f"acceptance inventory receipt is invalid: {exc}") from exc
-    if (
-        not isinstance(receipt, dict)
-        or receipt.get("schema_version") != 1
-        or receipt.get("record_type") != "live_inventory_observation"
-        or receipt.get("phase") != "acceptance"
-        or receipt.get("operation_id") != state.get("operation_id")
-        or receipt.get("generation_id") != state.get("generation_id")
-        or receipt.get("terminal_state") != state.get("terminal_state")
-        or receipt.get("reservation") != reservation_identity
-        or receipt.get("terminal_receipt") != terminal_receipt_identity
-    ):
-        raise PublicationError("acceptance inventory receipt is not bound to this publication")
-    return receipt, {"path": str(receipt_path), "sha256": digest}
+    chain = _load_live_inventory_report_chain(
+        state=state,
+        reservation_identity=reservation_identity,
+        terminal_receipt_identity=terminal_receipt_identity,
+        require_complete=True,
+    )
+    receipt, report_identity = chain[-1]
+    if receipt_path != Path(str(report_identity["path"])):
+        raise PublicationError(
+            "acceptance receipt path is not the final receipt in the exact phase chain"
+        )
+    return receipt, {
+        "path": str(receipt_path),
+        "sha256": report_identity["sha256"],
+    }
 
 
 def _verify_acceptance_live_identity(
@@ -3229,6 +4810,7 @@ def _load_bound_release_record(
     acceptance_identity = release.get("acceptance_inventory_receipt")
     authorization = release.get("acceptance_authorization")
     manifest_prefix = release.get("finalization_manifest")
+    expected_chain = state.get("live_inventory_reports")
     receipt_path = _safe_absolute(
         acceptance_inventory_receipt,
         label="acceptance live inventory receipt",
@@ -3238,7 +4820,7 @@ def _load_bound_release_record(
         _read_regular_bytes(receipt_path, label="acceptance live inventory receipt")
     ).hexdigest()
     if (
-        release.get("schema_version") != 2
+        release.get("schema_version") != 3
         or release.get("record_type") != "package_reservation_release"
         or release.get("operation_id") != operation
         or release.get("generation_id") != state.get("generation_id")
@@ -3251,6 +4833,10 @@ def _load_bound_release_record(
         or authorization.get("accepted_by") != accepted_by
         or authorization.get("acceptance_reason") != acceptance_reason
         or authorization.get("acceptance_inventory_receipt") != acceptance_identity
+        or not isinstance(expected_chain, list)
+        or len(expected_chain) != len(LIVE_INVENTORY_PHASE_ORDER)
+        or release.get("live_inventory_receipt_chain") != expected_chain
+        or authorization.get("live_inventory_receipt_chain") != expected_chain
         or not isinstance(manifest_prefix, dict)
         or manifest_prefix.get("path") != str(finalization_manifest)
     ):
@@ -3467,6 +5053,27 @@ def accept_operation(
                 acceptance_reason=acceptance_reason,
                 finalization_manifest=finalization_manifest,
             )
+            terminal_receipt_identity, _ = _terminal_receipt(
+                state, operation=operation
+            )
+            release_reservation_identity = release_record.get("reservation")
+            if not isinstance(release_reservation_identity, dict):
+                raise PublicationError(
+                    "release record lacks its exact reservation identity"
+                )
+            _, retried_acceptance_identity = _load_recorded_live_inventory_report(
+                state=state,
+                reservation_identity=release_reservation_identity,
+                terminal_receipt_identity=terminal_receipt_identity,
+                receipt_path=acceptance_inventory_receipt,
+            )
+            if (
+                retried_acceptance_identity
+                != release_record.get("acceptance_inventory_receipt")
+            ):
+                raise PublicationError(
+                    "release record differs from the exact three-phase receipt chain"
+                )
             if status == "ACCEPTED":
                 return release_record
             if not paths["reservation"].exists() and not paths["reservation"].is_symlink():
@@ -3516,6 +5123,9 @@ def accept_operation(
                 receipt_path=acceptance_inventory_receipt,
             )
         )
+        inventory_receipt_chain = [
+            dict(identity) for identity in state["live_inventory_reports"]
+        ]
         observed_prefix = inventory_receipt.get("finalization_manifest_prefix")
         if not isinstance(observed_prefix, dict):
             raise PublicationError(
@@ -3564,6 +5174,7 @@ def accept_operation(
                 "acceptance_reason": acceptance_reason,
                 "accepted_at": _utc_now(),
                 "acceptance_inventory_receipt": inventory_receipt_identity,
+                "live_inventory_receipt_chain": inventory_receipt_chain,
             }
             state["acceptance_authorization"] = authorization
             _record_event(state, "panel_acceptance_authorized")
@@ -3574,6 +5185,8 @@ def accept_operation(
             or authorization.get("acceptance_reason") != acceptance_reason
             or authorization.get("acceptance_inventory_receipt")
             != inventory_receipt_identity
+            or authorization.get("live_inventory_receipt_chain")
+            != inventory_receipt_chain
         ):
             raise PublicationError(
                 "acceptance retry differs from the durable pending authorization"
@@ -3596,6 +5209,7 @@ def accept_operation(
                 "accepted_at": authorization["accepted_at"],
                 "terminal_receipt": terminal_receipt_identity,
                 "acceptance_inventory_receipt": inventory_receipt_identity,
+                "live_inventory_receipt_chain": inventory_receipt_chain,
                 "acceptance_inventory": inventory_receipt,
             },
         )
@@ -3622,7 +5236,7 @@ def accept_operation(
         if _reservation_identity(paths, reservation) != reservation_identity:
             raise PublicationError("package reservation drifted during acceptance")
         release_record = {
-            "schema_version": 2,
+            "schema_version": 3,
             "record_type": "package_reservation_release",
             "operation_id": operation,
             "generation_id": state["generation_id"],
@@ -3632,6 +5246,7 @@ def accept_operation(
             "terminal_receipt": terminal_receipt_identity,
             "terminal_receipt_value": terminal_receipt_value,
             "acceptance_inventory_receipt": inventory_receipt_identity,
+            "live_inventory_receipt_chain": inventory_receipt_chain,
             "acceptance_authorization": authorization,
             "reservation": reservation_identity,
             "finalization_manifest": acceptance_prefix,
@@ -3770,6 +5385,15 @@ def _parser() -> argparse.ArgumentParser:
         dest="maintenance_receipt",
         required=True,
         type=Path,
+        help=(
+            "exact schema-2 bounded external attestation (no undeclared keys): "
+            "maintenance_window starts_at/ends_at and complete known_reader_inventory with "
+            "checked_at/expires_at, zero active readers, STOP_IF_UNKNOWN, and NONE_OBSERVED; "
+            "time is valid only while starts_at <= now < ends_at and checked_at <= now < "
+            "expires_at (expiry is exclusive); the publisher validates the recorded claim "
+            "supplied externally, not unknowable world truth, and re-reads/re-hashes the exact bound claim "
+            "immediately before every atomic exchange"
+        ),
     )
     reserve.add_argument("--finalization-manifest", required=True, type=Path)
 
@@ -3797,6 +5421,19 @@ def _parser() -> argparse.ArgumentParser:
             "STOPPED or SUPERSEDED plus INACTIVE process and tool-session inspection"
         ),
     )
+    recover.add_argument(
+        "--reader-quiescence-record",
+        type=Path,
+        help=(
+            "fresh exact schema-2 bounded external attestation required for complete or "
+            "rollback and omitted for inspect; its byte digest must differ from every prior "
+            "claim and checked_at must be strictly later, with the same exclusive current-time "
+            "bounds; its precise bound_at must remain inside the claim and no later than any "
+            "exchange that cites it; it is append-linked to the exact generation, reservation, "
+            "takeover authorization digest, action, and prior renewal, then re-read and "
+            "re-hashed as the final filesystem check immediately before each recovery exchange"
+        ),
+    )
 
     finalize = subparsers.add_parser(
         "finalize",
@@ -3809,16 +5446,35 @@ def _parser() -> argparse.ArgumentParser:
 
     inventory = subparsers.add_parser(
         "inventory",
-        help="report the exact live inventory under the retained reservation",
+        help=(
+            "record exactly one ordered dispatch -> judgment -> acceptance inventory chain "
+            "under the retained reservation"
+        ),
     )
     _add_common_operation(inventory)
     inventory.add_argument("--lock", required=True, type=Path)
-    inventory.add_argument("--phase", choices=sorted(LIVE_INVENTORY_PHASES), required=True)
-    inventory.add_argument("--output", required=True, type=Path)
+    inventory.add_argument(
+        "--phase",
+        choices=LIVE_INVENTORY_PHASE_ORDER,
+        required=True,
+        help=(
+            "next required phase; skipped, reordered, and duplicate artifacts fail; "
+            "an exact same-path replay of a committed phase returns its existing receipt"
+        ),
+    )
+    inventory.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="new evidence path, or the exact same path when retrying an interrupted phase",
+    )
 
     accept = subparsers.add_parser(
         "accept",
-        help="record panel acceptance and release the retained reservation",
+        help=(
+            "accept only a complete exact dispatch -> judgment -> acceptance receipt chain "
+            "and release the retained reservation"
+        ),
     )
     _add_common_operation(accept)
     accept.add_argument("--lock", required=True, type=Path)
@@ -3876,6 +5532,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exchanger=DarwinAtomicExchanger(),
                 lock_path=args.lock,
                 takeover_authorization=args.takeover_authorization,
+                reader_quiescence_record=args.reader_quiescence_record,
             )
         elif args.command == "finalize":
             result = finalize_operation(
