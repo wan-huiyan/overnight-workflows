@@ -211,6 +211,15 @@ SOURCE_REVIEW_BOUNDARY_README_MARKERS = (
     "`source_review_input_registered`",
     "decoded with duplicate-key rejection",
 )
+# README-only markers: README.md and this checker are not install-manifest
+# entries, so stating the reservation gate here regenerates no install digest.
+RESERVATION_SOURCE_REVIEW_README_MARKERS = (
+    "cannot be reserved until that same review accepted it",
+    "joined by both its `prepared_generation_id` and its "
+    "`prepare_receipt_sha256`",
+    "A dispatch-only prefix reserves nothing",
+    "one review's judgment seal cannot authorize another candidate",
+)
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
     r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?Z$"
@@ -479,6 +488,11 @@ def check_panel_schema3_guidance(
     for marker in SOURCE_REVIEW_BOUNDARY_README_MARKERS:
         if marker not in normalized_readme:
             errors.append(f"source-review boundary README is missing {marker!r}")
+    for marker in RESERVATION_SOURCE_REVIEW_README_MARKERS:
+        if marker not in normalized_readme:
+            errors.append(
+                f"reservation source-review README is missing {marker!r}"
+            )
     for stale in (
         "Panel dispatches use exact schema-2 `panel_input` records",
         "Run that schema-2 validation before dispatch",
@@ -551,6 +565,30 @@ def run_source_review_boundary_guidance_negative_control(
         "source-review boundary guidance is missing" in item for item in observed
     ):
         errors.append("source-review boundary negative control did not fail")
+
+
+def run_reservation_source_review_guidance_negative_control(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Prove a README that drops the reservation gate is observable."""
+    marker = RESERVATION_SOURCE_REVIEW_README_MARKERS[0]
+    normalized_readme = " ".join(readme.split())
+    if marker not in normalized_readme:
+        errors.append("reservation source-review control setup marker is absent")
+        return
+    mutated = normalized_readme.replace(
+        marker,
+        "can be reserved while its source review is still pending",
+        1,
+    )
+    observed: list[str] = []
+    check_panel_schema3_guidance(reference, mutated, observed)
+    if not any(
+        "reservation source-review README is missing" in item for item in observed
+    ):
+        errors.append("reservation source-review negative control did not fail")
 
 
 def read_json(
@@ -4023,6 +4061,9 @@ def main() -> int:
             reference, readme, errors
         )
         run_source_review_boundary_guidance_negative_control(
+            reference, readme, errors
+        )
+        run_reservation_source_review_guidance_negative_control(
             reference, readme, errors
         )
         if nested_execution_is_authenticated:

@@ -36,6 +36,7 @@ if __package__:
         finalization_manifest_prefix as _finalization_manifest_prefix,
         latest_phase_registration as _latest_phase_registration,
         parse_finalization_jsonl as _parse_finalization_jsonl,
+        require_reservation_source_review as _require_reservation_source_review,
         validate_manifest as _validate_finalization_manifest,
     )
     from .install_inventory import (
@@ -56,6 +57,7 @@ else:
         finalization_manifest_prefix as _finalization_manifest_prefix,
         latest_phase_registration as _latest_phase_registration,
         parse_finalization_jsonl as _parse_finalization_jsonl,
+        require_reservation_source_review as _require_reservation_source_review,
         validate_manifest as _validate_finalization_manifest,
     )
     from install_inventory import (
@@ -1443,6 +1445,27 @@ def reserve_operation(
         if prepare_receipt is None:
             raise PublicationError(
                 "--prepare-receipt is required with --finalization-manifest"
+            )
+        # The same gate the manifest enforces under its own flock, called
+        # earlier so a pending source review never contends for the package
+        # writer lock.  The authoritative enforcement stays in the manifest
+        # lifecycle; this is not a second copy of the rule.  The isinstance
+        # guards exist so a malformed state still produces the canonical
+        # in-lock error instead of a KeyError or a confusing one here.
+        prepared = state.get("prepare_receipt")
+        if (
+            isinstance(prepared, dict)
+            and isinstance(prepared.get("sha256"), str)
+            and isinstance(state.get("generation_id"), str)
+        ):
+            _require_reservation_source_review(
+                _parse_finalization_jsonl(
+                    _read_regular_bytes(manifest_path, label="finalization manifest"),
+                    manifest_path,
+                ),
+                generation_id=state["generation_id"],
+                prepare_receipt_sha256=prepared["sha256"],
+                source_commit=state.get("source_commit"),
             )
     with WriterLock(paths["writer_lock"]):
         paths, state = _load_state(state_root, operation)

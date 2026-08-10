@@ -214,6 +214,18 @@ COMPATIBILITY_NAMES = {
     "schema2_malformed_original_path",
     "schema3_distinct_identical_rejected",
 }
+DUPLICATE_KEY_NAMES = {
+    "manifest_duplicate_schema_version",
+    "manifest_duplicate_record_type",
+    "manifest_duplicate_nested_scope_publish",
+    "manifest_duplicate_nested_repository_role",
+    "receipt_duplicate_mutation_outcome",
+    "receipt_duplicate_nested_source_commit",
+    "state_duplicate_status",
+    "state_duplicate_nested_prepare_receipt_sha256",
+    "install_manifest_duplicate_mappings",
+    "staged_stdout_duplicate_status",
+}
 FIXTURE_CLASSES = {
     "omission_cases": OMISSION_NAMES,
     "drift_cases": DRIFT_NAMES,
@@ -223,6 +235,7 @@ FIXTURE_CLASSES = {
     "undeclared_cases": UNDECLARED_NAMES,
     "file_safety_cases": FILE_SAFETY_NAMES,
     "compatibility_cases": COMPATIBILITY_NAMES,
+    "duplicate_key_cases": DUPLICATE_KEY_NAMES,
 }
 
 
@@ -367,12 +380,30 @@ def regular_bytes(path: Path, label: str, errors: list[str]) -> Optional[bytes]:
             os.close(descriptor)
 
 
+class DuplicateJSONKey(ValueError):
+    """One JSON object at a trust boundary repeated a key."""
+
+
+def strict_json_loads(text: str) -> Any:
+    """Decode one JSON document, refusing any object that repeats a key."""
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise DuplicateJSONKey(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+
+
 def json_object(data: Optional[bytes], label: str, errors: list[str]) -> Optional[dict[str, Any]]:
     if data is None:
         return None
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
         errors.append(f"{label} must contain one UTF-8 JSON object: {exc}")
         return None
     if not isinstance(value, dict):
@@ -490,7 +521,7 @@ def validate_installed(value: Any, verify: bool, errors: list[str]) -> None:
     if hashlib.sha256(manifest_bytes).hexdigest() != value.get("install_manifest_sha256"):
         errors.append("installed install manifest digest differs")
     try:
-        manifest = json.loads(manifest_bytes.decode())
+        manifest = strict_json_loads(manifest_bytes.decode())
         mappings = manifest["mappings"]
         if not isinstance(mappings, list) or not mappings:
             raise ValueError("mappings must be nonempty")
@@ -500,7 +531,7 @@ def validate_installed(value: Any, verify: bool, errors: list[str]) -> None:
         if sorted(path for path in expected if PurePosixPath(path).name == "SKILL.md") != ["SKILL.md"]:
             raise ValueError("snapshot must expose only root SKILL.md")
         inventory = build_inventory(root, expected)
-    except (KeyError, ValueError, UnicodeError, json.JSONDecodeError, PublicationError) as exc:
+    except (KeyError, ValueError, UnicodeError, json.JSONDecodeError, DuplicateJSONKey, PublicationError) as exc:
         errors.append(f"installed snapshot inventory could not be validated: {exc}")
         return
     if inventory.data != inventory_bytes:
@@ -785,8 +816,8 @@ def validate_staged_validation(
         errors.append("prepare receipt staged_validation.stdout must be JSON text")
     else:
         try:
-            stdout_result = json.loads(stdout)
-        except json.JSONDecodeError as exc:
+            stdout_result = strict_json_loads(stdout)
+        except (json.JSONDecodeError, DuplicateJSONKey) as exc:
             errors.append(f"prepare receipt staged_validation.stdout is invalid JSON: {exc}")
         else:
             if stdout_result != result:
@@ -833,8 +864,8 @@ def validate_staged_validation(
             try:
                 fresh_stdout_text = fresh_stdout.decode("utf-8")
                 fresh_stderr_text = fresh_stderr.decode("utf-8")
-                fresh_result = json.loads(fresh_stdout_text)
-            except (UnicodeError, json.JSONDecodeError) as exc:
+                fresh_result = strict_json_loads(fresh_stdout_text)
+            except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
                 errors.append(f"fresh staged checker result is malformed: {exc}")
             else:
                 if isinstance(fresh_result, dict) and fresh_result.get("status") == "FAIL":
@@ -1262,6 +1293,43 @@ def set_path(value: dict[str, Any], path: list[str], replacement: Any) -> None:
     cursor[path[-1]] = copy.deepcopy(replacement)
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def duplicate_key_text(
+    value: Any, path: list[str], key: str, first_value: Any
+) -> str:
+    """Render ``value`` with ``key`` repeated inside the object at ``path``."""
+    target: Any = value
+    for component in path:
+        target = target[component]
+    if not isinstance(target, dict) or key not in target:
+        raise RuntimeError(
+            f"duplicate-key control target is absent: {path + [key]}"
+        )
+    duplicated = (
+        "{"
+        + ",".join(
+            [f"{json.dumps(key)}:{_canonical_json(first_value)}"]
+            + [
+                f"{json.dumps(name)}:{_canonical_json(target[name])}"
+                for name in sorted(target)
+            ]
+        )
+        + "}"
+    )
+    if not path:
+        return duplicated
+    document = _canonical_json(value)
+    canonical_target = _canonical_json(target)
+    if document.count(canonical_target) != 1:
+        raise RuntimeError(
+            f"duplicate-key control target is not uniquely locatable: {path}"
+        )
+    return document.replace(canonical_target, duplicated, 1)
+
+
 def _authenticated_panel_fixture_record() -> Optional[dict[str, Any]]:
     """Return held fixture bytes, or None for direct canonical CLI execution."""
     held_source_present = "__authenticated_source_bytes__" in globals()
@@ -1302,7 +1370,7 @@ def _authenticated_panel_fixture_record() -> Optional[dict[str, Any]]:
 def _load_panel_fixtures() -> dict[str, Any]:
     authenticated = _authenticated_panel_fixture_record()
     data = FIXTURES.read_bytes() if authenticated is None else authenticated["source"]
-    value = json.loads(data.decode("utf-8"))
+    value = strict_json_loads(data.decode("utf-8"))
     return value if isinstance(value, dict) else {}
 
 
@@ -1890,6 +1958,109 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                     f"panel undeclared control {case['name']} did not fail as expected: {found}"
                 )
 
+        for case in fixtures["duplicate_key_cases"]:
+            duplicate_target = case["target"]
+            duplicate_path = case["path"]
+            duplicate_key = case["key"]
+            duplicate_first = case["first_value"]
+            if duplicate_target == "manifest":
+                probe = base / f"{case['name']}.jsonl"
+                probe.write_bytes(
+                    duplicate_key_text(
+                        copy.deepcopy(record),
+                        duplicate_path,
+                        duplicate_key,
+                        duplicate_first,
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                _, found = load_jsonl(probe)
+            elif duplicate_target == "install_manifest":
+                mutated = copy.deepcopy(record)
+                probe = base / f"{case['name']}.install-manifest.json"
+                probe.write_bytes(
+                    duplicate_key_text(
+                        strict_json_loads(manifest_path.read_text(encoding="utf-8")),
+                        duplicate_path,
+                        duplicate_key,
+                        duplicate_first,
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                mutated["installed"]["install_manifest_path"] = str(probe)
+                found = validate_panel_input(mutated)
+            else:
+                mutated = copy.deepcopy(record)
+                mutated_receipt = copy.deepcopy(receipt)
+                mutated_state = copy.deepcopy(state)
+                if duplicate_target == "staged_stdout":
+                    mutated_receipt["staged_validation"]["stdout"] = (
+                        duplicate_key_text(
+                            copy.deepcopy(
+                                mutated_receipt["staged_validation"]["result"]
+                            ),
+                            duplicate_path,
+                            duplicate_key,
+                            duplicate_first,
+                        )
+                        + "\n"
+                    )
+                mutated_receipt["named_mutation_outcomes"] = {
+                    "staged": copy.deepcopy(
+                        mutated_receipt["staged_validation"]["named_mutation_outcomes"]
+                    )
+                }
+                receipt_probe = base / f"{case['name']}.receipt.json"
+                receipt_data = (
+                    (
+                        duplicate_key_text(
+                            mutated_receipt,
+                            duplicate_path,
+                            duplicate_key,
+                            duplicate_first,
+                        )
+                        if duplicate_target == "receipt"
+                        else _canonical_json(mutated_receipt)
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                receipt_probe.write_bytes(receipt_data)
+                receipt_digest = hashlib.sha256(receipt_data).hexdigest()
+                mutated_state["prepare_receipt"] = {
+                    "path": str(receipt_probe), "sha256": receipt_digest,
+                }
+                mutated_state["validation"] = {
+                    "staged": copy.deepcopy(mutated_receipt["staged_validation"])
+                }
+                state_probe = base / f"{case['name']}.state.json"
+                state_data = (
+                    (
+                        duplicate_key_text(
+                            mutated_state,
+                            duplicate_path,
+                            duplicate_key,
+                            duplicate_first,
+                        )
+                        if duplicate_target == "state"
+                        else _canonical_json(mutated_state)
+                    )
+                    + "\n"
+                ).encode("utf-8")
+                state_probe.write_bytes(state_data)
+                mutated["prepare"].update(
+                    {
+                        "receipt_path": str(receipt_probe),
+                        "receipt_sha256": receipt_digest,
+                        "state_path": str(state_probe),
+                        "state_sha256": hashlib.sha256(state_data).hexdigest(),
+                    }
+                )
+                found = validate_panel_input(mutated)
+            if not any(case["expect"] in item for item in found):
+                errors.append(
+                    f"panel duplicate-key control {case['name']} did not fail as expected: {found}"
+                )
+
         for case in fixtures["prepare_cases"]:
             mutated = copy.deepcopy(record)
             mutated_receipt = copy.deepcopy(receipt)
@@ -2135,8 +2306,8 @@ def load_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     for number, raw_line in enumerate(lines, 1):
         try:
             line = raw_line.decode("utf-8")
-            value = json.loads(line)
-        except (UnicodeError, json.JSONDecodeError) as exc:
+            value = strict_json_loads(line)
+        except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
             errors.append(f"panel manifest line {number} is invalid JSON: {exc}"); continue
         if not isinstance(value, dict): errors.append(f"panel manifest line {number} must be an object")
         else: records.append(value)
@@ -2157,7 +2328,7 @@ def main() -> int:
     errors: list[str] = []
     check_validation_time_budget_contract(errors)
     try: fixtures = _load_panel_fixtures()
-    except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, DuplicateJSONKey, RuntimeError) as exc:
         fixtures = {}; errors.append(f"cannot read panel fixtures: {exc}")
     errors.extend(fixture_errors(fixtures))
     if args.self_test and not errors: errors.extend(self_test(fixtures))

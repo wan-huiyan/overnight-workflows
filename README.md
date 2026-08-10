@@ -229,6 +229,37 @@ to evade a declared source-validation artifact. The validation artifact JSON
 is decoded with duplicate-key rejection before its review ID and configured
 PASS field are checked.
 
+A generic-v2 source review can seal `judgment` only when its lifecycle joins up.
+Challenge responses must come from exactly the roles that reported, one per
+registered reviewer, and the judge's role and artifact must be distinct from
+every report and challenge. Every reported finding ID must resolve exactly once
+to an accepted, merged, or rejected disposition; merge targets must themselves
+be accepted, the accepted count must fall inside the declared deduplicated
+range, and the judge's structured receipt must carry that resolution. Every
+report, challenge, judge rationale, structured receipt, and controller payload
+must carry a create-once publication receipt minted by
+`publish-review-artifact`, and the seal rereads each public name to confirm it
+still resolves to the inode the publisher created. Only the literal
+`SOURCE_ACCEPTED` state and `SOURCE_GUIDANCE_ACCEPTED` status are accepted; the
+obsolete `JUDGED`/`REVIEWED` aliases are readable only in the schema-1 grammar.
+Rows written without a finding inventory or a publication receipt stay readable
+and appendable, so an in-flight manifest is never bricked, but they can never
+seal `judgment`. The receipt proves the publication method, the continuity of
+the published inode, and the current bytes; it is not a signature and does not
+authenticate the publisher, which remains the launcher's job.
+
+A prepared generation that a `source_review_input_registered` row names —
+joined by both its `prepared_generation_id` and its `prepare_receipt_sha256` —
+cannot be reserved until that same review accepted it. Reservation requires the
+literal `state: "SOURCE_ACCEPTED"` and `source_guidance_status:
+"SOURCE_GUIDANCE_ACCEPTED"` row, its exact `ACCEPT` structured judge receipt,
+and the registered `judgment` prefix seal for the same review and raw-input
+inventory. A dispatch-only prefix reserves nothing. The reviewed
+`installed_source` head must equal the prepare receipt's own source commit, so
+one review's judgment seal cannot authorize another candidate. Matching one
+join field and not the other is refused rather than skipped, and the rule is
+enforced by the manifest itself, so it re-applies on every later read.
+
 `finalize` writes terminal validation evidence but deliberately retains the
 package-wide `package.lock` through panel review. While that reservation is
 active, exactly one inventory chain must run in order: `dispatch`, then
@@ -249,6 +280,8 @@ releases the reservation.
 ```bash
 python3 scripts/finalization_manifest.py init --manifest /abs/finalization.jsonl --finalization-id FINALIZATION --writer-controller-id CONTROLLER
 python3 scripts/finalization_manifest.py seal-prefix --manifest /abs/finalization.jsonl --writer-controller-id CONTROLLER --review-id REVIEW --phase dispatch --raw-input-inventory-sha256 RAW_SHA256 --prefix-output /abs/evidence/dispatch-prefix.jsonl --receipt-output /abs/evidence/dispatch-prefix.json
+python3 scripts/finalization_manifest.py publish-review-artifact --review-root /abs/evidence --relative-output reports/report-1.md --expected-sha256 ARTIFACT_SHA256 --expected-byte-count BYTES --receipt-output /abs/evidence/receipts/report-1.json < /abs/draft/report-1.md
+python3 scripts/finalization_manifest.py judgment-input-identity --manifest /abs/finalization.jsonl
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase dispatch --output /abs/evidence/dispatch-live.json
 # Repeat seal-prefix and inventory with distinct outputs for judgment, then acceptance.
 python3 scripts/publish_codex_install.py inventory --operation OP --state-root /abs/state --lock /abs/state/package.lock --phase judgment --output /abs/evidence/judgment-live.json

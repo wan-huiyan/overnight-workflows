@@ -161,5 +161,17 @@
     {"name": "schema2_original_byte_drift", "kind": "different_bytes", "expect": "archived original prepare receipt bytes differ from sealed copy"},
     {"name": "schema2_malformed_original_path", "kind": "malformed_path", "expect": "prepare_receipt.path must be a normalized absolute path"},
     {"name": "schema3_distinct_identical_rejected", "kind": "schema3_distinct", "expect": "prepare_receipt.path differs from prepare.receipt_path"}
+  ],
+  "duplicate_key_cases": [
+    {"name": "manifest_duplicate_schema_version", "target": "manifest", "path": [], "key": "schema_version", "first_value": 2, "expect": "panel manifest line 1 is invalid JSON: duplicate JSON key 'schema_version'"},
+    {"name": "manifest_duplicate_record_type", "target": "manifest", "path": [], "key": "record_type", "first_value": "reviewer_instruction", "expect": "panel manifest line 1 is invalid JSON: duplicate JSON key 'record_type'"},
+    {"name": "manifest_duplicate_nested_scope_publish", "target": "manifest", "path": ["scope"], "key": "publish", "first_value": "COMPLETE", "expect": "panel manifest line 1 is invalid JSON: duplicate JSON key 'publish'"},
+    {"name": "manifest_duplicate_nested_repository_role", "target": "manifest", "path": ["repository_roles"], "key": "installed_source", "first_value": "consumer_fixture", "expect": "panel manifest line 1 is invalid JSON: duplicate JSON key 'installed_source'"},
+    {"name": "receipt_duplicate_mutation_outcome", "target": "receipt", "path": [], "key": "mutation_outcome", "first_value": "LIVE_MUTATED", "expect": "prepare receipt must contain one UTF-8 JSON object: duplicate JSON key 'mutation_outcome'"},
+    {"name": "receipt_duplicate_nested_source_commit", "target": "receipt", "path": ["source"], "key": "commit", "first_value": "0000000000000000000000000000000000000000", "expect": "prepare receipt must contain one UTF-8 JSON object: duplicate JSON key 'commit'"},
+    {"name": "state_duplicate_status", "target": "state", "path": [], "key": "status", "first_value": "RESERVED", "expect": "prepare state must contain one UTF-8 JSON object: duplicate JSON key 'status'"},
+    {"name": "state_duplicate_nested_prepare_receipt_sha256", "target": "state", "path": ["prepare_receipt"], "key": "sha256", "first_value": "0000000000000000000000000000000000000000000000000000000000000000", "expect": "prepare state must contain one UTF-8 JSON object: duplicate JSON key 'sha256'"},
+    {"name": "install_manifest_duplicate_mappings", "target": "install_manifest", "path": [], "key": "mappings", "first_value": [], "expect": "installed snapshot inventory could not be validated: duplicate JSON key 'mappings'"},
+    {"name": "staged_stdout_duplicate_status", "target": "staged_stdout", "path": [], "key": "status", "first_value": "FAIL", "expect": "prepare receipt staged_validation.stdout is invalid JSON: duplicate JSON key 'status'"}
   ]
 }

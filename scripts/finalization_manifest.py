@@ -38,6 +38,25 @@ PHASE_ORDER = ("dispatch", "judgment", "acceptance")
 JUDGE_RECEIPT_TYPE = "finalization_judge_verdict"
 PREPUBLICATION_SOURCE_REVIEW_BOUNDARY = "prepublication-source-and-staged-snapshot"
 POSTPUBLICATION_REVIEW_BOUNDARY = "postpublication-installed-snapshot"
+# The release contract names one literal accepting source-review vocabulary.
+# The v1 grammar stays readable so archived project-specific evidence can be
+# revalidated; a generic v2 manifest must carry the modern literals exactly.
+SOURCE_REVIEW_REPORTS_STATE = "CHALLENGE_PENDING"
+SOURCE_REVIEW_CHALLENGES_STATE = "JUDGE_PENDING"
+SOURCE_REVIEW_ACCEPTED_STATE = "SOURCE_ACCEPTED"
+SOURCE_REVIEW_ACCEPTED_STATUS = "SOURCE_GUIDANCE_ACCEPTED"
+LEGACY_SOURCE_REVIEW_REPORTS_STATES = frozenset(
+    {SOURCE_REVIEW_REPORTS_STATE, "REPORTS_RECEIVED"}
+)
+LEGACY_SOURCE_REVIEW_CHALLENGES_STATES = frozenset(
+    {SOURCE_REVIEW_CHALLENGES_STATE, "CHALLENGES_RECEIVED"}
+)
+LEGACY_SOURCE_REVIEW_ACCEPTED_STATES = frozenset(
+    {SOURCE_REVIEW_ACCEPTED_STATE, "JUDGED"}
+)
+LEGACY_SOURCE_REVIEW_ACCEPTED_STATUSES = frozenset(
+    {SOURCE_REVIEW_ACCEPTED_STATUS, "REVIEWED"}
+)
 JUDGE_RECEIPT_FIELDS = {
     "schema_version",
     "record_type",
@@ -52,6 +71,17 @@ JUDGE_RECEIPT_FIELDS = {
     "recorded_at",
     "findings_unresolved",
 }
+# The source-review judge additionally binds the finding-ID resolution.  This is
+# a separate set rather than a widening of the shared one above: the generic
+# postpublication judge path carries no finding data and compares the field set
+# with exact equality.
+SOURCE_JUDGE_RECEIPT_FIELDS = JUDGE_RECEIPT_FIELDS | {
+    "findings_reported",
+    "findings_accepted",
+    "findings_merged",
+    "findings_rejected",
+    "findings_resolution_sha256",
+}
 HEX_64_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_OID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -60,6 +90,37 @@ RFC3339_UTC_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z\Z"
 )
 SAFE_COMPONENT_FORBIDDEN = {"", ".", ".."}
+
+# Review artifacts are published once, by an atomic no-replace link, and the
+# publisher mints a durable receipt.  The receipt proves the publication METHOD
+# and the identity of the inode the public name was created as; it is not a
+# signature and does not authenticate the publisher.  Authentication comes from
+# the held-source launcher that runs this tool.
+REVIEW_ARTIFACT_PUBLICATION_SCHEMA = "doodlerun-review-artifact-publication-v1"
+REVIEW_ARTIFACT_PUBLICATION_STATE = "PUBLISHED"
+REVIEW_ARTIFACT_PUBLICATION_METHOD = "atomic-rename-no-replace-v1"
+PUBLICATION_RECEIPT_FIELDS = frozenset(
+    {
+        "receipt_schema",
+        "receipt_state",
+        "publication_method",
+        "artifact_path",
+        "artifact_relative_path",
+        "artifact_sha256",
+        "artifact_byte_count",
+        "artifact_device",
+        "artifact_inode",
+        "artifact_required_nlink",
+    }
+)
+# The manifest row states the receipt file's own identity plus a copy of every
+# receipt value, so validation can prove the row's claim equals the receipt.
+PUBLICATION_REGISTRATION_FIELDS = PUBLICATION_RECEIPT_FIELDS | {"path", "sha256"}
+REVIEW_ARTIFACT_DIRECTORIES = ("reports", "challenges", "judge")
+REVIEW_ARTIFACT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+MAX_REVIEW_ARTIFACT_BYTES = 64 * 1024 * 1024
+JUDGE_RATIONALE_ARTIFACT_KIND = "source-review-judge-rationale"
+JUDGE_PAYLOAD_ARTIFACT_KIND = "source-review-judge-verdict-payload"
 
 PREPARE_RECEIPT_FIELDS = {
     "schema_version", "operation_id", "generation_id", "source",
@@ -185,6 +246,10 @@ RECORD_SCHEMAS: Dict[str, RecordSchema] = {
             "merged_findings live_installation_status source_guidance_status state "
             "next_action"
         ),
+        # Optional to PARSE so archived and in-flight manifests written before
+        # these joins stay readable; mandatory to ACCEPT, inside the judgment
+        # prerequisites.
+        optional=_fields("rejected_findings judge_rationale"),
         identity_fields=("review_id",),
     ),
     "prepare_receipt_registered": RecordSchema(
@@ -212,6 +277,7 @@ RECORD_SCHEMAS: Dict[str, RecordSchema] = {
     ),
     "artifact_registered": RecordSchema(
         _fields("review_id artifact_kind path sha256 state next_action"),
+        optional=_fields("bytes lines publication_receipt"),
         identity_fields=("review_id", "artifact_kind", "path"),
     ),
     "artifact_invalidation": RecordSchema(
@@ -395,6 +461,18 @@ def _safe_absolute(path: Path, *, label: str, must_exist: bool = False) -> Path:
 
 
 def _read_regular_bytes(path: Path, *, label: str) -> bytes:
+    return _read_regular_bytes_with_identity(path, label=label)[0]
+
+
+def _read_regular_bytes_with_identity(
+    path: Path, *, label: str
+) -> Tuple[bytes, os.stat_result]:
+    """Read one no-follow single-link regular file and report its live identity.
+
+    The device and inode are taken from the descriptor the bytes were read
+    through, never from a later ``os.stat``, so an identity check built on the
+    result cannot be raced by a replacement between the read and the check.
+    """
     path = _safe_absolute(path, label=label, must_exist=True)
     before = os.lstat(path)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
@@ -423,7 +501,7 @@ def _read_regular_bytes(path: Path, *, label: str) -> bytes:
             or len(data) != after.st_size
         ):
             raise PublicationError(f"{label} changed while it was read")
-        return data
+        return data, after
     finally:
         os.close(descriptor)
 
@@ -442,6 +520,79 @@ def _validate_artifact_identity(value: Any, label: str) -> None:
     for field in ("bytes", "lines"):
         if not isinstance(value.get(field), int) or isinstance(value.get(field), bool) or value[field] < 0:
             raise PublicationError(f"finalization {label}.{field} must be nonnegative")
+    if "publication_receipt" in value:
+        _validate_publication_registration(
+            value["publication_receipt"], f"finalization {label}.publication_receipt"
+        )
+
+
+def _validate_publication_registration(value: Any, label: str) -> None:
+    """Check the shape of one create-once publication receipt registration."""
+    if not isinstance(value, dict) or set(value) != PUBLICATION_REGISTRATION_FIELDS:
+        raise PublicationError(
+            f"{label} must have exact receipt identity and publication fields"
+        )
+    for field in ("path", "artifact_path"):
+        if not isinstance(value.get(field), str):
+            raise PublicationError(f"{label}.{field} must be absolute")
+        _safe_absolute(Path(value[field]), label=f"{label}.{field}")
+    for field in ("sha256", "artifact_sha256"):
+        _require_sha256(value.get(field), f"{label}.{field}")
+    if (
+        value.get("receipt_schema") != REVIEW_ARTIFACT_PUBLICATION_SCHEMA
+        or value.get("receipt_state") != REVIEW_ARTIFACT_PUBLICATION_STATE
+        or value.get("publication_method") != REVIEW_ARTIFACT_PUBLICATION_METHOD
+    ):
+        raise PublicationError(
+            f"{label} must declare the create-once review-artifact publication contract"
+        )
+    if type(value.get("artifact_required_nlink")) is not int or (
+        value["artifact_required_nlink"] != 1
+    ):
+        raise PublicationError(f"{label}.artifact_required_nlink must equal 1")
+    if type(value.get("artifact_byte_count")) is not int or (
+        value["artifact_byte_count"] <= 0
+    ):
+        raise PublicationError(f"{label}.artifact_byte_count must be a positive integer")
+    if type(value.get("artifact_device")) is not int or value["artifact_device"] < 0:
+        raise PublicationError(f"{label}.artifact_device must be a nonnegative integer")
+    if type(value.get("artifact_inode")) is not int or value["artifact_inode"] <= 0:
+        raise PublicationError(f"{label}.artifact_inode must be a positive integer")
+    _validate_review_artifact_relative_path(
+        value.get("artifact_relative_path"), f"{label}.artifact_relative_path"
+    )
+    if not str(value["artifact_path"]).endswith("/" + value["artifact_relative_path"]):
+        raise PublicationError(
+            f"{label}.artifact_path does not end in its published relative path"
+        )
+
+
+def _validate_review_artifact_relative_path(value: Any, label: str) -> str:
+    """Require exactly one filename under one of the three review directories."""
+    if not isinstance(value, str):
+        raise PublicationError(f"{label} must be a published review-artifact path")
+    parts = value.split("/")
+    if (
+        len(parts) != 2
+        or parts[0] not in REVIEW_ARTIFACT_DIRECTORIES
+        or not REVIEW_ARTIFACT_NAME_RE.fullmatch(parts[1])
+    ):
+        raise PublicationError(
+            f"{label} must name one file under "
+            f"{'/, '.join(REVIEW_ARTIFACT_DIRECTORIES)}/"
+        )
+    return value
+
+
+def _finding_id_list(value: Any, label: str) -> List[str]:
+    """Return one duplicate-free list of stable finding IDs."""
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not IDENTITY_RE.fullmatch(item) for item in value
+    ):
+        raise PublicationError(f"{label} must be an array of finding IDs")
+    if len(value) != len(set(value)):
+        raise PublicationError(f"{label} repeats a finding ID")
+    return list(value)
 
 
 def _validate_repository_heads(value: Any, label: str) -> None:
@@ -559,6 +710,21 @@ def _validate_record_payload(
             _safe_absolute(Path(record[field]), label=f"finalization row {row} {field}")
     if "phase" in record and record["phase"] not in PHASE_ORDER:
         raise PublicationError(f"finalization row {row} has unsupported phase")
+    # Only artifact_registered carries a review-artifact publication receipt at
+    # the top level.  installed_publication_terminal has an unrelated field of
+    # the same name and is deliberately not swept in here.
+    if record_type == "artifact_registered" and "publication_receipt" in record:
+        _validate_publication_registration(
+            record["publication_receipt"],
+            f"finalization row {row} publication_receipt",
+        )
+        for field in ("bytes", "lines"):
+            if field in record and (
+                type(record[field]) is not int or record[field] < 0
+            ):
+                raise PublicationError(
+                    f"finalization row {row} {field} must be nonnegative"
+                )
     if record_type == "manifest_prefix_registered":
         _require_sha256(record["manifest_prefix_sha256"], "manifest prefix SHA-256")
         for field in (
@@ -631,6 +797,13 @@ def _validate_record_payload(
             raise PublicationError("source review reports must be a nonempty array")
         for index, report in enumerate(reports):
             _validate_artifact_identity(report, f"reports[{index}]")
+            # Presence-conditional: rows written before the finding inventory
+            # existed stay readable, and a present inventory is checked for
+            # shape here so a malformed one cannot wait until judgment.
+            if "finding_ids" in report:
+                _finding_id_list(
+                    report["finding_ids"], f"source review reports[{index}].finding_ids"
+                )
     if record_type == "source_review_challenges_received":
         for field in (
             "expected_challenge_responses",
@@ -646,12 +819,18 @@ def _validate_record_payload(
             raise PublicationError("source review challenges must be a nonempty array")
         for index, challenge in enumerate(challenges):
             _validate_artifact_identity(challenge, f"challenges[{index}]")
+            if "answered_finding_ids" in challenge:
+                _finding_id_list(
+                    challenge["answered_finding_ids"],
+                    f"source review challenges[{index}].answered_finding_ids",
+                )
     if record_type == "source_review_judge_verdict_received":
         accepted = record.get("accepted_findings")
         if not isinstance(accepted, list) or any(
             not isinstance(value, str) or not value for value in accepted
         ):
             raise PublicationError("source review accepted_findings must be an array of IDs")
+        _finding_id_list(accepted, "source review accepted_findings")
         merged = record.get("merged_findings")
         if not isinstance(merged, dict) or any(
             not isinstance(key, str)
@@ -661,7 +840,15 @@ def _validate_record_payload(
             for key, value in merged.items()
         ):
             raise PublicationError("source review merged_findings must map finding IDs")
+        _finding_id_list(list(merged), "source review merged_findings sources")
+        _finding_id_list(
+            sorted(set(merged.values())), "source review merged_findings targets"
+        )
+        if "rejected_findings" in record:
+            _finding_id_list(record["rejected_findings"], "source review rejected_findings")
         _validate_artifact_identity(record.get("judge"), "judge")
+        if "judge_rationale" in record:
+            _validate_artifact_identity(record["judge_rationale"], "judge_rationale")
     if record_type == "review_summary":
         for field in (
             "independent_reports_expected",
@@ -988,6 +1175,61 @@ def _verify_artifact_record(record: Mapping[str, Any], label: str) -> bytes:
     return data
 
 
+def _verify_publication_receipt(record: Mapping[str, Any], label: str) -> Mapping[str, Any]:
+    """Prove one registered artifact was created by the create-once publisher.
+
+    This proves the publication METHOD, that the public name still resolves to
+    the very inode the publisher created, and that the bytes at that name still
+    hash to the registered digest.  It is not a signature: anyone who can write
+    the artifact can also write a matching receipt, so authentication comes
+    from the launcher that runs the publisher, not from these bytes.
+    """
+    registration = record.get("publication_receipt")
+    if not isinstance(registration, dict):
+        raise PublicationError(f"{label} lacks its create-once publication receipt")
+    _validate_publication_registration(registration, f"{label} publication receipt")
+    data = _verify_registered_file(
+        registration["path"], registration["sha256"], f"{label} publication receipt"
+    )
+    receipt = _decode_json_without_duplicate_keys(data, f"{label} publication receipt")
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != PUBLICATION_RECEIPT_FIELDS
+        or any(
+            receipt[field] != registration[field]
+            for field in PUBLICATION_RECEIPT_FIELDS
+        )
+    ):
+        raise PublicationError(
+            f"{label} publication receipt differs from its registered identity"
+        )
+    if receipt["artifact_path"] != record.get("path"):
+        raise PublicationError(f"{label} publication receipt is for another artifact")
+    if receipt["artifact_sha256"] != record.get("sha256") or (
+        "bytes" in record and receipt["artifact_byte_count"] != record["bytes"]
+    ):
+        raise PublicationError(
+            f"{label} publication receipt does not cover the registered artifact bytes"
+        )
+    live, identity = _read_regular_bytes_with_identity(
+        Path(str(record["path"])), label=f"{label} published bytes"
+    )
+    if (
+        len(live) != receipt["artifact_byte_count"]
+        or hashlib.sha256(live).hexdigest() != receipt["artifact_sha256"]
+    ):
+        raise PublicationError(f"{label} published bytes drifted from their receipt")
+    if (
+        identity.st_nlink != 1
+        or identity.st_dev != receipt["artifact_device"]
+        or identity.st_ino != receipt["artifact_inode"]
+    ):
+        raise PublicationError(
+            f"{label} public name no longer resolves to the published create-once inode"
+        )
+    return receipt
+
+
 def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
     def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
         value: Dict[str, Any] = {}
@@ -1081,6 +1323,222 @@ def judgment_input_identity(
         "adjudicated_record_count": len(records),
         "adjudicated_last_sequence": last_sequence,
     }
+
+
+def source_findings_resolution(
+    report: Mapping[str, Any],
+    challenge: Mapping[str, Any],
+    verdict: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Join every reported finding ID to exactly one judged disposition.
+
+    Raises on any coverage, duplication, merge-target or cardinality violation.
+    Otherwise returns the five values the source-review judge receipt must
+    carry, so the receipt is bound to the ID sets rather than to a count.
+    """
+    reported: List[str] = []
+    for index, entry in enumerate(report["reports"]):
+        if "finding_ids" not in entry:
+            raise PublicationError(
+                f"source-review report {index} does not publish its finding inventory"
+            )
+        reported.extend(
+            _finding_id_list(
+                entry["finding_ids"], f"source-review report {index} finding_ids"
+            )
+        )
+    # Two reviewers must not claim the same stable ID.
+    if len(reported) != len(set(reported)):
+        raise PublicationError("source-review reports reuse the same finding ID")
+    reported_set = set(reported)
+    if len(reported) != report.get("findings_received"):
+        raise PublicationError(
+            "source-review finding inventory does not match findings_received"
+        )
+
+    answered: set[str] = set()
+    for index, entry in enumerate(challenge["challenges"]):
+        if "answered_finding_ids" not in entry:
+            raise PublicationError(
+                f"source-review challenge {index} does not publish its answered "
+                "finding inventory"
+            )
+        answered |= set(
+            _finding_id_list(
+                entry["answered_finding_ids"],
+                f"source-review challenge {index} answered_finding_ids",
+            )
+        )
+    if answered - reported_set:
+        raise PublicationError("source-review challenges answer an unreported finding")
+    if reported_set - answered:
+        raise PublicationError(
+            "source-review challenges leave a reported finding unanswered"
+        )
+    if challenge.get("findings_answered") != len(reported_set):
+        raise PublicationError(
+            "source-review findings_answered does not match the reported finding inventory"
+        )
+
+    accepted = _finding_id_list(
+        verdict["accepted_findings"], "source-review accepted findings"
+    )
+    rejected = _finding_id_list(
+        verdict.get("rejected_findings", []), "source-review rejected findings"
+    )
+    merged = verdict["merged_findings"]
+    merged_sources = _finding_id_list(list(merged), "source-review merged findings")
+
+    # BOTH halves are load-bearing.  The list-vs-set length test rejects a
+    # duplicate or an ID carrying two dispositions; the set equality test
+    # rejects a missing or unknown ID.  Set equality ALONE is the exact defect
+    # this join exists to close - do not "simplify" to one test.
+    disposed = accepted + rejected + merged_sources
+    if len(disposed) != len(set(disposed)) or set(disposed) != reported_set:
+        raise PublicationError("source-review findings must resolve exactly once")
+
+    accepted_set = set(accepted)
+    # A merge target must itself be ACCEPTED.  Because accepted and
+    # merged_sources are provably disjoint above, a target can never be a merge
+    # source, so a merge cycle is structurally impossible and no cycle walk is
+    # needed.  Chained merges are deliberately NOT accepted.
+    if any(target not in accepted_set for target in merged.values()):
+        raise PublicationError("source-review merge target must be an accepted finding")
+
+    low = challenge.get("deduplicated_findings_reported_min")
+    high = challenge.get("deduplicated_findings_reported_max")
+    if not (low <= high <= len(reported_set)) or not (low <= len(accepted) <= high):
+        raise PublicationError(
+            "source-review accepted findings fall outside the deduplicated finding range"
+        )
+
+    canonical = (
+        json.dumps(
+            {
+                "reported": sorted(reported_set),
+                "accepted": sorted(accepted),
+                "merged": dict(sorted(merged.items())),
+                "rejected": sorted(rejected),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    return {
+        "findings_reported": len(reported_set),
+        "findings_accepted": len(accepted),
+        "findings_merged": len(merged),
+        "findings_rejected": len(rejected),
+        "findings_resolution_sha256": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _require_judge_rationale_and_payload(
+    records: Sequence[Mapping[str, Any]],
+    verdict: Mapping[str, Any],
+    *,
+    review_id: str,
+    other_identities: set[Tuple[Any, Any]],
+) -> None:
+    """Require the judge's published rationale and controller payload."""
+    rationale = verdict.get("judge_rationale")
+    if not isinstance(rationale, dict):
+        raise PublicationError(
+            "source-review judgment requires the registered judge rationale"
+        )
+    _validate_artifact_identity(rationale, "judge_rationale")
+    if (rationale.get("path"), rationale.get("sha256")) in other_identities:
+        raise PublicationError(
+            "source-review judge rationale must be distinct from every other artifact"
+        )
+    _verify_artifact_record(rationale, "source-review judge rationale")
+    _verify_publication_receipt(rationale, "source-review judge rationale")
+    _require_published_registration(
+        records,
+        review_id=review_id,
+        artifact_kind=JUDGE_RATIONALE_ARTIFACT_KIND,
+        path=rationale.get("path"),
+        sha256=rationale.get("sha256"),
+        label="source-review judge rationale",
+    )
+
+    payload_registration = _require_published_registration(
+        records,
+        review_id=review_id,
+        artifact_kind=JUDGE_PAYLOAD_ARTIFACT_KIND,
+        path=None,
+        sha256=None,
+        label="source-review judge verdict payload",
+    )
+    try:
+        verdict_index = next(
+            index for index, item in enumerate(records) if item is verdict
+        )
+        payload_index = next(
+            index for index, item in enumerate(records) if item is payload_registration
+        )
+    except StopIteration as exc:  # pragma: no cover - both rows come from records
+        raise PublicationError(
+            "source-review judge verdict payload registration is not in the manifest"
+        ) from exc
+    if payload_index <= verdict_index:
+        raise PublicationError(
+            "source-review judge verdict payload must be registered after its verdict row"
+        )
+    data = _verify_artifact_record(
+        payload_registration, "source-review judge verdict payload"
+    )
+    _verify_publication_receipt(
+        payload_registration, "source-review judge verdict payload"
+    )
+    published = _decode_json_without_duplicate_keys(
+        data, "source-review judge verdict payload"
+    )
+    expected = {
+        field: value for field, value in verdict.items() if field not in ENVELOPE_FIELDS
+    }
+    if published != expected:
+        raise PublicationError(
+            "source-review judge verdict payload differs from the appended verdict row"
+        )
+
+
+def _require_published_registration(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    review_id: str,
+    artifact_kind: str,
+    path: Optional[Any],
+    sha256: Optional[Any],
+    label: str,
+) -> Mapping[str, Any]:
+    """Return one live PUBLISHED artifact_registered row, or refuse."""
+    criteria: Dict[str, Any] = {
+        "review_id": review_id,
+        "artifact_kind": artifact_kind,
+        "state": REVIEW_ARTIFACT_PUBLICATION_STATE,
+    }
+    if path is not None:
+        criteria["path"] = path
+    if sha256 is not None:
+        criteria["sha256"] = sha256
+    registration = _matching_record(records, "artifact_registered", **criteria)
+    if registration is None:
+        raise PublicationError(f"{label} lacks its PUBLISHED artifact registration")
+    invalidation = _matching_record(
+        records,
+        "artifact_invalidation",
+        review_id=review_id,
+        artifact_kind=artifact_kind,
+        path=registration.get("path"),
+        prior_sha256=registration.get("sha256"),
+    )
+    if invalidation is not None:
+        raise PublicationError(f"{label} registration was invalidated")
+    return registration
 
 
 def _raw_input_tree_closure(
@@ -1274,6 +1732,8 @@ def _verify_judge_receipt(
     expected_verdict: str,
     verdict_record: Mapping[str, Any],
     label: str,
+    expected_fields: set[str] = JUDGE_RECEIPT_FIELDS,
+    resolution: Optional[Mapping[str, Any]] = None,
 ) -> Mapping[str, Any]:
     data = _verify_artifact_record(record, label)
     receipt = _decode_json_without_duplicate_keys(data, label)
@@ -1293,7 +1753,7 @@ def _verify_judge_receipt(
     adjudicated = judgment_input_identity(records[:verdict_index])
     if (
         not isinstance(receipt, dict)
-        or set(receipt) != JUDGE_RECEIPT_FIELDS
+        or set(receipt) != expected_fields
         or type(receipt.get("schema_version")) is not int
         or receipt["schema_version"] != 1
         or receipt.get("record_type") != JUDGE_RECEIPT_TYPE
@@ -1311,6 +1771,12 @@ def _verify_judge_receipt(
         or not _valid_timestamp(receipt.get("recorded_at"))
         or type(receipt.get("findings_unresolved")) is not int
         or receipt["findings_unresolved"] != 0
+        or (
+            resolution is not None
+            and any(
+                receipt.get(field) != value for field, value in resolution.items()
+            )
+        )
     ):
         raise PublicationError(f"{label} does not bind an accepted judge decision")
     return receipt
@@ -1487,6 +1953,52 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
         raise PublicationError("source-review raw-input seal does not bind its inputs")
 
 
+def _accepting_source_review_states_are_current(
+    *,
+    manifest_schema: Any,
+    report: Mapping[str, Any],
+    challenge: Mapping[str, Any],
+    verdict: Mapping[str, Any],
+) -> bool:
+    """Only the archived v1 grammar may still read the obsolete aliases.
+
+    The test is deliberately "permissive ONLY on the exact legacy literal".
+    Written the other way round -- strict on the known v2 literal, permissive
+    otherwise -- any unrecognised schema string would fall into the permissive
+    branch, which is the same fail-open gate this check exists to close.
+    """
+    if manifest_schema == LEGACY_MANIFEST_SCHEMA:
+        return (
+            report.get("state") in LEGACY_SOURCE_REVIEW_REPORTS_STATES
+            and challenge.get("state") in LEGACY_SOURCE_REVIEW_CHALLENGES_STATES
+            and verdict.get("state") in LEGACY_SOURCE_REVIEW_ACCEPTED_STATES
+            and verdict.get("source_guidance_status")
+            in LEGACY_SOURCE_REVIEW_ACCEPTED_STATUSES
+        )
+    return (
+        report.get("state") == SOURCE_REVIEW_REPORTS_STATE
+        and challenge.get("state") == SOURCE_REVIEW_CHALLENGES_STATE
+        and verdict.get("state") == SOURCE_REVIEW_ACCEPTED_STATE
+        and verdict.get("source_guidance_status") == SOURCE_REVIEW_ACCEPTED_STATUS
+    )
+
+
+def _uses_obsolete_source_review_aliases(
+    report: Optional[Mapping[str, Any]],
+    challenge: Optional[Mapping[str, Any]],
+    verdict: Optional[Mapping[str, Any]],
+) -> bool:
+    """Report whether a row carries vocabulary the release contract retired."""
+    if report is None or challenge is None or verdict is None:
+        return False
+    return (
+        report.get("state") == "REPORTS_RECEIVED"
+        or challenge.get("state") == "CHALLENGES_RECEIVED"
+        or verdict.get("state") == "JUDGED"
+        or verdict.get("source_guidance_status") == "REVIEWED"
+    )
+
+
 def _require_review_phase_prerequisites(
     records: Sequence[Mapping[str, Any]],
     *,
@@ -1494,6 +2006,8 @@ def _require_review_phase_prerequisites(
     raw_input_inventory_sha256: str,
     phase: str,
 ) -> None:
+    manifest_schema = records[0].get("manifest_schema") if records else None
+    generic_v2 = manifest_schema == MANIFEST_SCHEMA
     historical_input = _matching_record(
         records,
         "source_review_input_registered",
@@ -1515,7 +2029,7 @@ def _require_review_phase_prerequisites(
         _verify_required_pre_dispatch_validation(records, historical_input)
     if generic_input is not None:
         if (
-            records[0].get("manifest_schema") == MANIFEST_SCHEMA
+            generic_v2
             and generic_input.get("review_boundary")
             != POSTPUBLICATION_REVIEW_BOUNDARY
         ):
@@ -1528,6 +2042,7 @@ def _require_review_phase_prerequisites(
         return
 
     historical_complete = False
+    report = challenge = verdict = None
     if historical_input is not None:
         panel_id = historical_input.get("panel_id")
         report = _matching_record(
@@ -1574,61 +2089,106 @@ def _require_review_phase_prerequisites(
             ))
             and report.get("findings_received") == challenge.get("findings_received")
             and challenge.get("findings_received") == challenge.get("findings_answered")
-            and report.get("state") in {"CHALLENGE_PENDING", "REPORTS_RECEIVED"}
-            and challenge.get("state") in {"JUDGE_PENDING", "CHALLENGES_RECEIVED"}
-            and verdict.get("state") in {"SOURCE_ACCEPTED", "JUDGED"}
-            and verdict.get("source_guidance_status")
-            in {"SOURCE_GUIDANCE_ACCEPTED", "REVIEWED"}
+            and _accepting_source_review_states_are_current(
+                manifest_schema=manifest_schema,
+                report=report,
+                challenge=challenge,
+                verdict=verdict,
+            )
             and isinstance(judge_artifact, dict)
             and judge_artifact.get("verdict") == "ACCEPT"
         )
         if historical_complete:
+            report_artifacts = report["reports"]
+            challenge_artifacts = challenge["challenges"]
+            # Roles are validated before any set is built from them: comparing
+            # sets that may still hold None means nothing.
+            if any(
+                not isinstance(artifact.get("role"), str)
+                or not IDENTITY_RE.fullmatch(artifact["role"])
+                for artifact in (*report_artifacts, *challenge_artifacts, judge_artifact)
+            ):
+                raise PublicationError("source-review participant roles are malformed")
+            if historical_input.get("expected_reports") != historical_input.get(
+                "expected_challenge_responses"
+            ):
+                raise PublicationError(
+                    "source-review requires one challenge response per registered reviewer"
+                )
             report_identities = {
                 (artifact.get("path"), artifact.get("sha256"))
-                for artifact in report["reports"]
+                for artifact in report_artifacts
             }
             challenge_identities = {
                 (artifact.get("path"), artifact.get("sha256"))
-                for artifact in challenge["challenges"]
+                for artifact in challenge_artifacts
             }
-            report_roles = [artifact.get("role") for artifact in report["reports"]]
-            challenge_roles = [
-                artifact.get("role") for artifact in challenge["challenges"]
-            ]
+            report_roles = [artifact["role"] for artifact in report_artifacts]
+            challenge_roles = [artifact["role"] for artifact in challenge_artifacts]
             if (
                 report_identities & challenge_identities
-                or len(report_identities) != len(report["reports"])
-                or len(challenge_identities) != len(challenge["challenges"])
+                or len(report_identities) != len(report_artifacts)
+                or len(challenge_identities) != len(challenge_artifacts)
                 or len(set(report_roles)) != len(report_roles)
                 or len(set(challenge_roles)) != len(challenge_roles)
             ):
                 raise PublicationError(
                     "source-review reports and challenges must be distinct independent artifacts"
                 )
-            for index, artifact in enumerate(report["reports"]):
+            if (judge_artifact.get("path"), judge_artifact.get("sha256")) in (
+                report_identities | challenge_identities
+            ):
+                raise PublicationError(
+                    "source-review judge artifact must be distinct from every report "
+                    "and challenge"
+                )
+            if set(report_roles) != set(challenge_roles) or len(report_roles) != len(
+                challenge_roles
+            ):
+                raise PublicationError(
+                    "source-review challenges must come from exactly the reporting reviewers"
+                )
+            for index, artifact in enumerate(report_artifacts):
                 _verify_artifact_record(artifact, f"source-review report {index}")
-            for index, artifact in enumerate(challenge["challenges"]):
+            for index, artifact in enumerate(challenge_artifacts):
                 _verify_artifact_record(artifact, f"source-review challenge {index}")
+            # After the artifact re-opens, so byte drift still reports as byte
+            # drift; before the judge receipt, so a coverage break reports as a
+            # coverage break rather than as a receipt mismatch.
+            resolution = source_findings_resolution(report, challenge, verdict)
             judge_receipt = _verify_judge_receipt(
                 judge_artifact,
                 records=records,
                 review_id=review_id,
                 raw_input_inventory_sha256=raw_input_inventory_sha256,
-                expected_role=judge_artifact.get("role"),
+                expected_role=judge_artifact["role"],
                 expected_verdict="ACCEPT",
                 verdict_record=verdict,
                 label="source-review judge verdict",
+                expected_fields=SOURCE_JUDGE_RECEIPT_FIELDS,
+                resolution=resolution,
             )
-            participants = [*report["reports"], *challenge["challenges"]]
-            if any(
-                not isinstance(artifact.get("role"), str)
-                or not IDENTITY_RE.fullmatch(artifact["role"])
-                for artifact in participants
-            ):
-                raise PublicationError("source-review participant roles are malformed")
-            participant_roles = {artifact["role"] for artifact in participants}
-            if judge_receipt["judge_role"] in participant_roles:
+            if judge_receipt["judge_role"] in {*report_roles, *challenge_roles}:
                 raise PublicationError("source-review judge must be independent")
+            # Last, so every message above keeps its current meaning.
+            if generic_v2:
+                for index, artifact in enumerate(report_artifacts):
+                    _verify_publication_receipt(
+                        artifact, f"source-review report {index}"
+                    )
+                for index, artifact in enumerate(challenge_artifacts):
+                    _verify_publication_receipt(
+                        artifact, f"source-review challenge {index}"
+                    )
+                _verify_publication_receipt(judge_artifact, "source-review judge verdict")
+                _require_judge_rationale_and_payload(
+                    records,
+                    verdict,
+                    review_id=review_id,
+                    other_identities=report_identities
+                    | challenge_identities
+                    | {(judge_artifact.get("path"), judge_artifact.get("sha256"))},
+                )
 
     generic_reports = [
         record
@@ -1681,16 +2241,24 @@ def _require_review_phase_prerequisites(
             _verify_artifact_record(artifact, f"review report {index}")
         for index, artifact in enumerate(generic_challenges):
             _verify_artifact_record(artifact, f"challenge response {index}")
-        participant_roles = {
-            *(
-                record["reviewer_role"]
-                for record in generic_reports
-            ),
-            *(
-                record["participant_role"]
-                for record in generic_challenges
-            ),
-        }
+        # The same join as the source-review branch above: a uniqueness test
+        # inside each list never compares the two lists to each other.
+        reviewer_roles = {record["reviewer_role"] for record in generic_reports}
+        challenger_roles = {record["participant_role"] for record in generic_challenges}
+        if reviewer_roles != challenger_roles or len(generic_reports) != len(
+            generic_challenges
+        ):
+            raise PublicationError(
+                "postpublication challenges must come from exactly the reporting reviewers"
+            )
+        if {
+            (record.get("path"), record.get("sha256")) for record in generic_verdicts
+        } & (report_identities | challenge_identities):
+            raise PublicationError(
+                "postpublication judge artifact must be distinct from every report "
+                "and challenge"
+            )
+        participant_roles = reviewer_roles | challenger_roles
         for index, artifact in enumerate(generic_verdicts):
             _verify_judge_receipt(
                 artifact,
@@ -1705,6 +2273,17 @@ def _require_review_phase_prerequisites(
             if artifact["judge_role"] in participant_roles:
                 raise PublicationError("postpublication judge must be independent")
     if not historical_complete and not generic_complete:
+        # A refinement on a path that already raises: without it an aliased
+        # manifest is told that a report, challenge, or judge row is missing
+        # while all three are present and otherwise valid.
+        if generic_v2 and _uses_obsolete_source_review_aliases(
+            report, challenge, verdict
+        ):
+            raise PublicationError(
+                "generic v2 source-review judgment requires the literal "
+                "SOURCE_ACCEPTED state and SOURCE_GUIDANCE_ACCEPTED status; "
+                "the obsolete aliases are readable only in the v1 grammar"
+            )
         raise PublicationError(
             "manifest-prefix judgment requires report, challenge, and judge rows"
         )
@@ -1739,6 +2318,153 @@ def _require_review_phase_prerequisites(
     ):
         raise PublicationError(
             "manifest-prefix acceptance requires a complete clean review summary"
+        )
+
+
+def require_reservation_source_review(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    generation_id: Any,
+    prepare_receipt_sha256: Any,
+    source_commit: Any,
+) -> None:
+    """Refuse to reserve a prepared generation its source review has not accepted.
+
+    A prepared generation that a ``source_review_input_registered`` row names may
+    be reserved only once that same review accepted these exact bytes.  Three
+    facts are required and all three are re-asserted here rather than inferred
+    from the ``judgment`` seal: ``_require_review_phase_prerequisites`` passes
+    when EITHER the historical source review OR a generic postpublication review
+    is complete, so a ``judgment`` seal for review R does not by itself prove
+    that R's source review said ACCEPT.
+
+    What this proves: the verdict row carries the literal accepted pair, its
+    structured receipt binds the dispatch prefix, the adjudicated rows, the
+    raw-input digest, an ACCEPT verdict and zero unresolved findings, and the
+    ``judgment`` prefix seal for that same review and inventory exists and
+    follows the verdict.  It does NOT re-derive the finding resolution; the
+    receipt must carry the resolution fields, and their values are bound by the
+    judgment seal, which ``_validate_registrations`` re-checks on every append
+    and every full validation.
+
+    The join is on the prepared generation AND the prepare-receipt digest, never
+    on ``review_boundary``: that field carries no value constraint on this row
+    type, so a boundary filter could be dodged by typing a different string.
+    Matching one join field and not the other is a refusal, not a miss.
+    """
+    # The archived v1 grammar is skipped by its exact literal, never by "not
+    # v2".  Written the other way round, an unrecognised schema string would
+    # land in the permissive branch, which is the fail-open shape this gate
+    # exists to close.  Legacy manifests cannot be appended or sealed, so this
+    # only keeps archived evidence readable.
+    if records and records[0].get("manifest_schema") == LEGACY_MANIFEST_SCHEMA:
+        return
+    for registration in records:
+        if registration.get("record_type") != "source_review_input_registered":
+            continue
+        generation_matches = registration.get("prepared_generation_id") == generation_id
+        receipt_matches = (
+            registration.get("prepare_receipt_sha256") == prepare_receipt_sha256
+        )
+        if not generation_matches and not receipt_matches:
+            continue  # a review of some other prepared candidate
+        # prepared_generation_id is not type-checked anywhere, so a non-string
+        # value would fail its equality test in silence.  A half match is a
+        # refusal so that one review's judgment can never authorize another.
+        if not (generation_matches and receipt_matches):
+            raise PublicationError(
+                "publication reservation partially matches a registered source review; "
+                "prepared generation and prepare receipt must both match"
+            )
+        # The parser already refuses a manifest that mixes finalization IDs, so
+        # this restates the required join rather than catching a live case.
+        if registration.get("finalization_id") != records[0].get("finalization_id"):
+            raise PublicationError(
+                "publication reservation and its registered source review have "
+                "different finalization IDs"
+            )
+        heads = registration.get("repository_heads")
+        installed = heads.get("installed_source") if isinstance(heads, dict) else None
+        head_sha = installed.get("head_sha") if isinstance(installed, dict) else None
+        if not isinstance(source_commit, str) or head_sha != source_commit:
+            raise PublicationError(
+                "publication reservation source head differs from the reviewed "
+                "installed_source head"
+            )
+        review_id = registration.get("review_id")
+        raw_digest = registration.get("raw_input_inventory_sha256")
+        verdict: Optional[Mapping[str, Any]] = None
+        verdict_index = -1
+        for index, item in enumerate(records):
+            if (
+                item.get("record_type") == "source_review_judge_verdict_received"
+                and item.get("review_id") == review_id
+                and item.get("panel_id") == registration.get("panel_id")
+                and item.get("raw_input_inventory_sha256") == raw_digest
+            ):
+                verdict, verdict_index = item, index
+                break
+        if verdict is None:
+            raise PublicationError(
+                "publication reservation requires an accepted source-review judgment "
+                "for this prepared generation"
+            )
+        # Literal modern values only.  The obsolete JUDGED / REVIEWED aliases
+        # never authorize a release, whatever else still reads them.
+        if (
+            verdict.get("state") != SOURCE_REVIEW_ACCEPTED_STATE
+            or verdict.get("source_guidance_status") != SOURCE_REVIEW_ACCEPTED_STATUS
+        ):
+            raise PublicationError(
+                "publication reservation source-review status row is not the literal "
+                "accepted pair"
+            )
+        judge = verdict.get("judge")
+        if not isinstance(judge, dict) or judge.get("verdict") != "ACCEPT":
+            raise PublicationError(
+                "publication reservation source-review judge did not ACCEPT"
+            )
+        # The judge's declared role is required, so the receipt is checked
+        # against a named judge instead of against whatever role it names
+        # itself.  The judgment seal already requires this on the generic-v2
+        # source path; a bare parse does not run that check.
+        if not isinstance(judge.get("role"), str) or not IDENTITY_RE.fullmatch(
+            judge["role"]
+        ):
+            raise PublicationError(
+                "publication reservation source-review judge role is malformed"
+            )
+        seal_index = -1
+        for index, item in enumerate(records):
+            if (
+                item.get("record_type") == "manifest_prefix_registered"
+                and item.get("review_id") == review_id
+                and item.get("phase") == "judgment"
+                and item.get("raw_input_inventory_sha256") == raw_digest
+            ):
+                seal_index = index
+                break
+        if seal_index < 0:
+            raise PublicationError(
+                "publication reservation requires the registered source-review "
+                "judgment prefix seal"
+            )
+        if seal_index < verdict_index:
+            raise PublicationError(
+                "publication reservation judgment prefix seal precedes its accepted verdict"
+            )
+        # Last, and the only step that opens a file: everything above reads
+        # manifest rows, so a missing acceptance is refused before any I/O.
+        _verify_judge_receipt(
+            judge,
+            records=records,
+            review_id=str(review_id),
+            raw_input_inventory_sha256=str(raw_digest),
+            expected_role=judge["role"],
+            expected_verdict="ACCEPT",
+            verdict_record=verdict,
+            label="publication reservation source-review judge verdict",
+            expected_fields=SOURCE_JUDGE_RECEIPT_FIELDS,
         )
 
 
@@ -1817,6 +2543,17 @@ def _validate_record_lifecycle(
             raise PublicationError(
                 "publication reservation requires a matching registered prepare receipt"
             )
+        # The nested prepare receipt was already bound to real bytes by
+        # _verify_registered_json, so source.commit is what the receipt file
+        # declares rather than a caller-supplied claim.
+        nested = record.get("prepare_receipt")
+        source = nested.get("source") if isinstance(nested, dict) else None
+        require_reservation_source_review(
+            records,
+            generation_id=record.get("generation_id"),
+            prepare_receipt_sha256=record.get("prepare_receipt_sha256"),
+            source_commit=source.get("commit") if isinstance(source, dict) else None,
+        )
     elif record_type == "installed_publication_terminal":
         reservation = _matching_record(
             records,
@@ -2402,6 +3139,12 @@ def _require_ancestor(path: Path, data: bytes, required: Mapping[str, Any]) -> N
 
 
 def _write_once_or_verify(path: Path, data: bytes, *, label: str) -> None:
+    # Deliberately NOT reused by publish_review_artifact.  This helper returns
+    # success when the target already exists with identical bytes, which is
+    # right for a replayed seal and wrong for a review artifact: it would let a
+    # hand-written file be handed a genuine-looking create-once receipt
+    # carrying that file's own device and inode.  The publisher refuses an
+    # existing target instead.
     path = _safe_absolute(path, label=label)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -2422,6 +3165,155 @@ def _write_once_or_verify(path: Path, data: bytes, *, label: str) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def publish_review_artifact(
+    review_root: Path,
+    *,
+    relative_output: str,
+    expected_sha256: str,
+    expected_byte_count: int,
+    data: bytes,
+    receipt_output: Path,
+) -> Dict[str, Any]:
+    """Publish one review artifact create-once and mint its durable receipt.
+
+    The artifact is staged under a random name, then published by ``os.link``
+    through a held directory descriptor.  ``link`` is atomic and fails with
+    ``FileExistsError`` when the public name already exists, which is what
+    implements the recorded ``atomic-rename-no-replace-v1`` method here; it is
+    used in preference to Darwin's ``renameatx_np`` so the same code path runs
+    on Linux.  An existing public name is REFUSED, never verified and accepted.
+    """
+    review_root = _safe_absolute(review_root, label="review root", must_exist=True)
+    if not stat.S_ISDIR(os.lstat(review_root).st_mode):
+        raise PublicationError("review root must be a directory")
+    _validate_review_artifact_relative_path(relative_output, "published artifact path")
+    directory_name, public_name = relative_output.split("/")
+    _require_sha256(expected_sha256, "published artifact SHA-256")
+    if (
+        type(expected_byte_count) is not int
+        or expected_byte_count <= 0
+        or expected_byte_count > MAX_REVIEW_ARTIFACT_BYTES
+    ):
+        raise PublicationError("published artifact byte count is out of range")
+    if len(data) != expected_byte_count:
+        raise PublicationError("published artifact byte count does not match its bytes")
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise PublicationError("published artifact digest does not match its bytes")
+    artifact_path = review_root / directory_name / public_name
+    receipt_output = _safe_absolute(receipt_output, label="publication receipt output")
+    if receipt_output == artifact_path:
+        raise PublicationError("publication receipt and artifact paths must be distinct")
+    if review_root not in receipt_output.parents:
+        raise PublicationError("publication receipt must be written under the review root")
+    # Fail before anything is published, so a receipt-path collision does not
+    # leave an artifact behind that can never be given a receipt.  The O_EXCL
+    # open below is still the guarantee; this is only the early answer.
+    if os.path.lexists(receipt_output):
+        raise PublicationError("publication receipt path already exists")
+
+    directory = os.open(
+        review_root / directory_name,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        stage_name = f".stage-{os.urandom(16).hex()}"
+        descriptor = os.open(
+            stage_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+            dir_fd=directory,
+        )
+        try:
+            try:
+                _write_all(descriptor, data)
+                os.fsync(descriptor)
+                staged_identity = os.fstat(descriptor)
+                if (
+                    staged_identity.st_nlink != 1
+                    or staged_identity.st_size != expected_byte_count
+                ):
+                    raise PublicationError(
+                        "staged review artifact changed while it was written"
+                    )
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(
+                    stage_name,
+                    public_name,
+                    src_dir_fd=directory,
+                    dst_dir_fd=directory,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise PublicationError(
+                    "review artifact is already published; create-once publication "
+                    "never repairs or overwrites a public name"
+                ) from exc
+        finally:
+            try:
+                os.unlink(stage_name, dir_fd=directory)
+            except FileNotFoundError:  # pragma: no cover - defensive
+                pass
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+    published, identity = _read_regular_bytes_with_identity(
+        artifact_path, label="published review artifact"
+    )
+    if (
+        published != data
+        or identity.st_nlink != 1
+        or identity.st_size != expected_byte_count
+        or hashlib.sha256(published).hexdigest() != expected_sha256
+    ):
+        raise PublicationError("published review artifact does not match its declared bytes")
+    receipt = {
+        "receipt_schema": REVIEW_ARTIFACT_PUBLICATION_SCHEMA,
+        "receipt_state": REVIEW_ARTIFACT_PUBLICATION_STATE,
+        "publication_method": REVIEW_ARTIFACT_PUBLICATION_METHOD,
+        "artifact_path": str(artifact_path),
+        "artifact_relative_path": relative_output,
+        "artifact_sha256": expected_sha256,
+        "artifact_byte_count": expected_byte_count,
+        "artifact_device": identity.st_dev,
+        "artifact_inode": identity.st_ino,
+        "artifact_required_nlink": 1,
+    }
+    _validate_publication_registration(
+        {**receipt, "path": str(receipt_output), "sha256": "0" * 64},
+        "minted publication receipt",
+    )
+    receipt_bytes = (
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    try:
+        receipt_descriptor = os.open(
+            receipt_output,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+        )
+    except FileExistsError as exc:
+        raise PublicationError(
+            "publication receipt path already exists; the artifact is published "
+            "and this review identity must be abandoned"
+        ) from exc
+    try:
+        _write_all(receipt_descriptor, receipt_bytes)
+        os.fsync(receipt_descriptor)
+        if os.fstat(receipt_descriptor).st_nlink != 1:
+            raise PublicationError("publication receipt gained a hard link while writing")
+    finally:
+        os.close(receipt_descriptor)
+    receipt_directory = os.open(receipt_output.parent, os.O_RDONLY)
+    try:
+        os.fsync(receipt_directory)
+    finally:
+        os.close(receipt_directory)
+    return receipt
 
 
 def seal_manifest_prefix(
@@ -2594,6 +3486,20 @@ def _parser() -> argparse.ArgumentParser:
     seal.add_argument("--receipt-output", required=True, type=Path)
     validate = subparsers.add_parser("validate", help="validate the complete manifest")
     validate.add_argument("--manifest", required=True, type=Path)
+    publish = subparsers.add_parser(
+        "publish-review-artifact",
+        help="publish one review artifact create-once and mint its receipt",
+    )
+    publish.add_argument("--review-root", required=True, type=Path)
+    publish.add_argument("--relative-output", required=True)
+    publish.add_argument("--expected-sha256", required=True)
+    publish.add_argument("--expected-byte-count", required=True, type=int)
+    publish.add_argument("--receipt-output", required=True, type=Path)
+    identity = subparsers.add_parser(
+        "judgment-input-identity",
+        help="print the canonical identity a judge must attest before append",
+    )
+    identity.add_argument("--manifest", required=True, type=Path)
     return parser
 
 
@@ -2626,6 +3532,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         elif args.command == "validate":
             result = validate_manifest(args.manifest)
+        elif args.command == "publish-review-artifact":
+            receipt = publish_review_artifact(
+                args.review_root,
+                relative_output=args.relative_output,
+                expected_sha256=args.expected_sha256,
+                expected_byte_count=args.expected_byte_count,
+                data=sys.stdin.buffer.read(),
+                receipt_output=args.receipt_output,
+            )
+            # Printed verbatim, so the captured copy and the stored copy are
+            # the same bytes.
+            sys.stdout.write(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            return 0
+        elif args.command == "judgment-input-identity":
+            data = _read_regular_bytes(
+                Path(args.manifest), label="finalization manifest"
+            )
+            records = parse_finalization_jsonl(data, Path(args.manifest))
+            _validate_registrations(Path(args.manifest), data, records)
+            result = judgment_input_identity(records)
         else:
             raise PublicationError(f"unknown finalization command: {args.command}")
     except (PublicationError, OSError) as exc:
