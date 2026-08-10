@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -24,6 +25,20 @@ import validate_panel_inputs as panel_inputs  # noqa: E402
 
 
 class FinalizationManifestTests(unittest.TestCase):
+    @staticmethod
+    def duplicate_json_key_bytes(
+        value: dict[str, object], key: str, first_value: object
+    ) -> bytes:
+        """Encode one object with a conflicting first value for ``key``."""
+        if key not in value:
+            raise AssertionError(f"fixture lacks duplicate target key {key!r}")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        token = f"{json.dumps(key)}:"
+        replacement = (
+            f"{token}{json.dumps(first_value, separators=(',', ':'))},{token}"
+        )
+        return (encoded.replace(token, replacement, 1) + "\n").encode("utf-8")
+
     def make_manifest(self, root: Path, name: str = "manifest.jsonl") -> Path:
         path = root / name
         manifest.initialize_manifest(
@@ -827,6 +842,123 @@ class FinalizationManifestTests(unittest.TestCase):
             identity = manifest.validate_manifest(path)
             self.assertEqual(2, identity["record_count"])
             self.assertEqual("controller-test", identity["writer_controller_id"])
+
+    def test_duplicate_manifest_row_and_controller_payload_fail_before_mutation(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-duplicate-boundaries-") as raw:
+            root = Path(raw).resolve()
+
+            manifest_path = self.make_manifest(root, "duplicate-row.jsonl")
+            duplicate_row = manifest_path.read_bytes().replace(
+                b'"writer_controller_id":"controller-test"',
+                b'"writer_controller_id":"untrusted-writer",'
+                b'"writer_controller_id":"controller-test"',
+                1,
+            )
+            manifest_path.write_bytes(duplicate_row)
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "finalization manifest row 1 contains duplicate JSON key "
+                "'writer_controller_id'",
+            ):
+                manifest.validate_manifest(manifest_path)
+
+            controller_path = self.make_manifest(root, "controller.jsonl")
+            controller_before = controller_path.read_bytes()
+            payload = {
+                "review_id": "review-test",
+                "artifact_kind": "artifact-duplicate-controller",
+                "path": str(root / "artifact-duplicate-controller.txt"),
+                "sha256": hashlib.sha256(b"controller").hexdigest(),
+                "state": "REGISTERED",
+                "next_action": "continue",
+            }
+            payload_path = root / "controller-payload.json"
+            payload_path.write_bytes(
+                self.duplicate_json_key_bytes(payload, "review_id", "untrusted-review")
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "finalization_manifest.py"),
+                    "append",
+                    "--manifest",
+                    str(controller_path),
+                    "--writer-controller-id",
+                    "controller-test",
+                    "--record-type",
+                    "artifact_registered",
+                    "--payload-file",
+                    str(payload_path),
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(2, result.returncode, (result.stdout, result.stderr))
+            self.assertIn(
+                "controller payload file contains duplicate JSON key 'review_id'",
+                result.stderr,
+            )
+            self.assertEqual(controller_before, controller_path.read_bytes())
+
+    def test_duplicate_prefix_receipt_fails_validation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-duplicate-prefix-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_manifest(root)
+            raw_digest = self.append_raw_input(path)
+            self.seal(path, "dispatch", raw_digest)
+            records = self.records(path)
+            registration = records[-1]
+            receipt_path = Path(str(registration["receipt_path"]))
+            receipt = json.loads(receipt_path.read_bytes())
+            receipt_path.write_bytes(
+                self.duplicate_json_key_bytes(
+                    receipt, "phase", "untrusted-dispatch-phase"
+                )
+            )
+            registration["receipt_sha256"] = hashlib.sha256(
+                receipt_path.read_bytes()
+            ).hexdigest()
+            self.write_records(path, records)
+            manifest_before = path.read_bytes()
+            receipt_before = receipt_path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "manifest-prefix receipt contains duplicate JSON key 'phase'",
+            ):
+                manifest.validate_manifest(path)
+            self.assertEqual(manifest_before, path.read_bytes())
+            self.assertEqual(receipt_before, receipt_path.read_bytes())
+
+    def test_finalization_module_has_one_guarded_json_load(self) -> None:
+        source_path = SCRIPT_DIR / "finalization_manifest.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        helper = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_decode_json_without_duplicate_keys"
+        )
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "json"
+            and node.func.attr == "loads"
+        ]
+        self.assertEqual(1, len(calls), [(call.lineno, call.col_offset) for call in calls])
+        call = calls[0]
+        self.assertLessEqual(helper.lineno, call.lineno)
+        self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
+        self.assertEqual(
+            ["object_pairs_hook"],
+            [keyword.arg for keyword in call.keywords],
+        )
 
     def test_new_manifest_is_generic_and_rejects_project_specific_head_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-generic-") as raw:
@@ -1752,6 +1884,32 @@ class FinalizationManifestTests(unittest.TestCase):
             path.write_bytes(valid_review_bytes)
 
             records = self.records(path)
+            judge = next(
+                record
+                for record in records
+                if record["record_type"] == "judge_verdict_registered"
+            )
+            judge_path = Path(str(judge["path"]))
+            accepted_judge = json.loads(judge_path.read_bytes())
+            duplicate_judge_bytes = self.duplicate_json_key_bytes(
+                accepted_judge, "verdict", "REQUEST_CHANGES"
+            )
+            judge_path.write_bytes(duplicate_judge_bytes)
+            judge["sha256"] = hashlib.sha256(duplicate_judge_bytes).hexdigest()
+            self.write_records(path, records)
+            duplicate_judge_before = path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "judge verdict 0 contains duplicate JSON key 'verdict'",
+            ):
+                self.seal(path, "judgment")
+            self.assertEqual(duplicate_judge_before, path.read_bytes())
+            self.assertFalse((root / "manifest-prefix.judgment.jsonl").exists())
+            self.assertFalse((root / "manifest-prefix.judgment.json").exists())
+            judge_path.write_bytes(accepted_judge_bytes)
+            path.write_bytes(valid_review_bytes)
+
+            records = self.records(path)
             report = next(
                 record
                 for record in records
@@ -2053,6 +2211,28 @@ class FinalizationManifestTests(unittest.TestCase):
                 payload=source_rows[0][1],
             )
             original_manifest = path.read_bytes()
+            original_seal = raw_seal.read_bytes()
+            duplicate_seal = self.duplicate_json_key_bytes(
+                seal_value, "live_publication_status", "PUBLISHED"
+            )
+            raw_seal.write_bytes(duplicate_seal)
+            duplicate_seal_records = self.records(path)
+            duplicate_seal_records[1]["raw_input_seal_sha256"] = hashlib.sha256(
+                duplicate_seal
+            ).hexdigest()
+            self.write_records(path, duplicate_seal_records)
+            duplicate_seal_manifest = path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "source-review raw-input seal contains duplicate JSON key "
+                "'live_publication_status'",
+            ):
+                self.seal(path, "dispatch", raw_digest)
+            self.assertEqual(duplicate_seal_manifest, path.read_bytes())
+            self.assertFalse((root / "manifest-prefix.dispatch.jsonl").exists())
+            self.assertFalse((root / "manifest-prefix.dispatch.json").exists())
+            raw_seal.write_bytes(original_seal)
+            path.write_bytes(original_manifest)
             panel_validator.return_value = ["full panel validation failed"]
             with self.assertRaisesRegex(
                 manifest.PublicationError, "full panel validation failed"
@@ -2164,6 +2344,36 @@ class FinalizationManifestTests(unittest.TestCase):
                 payload=source_rows[3][1],
             )
             valid_before_count_mutation = path.read_bytes()
+            accepted_source_judge_bytes = judge_path.read_bytes()
+            accepted_source_judge = json.loads(accepted_source_judge_bytes)
+            duplicate_source_judge_bytes = self.duplicate_json_key_bytes(
+                accepted_source_judge, "verdict", "REQUEST_CHANGES"
+            )
+            judge_path.write_bytes(duplicate_source_judge_bytes)
+            duplicate_source_judge_records = self.records(path)
+            duplicate_source_verdict = next(
+                record
+                for record in duplicate_source_judge_records
+                if record["record_type"] == "source_review_judge_verdict_received"
+            )
+            duplicate_source_verdict["judge"]["sha256"] = hashlib.sha256(
+                duplicate_source_judge_bytes
+            ).hexdigest()
+            duplicate_source_verdict["judge"]["bytes"] = len(
+                duplicate_source_judge_bytes
+            )
+            self.write_records(path, duplicate_source_judge_records)
+            duplicate_source_judge_manifest = path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "source-review judge verdict contains duplicate JSON key 'verdict'",
+            ):
+                self.seal(path, "judgment", raw_digest)
+            self.assertEqual(duplicate_source_judge_manifest, path.read_bytes())
+            self.assertFalse((root / "manifest-prefix.judgment.jsonl").exists())
+            self.assertFalse((root / "manifest-prefix.judgment.json").exists())
+            judge_path.write_bytes(accepted_source_judge_bytes)
+            path.write_bytes(valid_before_count_mutation)
             artifact_count_mutation = self.records(path)
             historical_report = next(
                 record
@@ -2354,6 +2564,37 @@ class FinalizationManifestTests(unittest.TestCase):
                     "next_action": "reserve",
                 },
             )
+            registered_prepare_manifest = path.read_bytes()
+            registered_prepare_bytes = prepare_path.read_bytes()
+            duplicate_prepare_bytes = self.duplicate_json_key_bytes(
+                prepare_receipt, "mutation_outcome", "LIVE_PUBLISHED"
+            )
+            prepare_path.write_bytes(duplicate_prepare_bytes)
+            duplicate_prepare_digest = hashlib.sha256(duplicate_prepare_bytes).hexdigest()
+            duplicate_prepare_records = self.records(path)
+            duplicate_prepare_registration = next(
+                record
+                for record in duplicate_prepare_records
+                if record["record_type"] == "prepare_receipt_registered"
+            )
+            duplicate_prepare_registration["receipt_sha256"] = duplicate_prepare_digest
+            self.write_records(path, duplicate_prepare_records)
+            duplicate_reservation = copy.deepcopy(reservation_payload)
+            duplicate_reservation["prepare_receipt_sha256"] = duplicate_prepare_digest
+            duplicate_prepare_manifest = path.read_bytes()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "publication reservation prepare receipt contains duplicate JSON key "
+                "'mutation_outcome'",
+            ):
+                manifest.append_finalization_record(
+                    path,
+                    record_type="installed_publication_reservation_intent",
+                    payload=duplicate_reservation,
+                )
+            self.assertEqual(duplicate_prepare_manifest, path.read_bytes())
+            prepare_path.write_bytes(registered_prepare_bytes)
+            path.write_bytes(registered_prepare_manifest)
             invalid_reservation = copy.deepcopy(reservation_payload)
             invalid_reservation["prepare_receipt"] = {}
             before_invalid_reservation = path.read_bytes()

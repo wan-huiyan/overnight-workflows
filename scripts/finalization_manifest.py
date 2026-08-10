@@ -867,10 +867,7 @@ def _verify_registered_json(
 ) -> Mapping[str, Any]:
     """Bind a nested publisher receipt to one exact durable JSON object."""
     data = _verify_registered_file(path, digest, label)
-    try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError(f"{label} is invalid JSON") from exc
+    value = _decode_json_without_duplicate_keys(data, label)
     if (
         not isinstance(value, dict)
         or set(value) != fields
@@ -1279,10 +1276,7 @@ def _verify_judge_receipt(
     label: str,
 ) -> Mapping[str, Any]:
     data = _verify_artifact_record(record, label)
-    try:
-        receipt = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError(f"{label} must be a structured JSON receipt") from exc
+    receipt = _decode_json_without_duplicate_keys(data, label)
     dispatch = _matching_record(
         records,
         "manifest_prefix_registered",
@@ -1371,10 +1365,9 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
         or b"\r" in panel_data
     ):
         raise PublicationError("source-review panel input must be exactly one JSONL row")
-    try:
-        panel_record = json.loads(panel_data[:-1].decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError("source-review panel input is invalid JSON") from exc
+    panel_record = _decode_json_without_duplicate_keys(
+        panel_data[:-1], "source-review panel input"
+    )
     # The archived mutation receipt is provenance, not an authority token.
     # Older receipt schemas do not bind the panel bytes, validator bytes, or
     # launcher, so reproduce the complete canonical validation here.
@@ -1412,20 +1405,16 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
     seal_data = _read_regular_bytes(seal_path, label="source-review raw-input seal")
     if hashlib.sha256(seal_data).hexdigest() != record["raw_input_seal_sha256"]:
         raise PublicationError("source-review raw-input seal digest drifted")
-    try:
-        seal = json.loads(seal_data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError("source-review raw-input seal is invalid JSON") from exc
+    seal = _decode_json_without_duplicate_keys(
+        seal_data, "source-review raw-input seal"
+    )
     validation_path = seal_path.parent / "panel-input-validation-canonical.json"
     validation_data = _read_regular_bytes(
         validation_path, label="source-review panel validation receipt"
     )
-    try:
-        validation = json.loads(validation_data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError(
-            "source-review panel validation receipt is invalid JSON"
-        ) from exc
+    validation = _decode_json_without_duplicate_keys(
+        validation_data, "source-review panel validation receipt"
+    )
     validation_outcomes = (
         validation.get("named_mutation_outcomes")
         if isinstance(validation, dict)
@@ -1931,12 +1920,9 @@ def parse_finalization_jsonl(data: bytes, path: Path) -> List[Dict[str, Any]]:
     for row, raw_line in enumerate(data[:-1].split(b"\n"), 1):
         if not raw_line:
             raise PublicationError(f"finalization manifest has an empty row at {row}")
-        try:
-            value = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise PublicationError(
-                f"finalization manifest row {row} is invalid JSON: {exc}"
-            ) from exc
+        value = _decode_json_without_duplicate_keys(
+            raw_line, f"finalization manifest row {row}"
+        )
         if not isinstance(value, dict):
             raise PublicationError(f"finalization manifest row {row} is not an object")
         for field in ENVELOPE_FIELDS:
@@ -2125,10 +2111,9 @@ def _validate_registrations(
         receipt_data = _read_regular_bytes(receipt_path, label="manifest-prefix receipt")
         if hashlib.sha256(receipt_data).hexdigest() != record["receipt_sha256"]:
             raise PublicationError("manifest-prefix receipt digest drifted")
-        try:
-            receipt = json.loads(receipt_data.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise PublicationError("manifest-prefix receipt is invalid JSON") from exc
+        receipt = _decode_json_without_duplicate_keys(
+            receipt_data, "manifest-prefix receipt"
+        )
         if receipt != _receipt_value(record):
             raise PublicationError("manifest-prefix receipt does not match registration")
 
@@ -2580,10 +2565,7 @@ def latest_phase_registration(
 
 def _payload_file(path: Path) -> Dict[str, Any]:
     data = _read_regular_bytes(path, label="controller payload file")
-    try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise PublicationError("controller payload file is invalid JSON") from exc
+    value = _decode_json_without_duplicate_keys(data, "controller payload file")
     if not isinstance(value, dict):
         raise PublicationError("controller payload file must contain one object")
     return value
