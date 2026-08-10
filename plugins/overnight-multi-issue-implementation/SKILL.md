@@ -16,7 +16,7 @@ description: |
   work (use plain `subagent-driven-development`), polishing an existing deliverable (use
   `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.4.0
+version: 1.5.0
 date: 2026-05-29
 ---
 
@@ -162,6 +162,25 @@ digraph overnight {
 
 Per task: **implementer subagent → spec-compliance reviewer → code-quality
 reviewer → mark complete**. Standard `subagent-driven-development` protocol.
+
+**Parallel implementers — keep git in the controller.** When you fan implementers
+out across file-disjoint PRs *concurrently* (the plan-driven variant), have each
+agent **edit + run tests only, in its own isolated worktree — no git commands**;
+the controller does all add/commit/push/PR/merge. Subagents are error-prone at git
+mechanics (wrong-worktree `cd`, stranded branch refs, "reports complete but PR
+unmerged" — see `subagent-bash-cd-wrong-worktree`,
+`subagent-driven-branch-ref-froze-stranded-commits`,
+`subagent-reports-complete-but-pr-unmerged`). Edit-only agents + controller-owned
+git keeps the parallelism while sidestepping all of those traps; the agent's
+deliverable is its edited worktree + a structured report (files changed, tests run,
+baseline-diff), which the controller stages into per-issue commits.
+
+**Isolation comes from the dispatch parameter, not from the prompt.** Telling an
+agent "you are in your own worktree" in prose does nothing — set `isolation:
+"worktree"` on the call. Have every agent's first bash call be
+`git rev-parse --show-toplevel` and `git branch --show-current`, echoed in its
+report, so two agents naming one directory is visible in seconds rather than after
+a commit lands on the wrong branch.
 
 For overnight throughput, calibrate review intensity **per-task** using the 3-tier rubric below (this generalizes the previous "two pragmatic deviations" version into a formal framework — see companion plugin `subagent-review-tier-calibration-for-overnight-pr-chains` for the standalone skill). Whichever tier a task lands in, the reviewer's findings must reach the actor intact — the rule immediately below holds at every tier.
 
@@ -778,6 +797,9 @@ By morning the user should have:
 - `superpowers:subagent-driven-development` — the per-task protocol this
   skill builds on (implementer + spec-reviewer + code-quality-reviewer
   per task).
+- `subagent-bash-cd-wrong-worktree` / `subagent-driven-branch-ref-froze-stranded-commits`
+  / `subagent-reports-complete-but-pr-unmerged` / `pre-dispatch-agent-isolation-parameter-not-prompt`
+  — why parallel implementers should be edit-only with controller-owned git.
 - [`interactive-feedback-report`](https://github.com/wan-huiyan/interactive-feedback-report)
   — single-file HTML review page for collecting the owner's per-item Phase-0
   rulings as one structured paste-back prompt (no backend, localStorage
