@@ -1,7 +1,7 @@
 {
   "name": "overnight-review-panel-blocked-reviewer-reads-as-clean",
   "description": "Companion safety pattern for any overnight review panel: in an UNATTENDED run, a reviewer that couldn't see the code reads as a CLEAN one — so a real bug ships by morning. The usual cause is a tool gap: code-review subagents (feature-dev:code-reviewer, voltagent-*, Explore) are frequently provisioned WITHOUT a Bash tool, so when prompted to `gh pr diff`/checkout a PR they return a BLOCKED report (no review) — or silently review the current checkout (often main, which predates the PR). Fix is orchestrator-side: pre-generate per-base diffs to files, materialize PR branches as worktrees, hand each reviewer explicit paths, and in the morning synthesis treat BLOCKED as not-clean (re-dispatch before counting the vote). Overnight specialization of the general skill code-reviewer-subagent-no-bash-blocked-on-pr-diff (the bare tool-gap mechanism, any context). Companion to overnight-multi-issue-implementation (its Phase C review panel) and subagent-review-tier-calibration-for-overnight-pr-chains; sibling to voltagent-reviewer-no-write-tool (Write gap vs. this Bash gap).",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": { "name": "wan-huiyan" },
   "repository": "https://github.com/wan-huiyan/overnight-workflows",
   "license": "MIT",

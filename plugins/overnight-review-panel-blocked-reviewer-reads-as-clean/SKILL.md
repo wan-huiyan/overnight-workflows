@@ -20,7 +20,7 @@ description: |
   `voltagent-reviewer-no-write-tool` (Write gap → inline output) and
   `stacked-pr-review-per-base-diff-and-attach`.
 author: Claude Code
-version: 1.0.0
+version: 1.1.0
 date: 2026-05-29
 ---
 
@@ -85,12 +85,34 @@ Do the git/`gh` work in the **orchestrator** (which has Bash) and hand each revi
    ```bash
    git worktree add /tmp/pr-<N> <pr-branch>
    ```
-2. **Pre-generate each PR's diff against its own base** to a file. For a stacked PR,
-   diff against its *own* base (not main) so the diff is scoped to that PR only:
+2. **Pre-generate each PR's diff against its own base** to a file, with **three dots**.
+   For a stacked PR, diff against its *own* base (not main) so the diff is scoped to
+   that PR only:
    ```bash
    mkdir -p /tmp/diffs
-   git diff <base-branch>..<pr-branch> -- app/ tests/ > /tmp/diffs/pr<N>.diff
+   # three dots = diff from the merge base = what GitHub's "Files changed" tab shows
+   git merge-base <base-branch> <pr-branch> >/dev/null \
+     || { echo "NO SHARED HISTORY — cannot diff; do not dispatch a reviewer"; exit 1; }
+   git diff <base-branch>...<pr-branch> -- app/ tests/ > /tmp/diffs/pr<N>.diff
+   test -s /tmp/diffs/pr<N>.diff \
+     || echo "EMPTY DIFF — investigate before dispatching a reviewer"
    ```
+   **Two dots would hand the reviewer invented deletions.** `git diff A..B` compares
+   tip to tip, so everything the base branch gained *after* the PR branched renders as
+   a deletion the PR appears to be making — and the reviewer dutifully reports phantom
+   findings against code the PR never touched. Three dots diffs from the merge base,
+   which is what GitHub's "Files changed" tab computes, and a pre-generated diff has
+   to match what the PR actually proposes. Verified 2026-08-10 on a real PR: GitHub
+   reported **5 files / 219 insertions / 16 deletions**, `git diff --stat
+   <base>...<head>` reproduced that exactly, and the two-dot form returned a different
+   file set with deletions that do not exist.
+
+   **Both guards exist because this skill's failure mode is silence.** Three dots need
+   a fork point: across **unrelated histories** `git diff A...B` exits **128 with empty
+   output**. The reviewer then receives a zero-byte diff file and reads it as "nothing
+   to review" — a blocked reviewer reporting clean, which is the exact bug this skill
+   is named for. An empty or unwritten diff file must never be handed to a reviewer
+   unexamined, so check both the fork point before and the file size after.
 3. **Prompt each reviewer with explicit paths + a no-Bash preamble**:
    > "You do NOT have a Bash/git/gh tool — only Read/Grep/Glob. The code is
    > materialized at `/tmp/pr-<N>/`; the scoped diff is at `/tmp/diffs/pr<N>.diff`.
@@ -111,6 +133,11 @@ BLOCKED report and not a review of unrelated `main` code. In a panel, all review
 produce symmetric, source-grounded output. The morning summary distinguishes
 "reviewed, clean" from "could not review."
 
+Before dispatch, every pre-generated diff file is **non-empty**, and its
+`git diff --stat <base>...<head>` file/insertion/deletion counts **match the PR's
+"Files changed" tab on GitHub**. A mismatch means the diff was cut against the wrong
+base or with the wrong range form — fix it before a reviewer reads it.
+
 ## Example
 
 Stacked-PR tail review (#62/#63/#64) in a GA/GTM audit project: the "Correctness
@@ -127,6 +154,13 @@ would have read as a clean reviewer and the P0 would have shipped.
 
 - **BLOCKED ≠ CLEAN** is the load-bearing rule. The cost of an unread reviewer
   masquerading as a passing one is exactly what the panel exists to prevent.
+- **Three dots here, two dots in the stale-base audit — different questions, both
+  right.** `overnight-multi-issue-implementation`'s pre-merge audit deliberately uses
+  `git diff origin/main..HEAD` because it asks *"what does my branch destroy relative
+  to `main` as it stands right now"*, where the merge base would hide precisely the
+  files `main` gained after you branched. This step asks the opposite question —
+  *"what does this PR propose?"* — and that answer is the merge-base diff, the one
+  GitHub renders. Pick the form from the question, not from habit.
 - Some reviewers are also missing `Write` — see `voltagent-reviewer-no-write-tool`
   (orchestrator persists their inline output to files). A reviewer can hit both gaps
   at once: no Bash to fetch the diff *and* no Write to save the report.

@@ -22,7 +22,7 @@
       "name": "overnight-review-panel-blocked-reviewer-reads-as-clean",
       "source": "./plugins/overnight-review-panel-blocked-reviewer-reads-as-clean",
       "description": "Companion safety pattern: in an unattended overnight review panel, a reviewer that couldn't see the code reads as a CLEAN one \u2014 usually because the code-review subagent lacks a Bash tool, so when told to `gh pr diff`/checkout a PR it returns a BLOCKED report (or reviews main, which predates the PR). Pre-generate per-base diffs + materialize worktrees + hand explicit paths, and treat BLOCKED as not-clean. Overnight specialization of the general skill code-reviewer-subagent-no-bash-blocked-on-pr-diff.",
-      "version": "1.0.1"
+      "version": "1.1.0"
     },
     {
       "name": "overnight-multi-issue-implementation",
