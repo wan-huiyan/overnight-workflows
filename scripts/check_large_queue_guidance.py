@@ -6,7 +6,6 @@ from collections import Counter
 import copy
 from datetime import datetime, timezone
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -45,6 +45,90 @@ INSTALL_IDENTITY_FRAMING = "overnight-workflows-install-input-v1"
 INSTALL_INVENTORY_FORMAT = "sha256-size-path-v1"
 EXPECTED_CODEX_VERSION = "0.147.0"
 MULTI_ISSUE_PLUGIN = "overnight-multi-issue-implementation"
+_HELD_PYTHON_WITH_DEPENDENCIES_FD_LAUNCHER = r"""
+import hashlib
+import os
+import stat
+import sys
+import types
+
+def held_source(descriptor, expected_sha256):
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit("held source is not a regular file")
+    chunks = []
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        offset += len(chunk)
+    source = b"".join(chunks)
+    after = os.fstat(descriptor)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if identity(before) != identity(after) or len(source) != after.st_size:
+        raise SystemExit("held source changed while it was read")
+    if hashlib.sha256(source).hexdigest() != expected_sha256:
+        raise SystemExit("held source digest differs from authenticated bytes")
+    return source
+
+main_descriptor = int(sys.argv[1])
+main_sha256 = sys.argv[2]
+main_path = sys.argv[3]
+module_name = sys.argv[4]
+module_descriptor = int(sys.argv[5])
+module_sha256 = sys.argv[6]
+module_path = sys.argv[7]
+resource_name = sys.argv[8]
+resource_descriptor = int(sys.argv[9])
+resource_sha256 = sys.argv[10]
+resource_path = sys.argv[11]
+script_arguments = sys.argv[12:]
+module_source = held_source(module_descriptor, module_sha256)
+resource_source = held_source(resource_descriptor, resource_sha256)
+module = types.ModuleType(module_name)
+module.__file__ = module_path
+module.__package__ = None
+module.__cached__ = None
+module.__loader__ = None
+module.__spec__ = None
+sys.modules[module_name] = module
+exec(compile(module_source, module_path, "exec"), module.__dict__, module.__dict__)
+main_source = held_source(main_descriptor, main_sha256)
+sys.argv = [main_path, *script_arguments]
+namespace = {
+    "__name__": "__main__",
+    "__file__": main_path,
+    "__package__": None,
+    "__cached__": None,
+    "__loader__": None,
+    "__spec__": None,
+    "__builtins__": __builtins__,
+    "__authenticated_source_bytes__": main_source,
+    "__authenticated_module_sources__": {
+        module_name: {
+            "path": module_path,
+            "sha256": module_sha256,
+            "source": module_source,
+        }
+    },
+    "__authenticated_resource_sources__": {
+        resource_name: {
+            "path": resource_path,
+            "sha256": resource_sha256,
+            "source": resource_source,
+        }
+    },
+}
+exec(compile(main_source, main_path, "exec"), namespace, namespace)
+"""
 PANEL_VALIDATOR_RESOURCES = (
     "install_inventory.py",
     "panel_input_fixtures.json",
@@ -52,6 +136,26 @@ PANEL_VALIDATOR_RESOURCES = (
 )
 PANEL_VALIDATOR_INSTALLED_DIRECTORY = (
     "references/workflows/overnight-multi-issue-implementation/scripts"
+)
+AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS = frozenset(
+    {
+        "scripts/large_queue_state_contract.json",
+        "scripts/large_queue_state_fixtures.json",
+        "scripts/eval/overnight-workflow-routing-cases.json",
+    }
+)
+AUTHENTICATED_NESTED_VALIDATION_SOURCE_PATHS = frozenset(
+    {
+        "scripts/install_inventory.py",
+        "scripts/panel_input_fixtures.json",
+        "scripts/validate_panel_inputs.py",
+        "plugins/overnight-review-client-delivery/scripts/action_authority.py",
+        "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+    }
+)
+AUTHENTICATED_VALIDATION_SOURCE_PATHS = (
+    AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS
+    | AUTHENTICATED_NESTED_VALIDATION_SOURCE_PATHS
 )
 PANEL_SCHEMA3_ROUTE_MARKERS = (
     "New panel inputs must use generic schema 3",
@@ -448,10 +552,20 @@ def run_source_review_boundary_guidance_negative_control(
         errors.append("source-review boundary negative control did not fail")
 
 
-def read_json(path: Path, errors: list[str]) -> dict[str, Any]:
+def read_json(
+    path: Path,
+    errors: list[str],
+    *,
+    authenticated_bytes: Optional[bytes] = None,
+) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        text = (
+            path.read_text(encoding="utf-8")
+            if authenticated_bytes is None
+            else authenticated_bytes.decode("utf-8")
+        )
+        value = json.loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         errors.append(f"{path.relative_to(ROOT)}: cannot read JSON: {exc}")
         return {}
     if not isinstance(value, dict):
@@ -518,6 +632,83 @@ def expected_install_mappings() -> list[dict[str, str]]:
         if source.is_file() and not source.is_symlink():
             mapping["source_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
     return mappings
+
+
+def bind_authenticated_validation_sources(
+    mappings: list[dict[str, str]], errors: list[str]
+) -> Optional[dict[str, bytes]]:
+    """Bind held checker controls and nested inputs to caller-supplied identities."""
+    held_source_present = "__authenticated_source_bytes__" in globals()
+    authenticated_context_present = "__authenticated_source_sha256__" in globals()
+    authenticated = globals().get("__authenticated_source_sha256__")
+    if not held_source_present and not authenticated_context_present:
+        return {}
+    if (
+        not isinstance(globals().get("__authenticated_source_bytes__"), bytes)
+        or authenticated is None
+    ):
+        errors.append(
+            "held checker execution requires its authenticated nested validation "
+            "digest context"
+        )
+        return None
+    if not isinstance(authenticated, dict) or set(authenticated) != set(
+        AUTHENTICATED_VALIDATION_SOURCE_PATHS
+    ) or any(
+        not isinstance(path, str)
+        or not isinstance(digest, str)
+        or not SHA256.fullmatch(digest)
+        for path, digest in authenticated.items()
+    ):
+        errors.append(
+            "authenticated validation digest context must contain the exact eight "
+            "validation source paths with lowercase SHA-256 values"
+        )
+        return None
+    runtime = {
+        mapping["canonical_source"]: mapping.get("source_sha256")
+        for mapping in mappings
+        if mapping["canonical_source"]
+        in AUTHENTICATED_NESTED_VALIDATION_SOURCE_PATHS
+    }
+    expected_nested = {
+        path: authenticated[path]
+        for path in AUTHENTICATED_NESTED_VALIDATION_SOURCE_PATHS
+    }
+    if runtime != expected_nested:
+        errors.append(
+            "runtime nested validation bytes differ from the authenticated "
+            "immutable-source inventory"
+        )
+        return None
+    bound_controls: dict[str, bytes] = {}
+    for relative in sorted(AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS):
+        path = ROOT / relative
+        try:
+            descriptor, source, identity = _open_held_source(
+                path,
+                f"checker control {relative}",
+            )
+            try:
+                if hashlib.sha256(source).hexdigest() != authenticated[relative]:
+                    errors.append(
+                        "runtime checker control bytes differ from the authenticated "
+                        f"immutable-source inventory: {relative}"
+                    )
+                    return None
+                _verify_held_source(
+                    path,
+                    descriptor,
+                    identity,
+                    f"checker control {relative}",
+                )
+            finally:
+                os.close(descriptor)
+        except (OSError, RuntimeError) as exc:
+            errors.append(f"authenticated checker control could not be held: {exc}")
+            return None
+        bound_controls[relative] = source
+    return bound_controls
 
 
 def _frame(value: bytes) -> bytes:
@@ -788,7 +979,9 @@ def check_disk_markdown_dependencies(
 
 
 def check_installed_panel_validator(
-    installed_root: Path, errors: list[str]
+    installed_root: Path,
+    expected_resource_sha256: dict[str, str],
+    errors: list[str],
 ) -> None:
     """Run the bundled read-only validator without writing bytecode into the skill."""
     scripts_root = installed_root.joinpath(
@@ -812,22 +1005,23 @@ def check_installed_panel_validator(
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-B",
-                str(scripts_root / "validate_panel_inputs.py"),
-                "--self-test",
-            ],
+        completed = _run_authenticated_installed_validator(
+            scripts_root / "validate_panel_inputs.py",
+            scripts_root / "install_inventory.py",
+            scripts_root / "panel_input_fixtures.json",
+            expected_validator_sha256=expected_resource_sha256.get(
+                "validate_panel_inputs.py", ""
+            ),
+            expected_inventory_sha256=expected_resource_sha256.get(
+                "install_inventory.py", ""
+            ),
+            expected_fixture_sha256=expected_resource_sha256.get(
+                "panel_input_fixtures.json", ""
+            ),
             cwd=str(scripts_root),
             env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=45,
-            check=False,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         errors.append(f"installed panel validator self-test could not run: {exc}")
         return
     if completed.returncode != 0:
@@ -838,6 +1032,202 @@ def check_installed_panel_validator(
         )
     if list(installed_root.rglob("__pycache__")):
         errors.append("installed panel validator self-test wrote bytecode into the package")
+
+
+def _open_held_source(
+    path: Path, label: str
+) -> tuple[int, bytes, tuple[int, int, int, int, int]]:
+    observed = os.lstat(path)
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise RuntimeError(f"{label} is not a regular single-link file: {path}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (observed.st_dev, observed.st_ino, observed.st_size)
+            != (opened.st_dev, opened.st_ino, opened.st_size)
+        ):
+            raise RuntimeError(f"{label} changed before it was opened: {path}")
+        chunks: list[bytes] = []
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            offset += len(chunk)
+        source = b"".join(chunks)
+        after = os.fstat(descriptor)
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or len(source) != after.st_size:
+            raise RuntimeError(f"{label} changed while it was read: {path}")
+        return descriptor, source, identity
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _verify_held_source(
+    path: Path,
+    descriptor: int,
+    identity: tuple[int, int, int, int, int],
+    label: str,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"authenticated {label} path changed during execution") from exc
+    if not stat.S_ISREG(current.st_mode) or (
+        current.st_nlink != 1
+        or (current.st_dev, current.st_ino) != identity[:2]
+    ):
+        raise RuntimeError(f"authenticated {label} path changed during execution")
+    held = os.fstat(descriptor)
+    if (
+        held.st_dev,
+        held.st_ino,
+        held.st_size,
+        held.st_mtime_ns,
+        held.st_ctime_ns,
+    ) != identity:
+        raise RuntimeError(f"authenticated {label} bytes changed during execution")
+
+
+def _run_authenticated_installed_validator(
+    validator: Path,
+    inventory_module: Path,
+    fixtures: Path,
+    *,
+    expected_validator_sha256: str,
+    expected_inventory_sha256: str,
+    expected_fixture_sha256: str,
+    cwd: str,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    validator_descriptor, validator_source, validator_identity = (
+        _open_held_source(validator, "installed panel validator")
+    )
+    try:
+        validator_sha256 = hashlib.sha256(validator_source).hexdigest()
+        if (
+            not SHA256.fullmatch(expected_validator_sha256)
+            or validator_sha256 != expected_validator_sha256
+        ):
+            raise RuntimeError(
+                "installed panel validator differs from authenticated package mapping"
+            )
+        inventory_descriptor, inventory_source, inventory_identity = (
+            _open_held_source(
+                inventory_module, "installed panel validator inventory dependency"
+            )
+        )
+        try:
+            inventory_sha256 = hashlib.sha256(inventory_source).hexdigest()
+            if (
+                not SHA256.fullmatch(expected_inventory_sha256)
+                or inventory_sha256 != expected_inventory_sha256
+            ):
+                raise RuntimeError(
+                    "installed panel validator inventory dependency differs from "
+                    "authenticated package mapping"
+                )
+            fixture_descriptor, fixture_source, fixture_identity = _open_held_source(
+                fixtures, "installed panel validator fixture dependency"
+            )
+            try:
+                fixture_sha256 = hashlib.sha256(fixture_source).hexdigest()
+                if (
+                    not SHA256.fullmatch(expected_fixture_sha256)
+                    or fixture_sha256 != expected_fixture_sha256
+                ):
+                    raise RuntimeError(
+                        "installed panel validator fixture dependency differs from "
+                        "authenticated package mapping"
+                    )
+                validator_display_path = str(
+                    validator.parent.resolve() / validator.name
+                )
+                inventory_display_path = str(
+                    inventory_module.parent.resolve() / inventory_module.name
+                )
+                fixture_display_path = str(
+                    fixtures.parent.resolve() / fixtures.name
+                )
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        _HELD_PYTHON_WITH_DEPENDENCIES_FD_LAUNCHER,
+                        str(validator_descriptor),
+                        validator_sha256,
+                        validator_display_path,
+                        "install_inventory",
+                        str(inventory_descriptor),
+                        inventory_sha256,
+                        inventory_display_path,
+                        "panel_input_fixtures.json",
+                        str(fixture_descriptor),
+                        fixture_sha256,
+                        fixture_display_path,
+                        "--self-test",
+                    ],
+                    cwd=cwd,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=45,
+                    check=False,
+                    pass_fds=(
+                        validator_descriptor,
+                        inventory_descriptor,
+                        fixture_descriptor,
+                    ),
+                )
+                _verify_held_source(
+                    validator,
+                    validator_descriptor,
+                    validator_identity,
+                    "installed panel validator",
+                )
+                _verify_held_source(
+                    inventory_module,
+                    inventory_descriptor,
+                    inventory_identity,
+                    "installed panel validator inventory dependency",
+                )
+                _verify_held_source(
+                    fixtures,
+                    fixture_descriptor,
+                    fixture_identity,
+                    "installed panel validator fixture dependency",
+                )
+                return completed
+            finally:
+                os.close(fixture_descriptor)
+        finally:
+            os.close(inventory_descriptor)
+    finally:
+        os.close(validator_descriptor)
 
 
 def check_installed_inventory(
@@ -892,7 +1282,24 @@ def check_installed_inventory(
             errors.append("installed umbrella aggregate identity differs from canonical")
     check_disk_markdown_dependencies(installed_root, expected_paths, errors)
     if len(errors) == starting_error_count:
-        check_installed_panel_validator(installed_root, errors)
+        expected_resource_sha256 = {
+            PurePosixPath(mapping["installed_path"]).name: mapping["source_sha256"]
+            for mapping in mappings
+            if mapping["installed_path"].startswith(
+                PANEL_VALIDATOR_INSTALLED_DIRECTORY + "/"
+            )
+            and PurePosixPath(mapping["installed_path"]).name
+            in {
+                "validate_panel_inputs.py",
+                "install_inventory.py",
+                "panel_input_fixtures.json",
+            }
+        }
+        check_installed_panel_validator(
+            installed_root,
+            expected_resource_sha256,
+            errors,
+        )
 
 
 def value_type(value: Any) -> str:
@@ -2241,20 +2648,38 @@ def run_routing_negative_controls(
             )
 
 
-def _load_routed_helper(path: Path, label: str) -> Any:
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"{label} is not a regular routed helper: {path}")
+def _load_routed_helper(path: Path, label: str, expected_sha256: str) -> Any:
     module_name = "overnight_route_" + hashlib.sha256(str(path).encode()).hexdigest()[:16]
-    specification = importlib.util.spec_from_file_location(module_name, path)
-    if specification is None or specification.loader is None:
-        raise RuntimeError(f"{label} cannot be imported: {path}")
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
+    descriptor, source, identity = _open_held_source(path, label)
+    try:
+        if (
+            not SHA256.fullmatch(expected_sha256)
+            or hashlib.sha256(source).hexdigest() != expected_sha256
+        ):
+            raise RuntimeError(f"{label} differs from authenticated package mapping")
+        module = types.ModuleType(module_name)
+        module.__file__ = str(path)
+        module.__package__ = None
+        module.__cached__ = None
+        module.__loader__ = None
+        module.__spec__ = None
+        exec(compile(source, str(path), "exec"), module.__dict__, module.__dict__)
+        _verify_held_source(
+            path,
+            descriptor,
+            identity,
+            "routed helper",
+        )
+        return module
+    finally:
+        os.close(descriptor)
 
 
 def run_loaded_authority_controls(
-    installed_root: Path, cases: dict[str, Any], errors: list[str]
+    installed_root: Path,
+    mappings: list[dict[str, str]],
+    cases: dict[str, Any],
+    errors: list[str],
 ) -> None:
     """Execute both routed authority helpers with an action-call recorder."""
     positives = {
@@ -2267,13 +2692,25 @@ def run_loaded_authority_controls(
         schedule_route = positives["scheduled_poll"]["installed_workflow"]
         client_workflow = installed_root.joinpath(*PurePosixPath(client_route).parts)
         schedule_workflow = installed_root.joinpath(*PurePosixPath(schedule_route).parts)
+        installed_digests = {
+            mapping["installed_path"]: mapping["source_sha256"]
+            for mapping in mappings
+        }
+        client_helper = client_workflow.parent / "scripts/action_authority.py"
+        schedule_helper = schedule_workflow.parent / "scripts/poll_orchestrator.py"
         client = _load_routed_helper(
-            client_workflow.parent / "scripts/action_authority.py",
+            client_helper,
             "client-delivery authority helper",
+            installed_digests[
+                client_helper.relative_to(installed_root).as_posix()
+            ],
         )
         schedule = _load_routed_helper(
-            schedule_workflow.parent / "scripts/poll_orchestrator.py",
+            schedule_helper,
             "schedule-poll authority helper",
+            installed_digests[
+                schedule_helper.relative_to(installed_root).as_posix()
+            ],
         )
     except (KeyError, OSError, RuntimeError) as exc:
         errors.append(f"loaded authority route resolution failed: {exc}")
@@ -2705,7 +3142,7 @@ def run_materialized_authority_controls(
     with tempfile.TemporaryDirectory(prefix="authority-route-install-") as raw:
         installed_root = Path(raw).resolve() / "overnight-workflows"
         materialize_install(installed_root, mappings)
-        run_loaded_authority_controls(installed_root, cases, errors)
+        run_loaded_authority_controls(installed_root, mappings, cases, errors)
 
 
 def _loader_skills_for_root(codex_bin: Path, codex_home: Path, root: Path) -> list[dict[str, Any]]:
@@ -2885,7 +3322,10 @@ def run_real_loader_controls(
             if not loaded_route_errors:
                 loaded_authority_errors: list[str] = []
                 run_loaded_authority_controls(
-                    installed_root, routing_cases, loaded_authority_errors
+                    installed_root,
+                    mappings,
+                    routing_cases,
+                    loaded_authority_errors,
                 )
                 errors.extend(
                     f"real loader authority contract: {error}"
@@ -2925,6 +3365,15 @@ def run_install_negative_controls(
     with tempfile.TemporaryDirectory(prefix="overnight-install-contract-") as temp:
         installed_root = Path(temp) / "overnight-workflows"
         materialize_install(installed_root, mappings)
+        expected_resource_sha256 = {
+            PurePosixPath(mapping["installed_path"]).name: mapping["source_sha256"]
+            for mapping in mappings
+            if mapping["installed_path"].startswith(
+                PANEL_VALIDATOR_INSTALLED_DIRECTORY + "/"
+            )
+            and PurePosixPath(mapping["installed_path"]).name
+            in set(PANEL_VALIDATOR_RESOURCES)
+        }
         baseline: list[str] = []
         check_installed_inventory(installed_root, mappings, baseline)
         if baseline:
@@ -2955,10 +3404,19 @@ def run_install_negative_controls(
                     f"missing installed panel resource control did not fail: {resource_name}"
                 )
             runtime_missing_errors: list[str] = []
-            check_installed_panel_validator(installed_root, runtime_missing_errors)
-            if not runtime_missing_errors:
+            check_installed_panel_validator(
+                installed_root,
+                expected_resource_sha256,
+                runtime_missing_errors,
+            )
+            if not any(
+                "installed panel validator is missing required resources" in item
+                and resource_name in item
+                for item in runtime_missing_errors
+            ):
                 errors.append(
-                    f"missing panel validator dependency still executed: {resource_name}"
+                    "missing panel validator dependency did not produce its own "
+                    f"runtime error: {resource_name}"
                 )
             shutil.copy2(canonical, resource)
 
@@ -2976,10 +3434,30 @@ def run_install_negative_controls(
                     f"one-byte installed panel resource drift did not fail: {resource_name}"
                 )
             runtime_drift_errors: list[str] = []
-            check_installed_panel_validator(installed_root, runtime_drift_errors)
-            if not runtime_drift_errors:
+            check_installed_panel_validator(
+                installed_root,
+                expected_resource_sha256,
+                runtime_drift_errors,
+            )
+            runtime_drift_marker = {
+                "validate_panel_inputs.py": (
+                    "installed panel validator differs from authenticated package mapping"
+                ),
+                "install_inventory.py": (
+                    "installed panel validator inventory dependency differs from "
+                    "authenticated package mapping"
+                ),
+                "panel_input_fixtures.json": (
+                    "installed panel validator fixture dependency differs from "
+                    "authenticated package mapping"
+                ),
+            }[resource_name]
+            if not any(
+                runtime_drift_marker in item for item in runtime_drift_errors
+            ):
                 errors.append(
-                    f"one-byte panel validator dependency drift still executed: {resource_name}"
+                    "one-byte panel validator dependency drift did not produce its "
+                    f"own digest error: {resource_name}"
                 )
             os.chmod(resource, original_mode | stat.S_IWUSR, follow_symlinks=False)
             resource.write_bytes(original)
@@ -3393,6 +3871,10 @@ def main() -> int:
         require(codex, phrase, CODEX, errors)
 
     mappings = expected_install_mappings()
+    authenticated_control_sources = bind_authenticated_validation_sources(
+        mappings, errors
+    )
+    nested_execution_is_authenticated = authenticated_control_sources is not None
     if len(mappings) != EXPECTED_INSTALL_COUNT:
         errors.append(
             f"install package has {len(mappings)} mappings; "
@@ -3490,14 +3972,34 @@ def main() -> int:
                 errors.append(f"Codex route does not resolve to source: {route_path}")
 
     check_canonical_dependency_closure(mappings, errors)
-    contract = read_json(STATE_CONTRACT, errors)
-    fixtures = read_json(STATE_FIXTURES, errors)
-    routing_cases = read_json(ROUTING_CASES, errors)
+    bound_controls = authenticated_control_sources or {}
+    contract = read_json(
+        STATE_CONTRACT,
+        errors,
+        authenticated_bytes=bound_controls.get(
+            STATE_CONTRACT.relative_to(ROOT).as_posix()
+        ),
+    )
+    fixtures = read_json(
+        STATE_FIXTURES,
+        errors,
+        authenticated_bytes=bound_controls.get(
+            STATE_FIXTURES.relative_to(ROOT).as_posix()
+        ),
+    )
+    routing_cases = read_json(
+        ROUTING_CASES,
+        errors,
+        authenticated_bytes=bound_controls.get(
+            ROUTING_CASES.relative_to(ROOT).as_posix()
+        ),
+    )
     check_state_contract(reference, contract, fixtures, errors)
     check_routing_cases(routing_cases, mappings, codex, errors)
 
     if args.self_test:
-        run_install_negative_controls(mappings, errors)
+        if nested_execution_is_authenticated:
+            run_install_negative_controls(mappings, errors)
         run_routing_negative_controls(routing_cases, mappings, codex, errors)
         run_panel_schema3_guidance_negative_control(reference, readme, errors)
         run_pre_dispatch_validation_guidance_negative_control(
@@ -3506,9 +4008,10 @@ def main() -> int:
         run_source_review_boundary_guidance_negative_control(
             reference, readme, errors
         )
-        run_materialized_authority_controls(mappings, routing_cases, errors)
+        if nested_execution_is_authenticated:
+            run_materialized_authority_controls(mappings, routing_cases, errors)
         run_fixture_inventory_negative_controls(fixtures, errors)
-    if args.installed_root:
+    if args.installed_root and nested_execution_is_authenticated:
         check_installed_inventory(args.installed_root.expanduser(), mappings, errors)
     loader_bin = args.release_gate or args.real_loader
     ci_loader_classification: Optional[str] = None

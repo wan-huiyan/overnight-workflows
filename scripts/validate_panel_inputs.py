@@ -17,22 +17,27 @@ import tempfile
 from typing import Any, Optional
 
 if __package__:
+    from . import install_inventory as _install_inventory_module
     from .install_inventory import (
         INVENTORY_FORMAT,
         PublicationError,
         build_inventory,
         parse_inventory,
+        run_authenticated_python as _run_authenticated_python,
     )
 else:
+    import install_inventory as _install_inventory_module
     from install_inventory import (
         INVENTORY_FORMAT,
         PublicationError,
         build_inventory,
         parse_inventory,
+        run_authenticated_python as _run_authenticated_python,
     )
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "scripts/panel_input_fixtures.json"
+PANEL_FIXTURE_RESOURCE_NAME = "panel_input_fixtures.json"
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,255}$")
@@ -74,7 +79,39 @@ PREPUBLICATION_SCOPE = {
     "implicit_model_selection": "UNCHECKED",
 }
 REVIEW_BOUNDARIES = {PREPUBLICATION_BOUNDARY: PREPUBLICATION_SCOPE}
-STAGED_VALIDATION_FIELDS = {"argv", "checker_sha256", "exit_status", "named_mutation_outcomes", "result", "stderr", "stdout"}
+STAGED_VALIDATION_FIELDS = {
+    "argv",
+    "authenticated_launch",
+    "checker_sha256",
+    "exit_status",
+    "named_mutation_outcomes",
+    "result",
+    "stderr",
+    "stdout",
+}
+AUTHENTICATED_LAUNCH_FIELDS = {
+    "protocol",
+    "python_executable",
+    "isolation_flags",
+    "source_transport",
+    "source_path",
+    "source_sha256",
+    "logical_argv",
+    "authenticated_source_sha256",
+}
+AUTHENTICATED_LAUNCH_PROTOCOL = "held-python-fd-v1"
+AUTHENTICATED_VALIDATION_SOURCE_PATHS = frozenset(
+    {
+        "scripts/install_inventory.py",
+        "scripts/large_queue_state_contract.json",
+        "scripts/large_queue_state_fixtures.json",
+        "scripts/panel_input_fixtures.json",
+        "scripts/eval/overnight-workflow-routing-cases.json",
+        "scripts/validate_panel_inputs.py",
+        "plugins/overnight-review-client-delivery/scripts/action_authority.py",
+        "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+    }
+)
 IMMUTABLE_SOURCE_FIELDS = {
     "root",
     "path",
@@ -525,7 +562,24 @@ def validate_immutable_source(
     if checker is None:
         errors.append("prepare immutable-source inventory omits the staged checker")
         return None
-    return {"path": checker.path, "sha256": checker.sha256, "bytes": checker.size}
+    authenticated_source_sha256 = {
+        entry.path: entry.sha256
+        for entry in entries
+        if entry.path in AUTHENTICATED_VALIDATION_SOURCE_PATHS
+    }
+    if authenticated_source_sha256 and set(authenticated_source_sha256) != set(
+        AUTHENTICATED_VALIDATION_SOURCE_PATHS
+    ):
+        errors.append(
+            "prepare immutable-source inventory has only part of the authenticated "
+            "nested validation closure"
+        )
+    return {
+        "path": checker.path,
+        "sha256": checker.sha256,
+        "bytes": checker.size,
+        "authenticated_source_sha256": authenticated_source_sha256,
+    }
 
 
 def validate_staged_validation(
@@ -558,7 +612,10 @@ def validate_staged_validation(
         or len(argv) != 6
         or not all(isinstance(argument, str) for argument in argv)
     ):
-        errors.append("prepare receipt staged_validation.argv must be the exact six-string checker argv")
+        errors.append(
+            "prepare receipt staged_validation.argv must be the six-string logical "
+            "checker command"
+        )
     else:
         launcher = absolute(argv[0])
         if launcher is None:
@@ -593,6 +650,39 @@ def validate_staged_validation(
     checker_digest = staged.get("checker_sha256")
     if not isinstance(checker_digest, str) or not SHA256.fullmatch(checker_digest):
         errors.append("prepare receipt staged_validation.checker_sha256 must be lowercase SHA-256")
+    authenticated_launch = staged.get("authenticated_launch")
+    authenticated_launch_is_trusted = False
+    if exact_fields(
+        authenticated_launch,
+        AUTHENTICATED_LAUNCH_FIELDS,
+        "prepare receipt staged_validation.authenticated_launch",
+        errors,
+    ):
+        assert isinstance(authenticated_launch, dict)
+        expected_authenticated_source_sha256 = (
+            checker_inventory_entry.get("authenticated_source_sha256")
+            if isinstance(checker_inventory_entry, dict)
+            else None
+        )
+        expected_launch = {
+            "protocol": AUTHENTICATED_LAUNCH_PROTOCOL,
+            "python_executable": argv[0] if isinstance(argv, list) and argv else None,
+            "isolation_flags": ["-I", "-B"],
+            "source_transport": "inherited-read-only-file-descriptor",
+            "source_path": argv[1]
+            if isinstance(argv, list) and len(argv) > 1
+            else None,
+            "source_sha256": checker_digest,
+            "logical_argv": argv,
+            "authenticated_source_sha256": expected_authenticated_source_sha256,
+        }
+        if authenticated_launch != expected_launch:
+            errors.append(
+                "prepare receipt staged_validation.authenticated_launch differs from "
+                "the immutable-source held-file-descriptor invocation"
+            )
+        else:
+            authenticated_launch_is_trusted = True
     checker_bytes: Optional[bytes] = None
     if verify and expected_checker is not None:
         checker_bytes = regular_bytes(expected_checker, "prepare staged checker", errors)
@@ -665,19 +755,26 @@ def validate_staged_validation(
         and len(argv) == 6
         and all(isinstance(argument, str) for argument in argv)
         and launcher_is_trusted
+        and authenticated_launch_is_trusted
         and expected_checker is not None
         and checker_bytes is not None
+        and checker_inventory_entry is not None
+        and isinstance(checker_inventory_entry.get("sha256"), str)
+        and SHA256.fullmatch(checker_inventory_entry["sha256"])
     ):
         try:
-            completed = subprocess.run(
-                argv,
+            completed, _ = _run_authenticated_python(
+                expected_checker,
+                argv[2:],
+                expected_sha256=checker_inventory_entry["sha256"],
                 cwd=immutable_root,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
                 timeout=120,
+                label="staged checker",
+                authenticated_source_sha256=checker_inventory_entry.get(
+                    "authenticated_source_sha256"
+                ),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
             errors.append(f"prepare staged checker could not be re-executed: {exc}")
         else:
             exit_status = completed.returncode
@@ -1099,6 +1196,199 @@ def set_path(value: dict[str, Any], path: list[str], replacement: Any) -> None:
     cursor[path[-1]] = copy.deepcopy(replacement)
 
 
+def _authenticated_panel_fixture_record() -> Optional[dict[str, Any]]:
+    """Return held fixture bytes, or None for direct canonical CLI execution."""
+    held_source_present = "__authenticated_source_bytes__" in globals()
+    held_resources_present = "__authenticated_resource_sources__" in globals()
+    if not held_source_present and not held_resources_present:
+        return None
+    authenticated_source = globals().get("__authenticated_source_bytes__")
+    authenticated_resources = globals().get("__authenticated_resource_sources__")
+    fixture_record = (
+        authenticated_resources.get(PANEL_FIXTURE_RESOURCE_NAME)
+        if isinstance(authenticated_resources, dict)
+        else None
+    )
+    if (
+        not isinstance(authenticated_source, bytes)
+        or not isinstance(authenticated_resources, dict)
+        or set(authenticated_resources) != {PANEL_FIXTURE_RESOURCE_NAME}
+        or not isinstance(fixture_record, dict)
+        or set(fixture_record) != {"path", "sha256", "source"}
+        or fixture_record.get("path") != str(FIXTURES)
+        or not isinstance(fixture_record.get("sha256"), str)
+        or not SHA256.fullmatch(fixture_record["sha256"])
+        or not isinstance(fixture_record.get("source"), bytes)
+    ):
+        raise RuntimeError(
+            "held validator requires exact authenticated panel fixture bytes and digest"
+        )
+    if (
+        hashlib.sha256(fixture_record["source"]).hexdigest()
+        != fixture_record["sha256"]
+    ):
+        raise RuntimeError(
+            "authenticated panel fixture bytes differ from their digest"
+        )
+    return fixture_record
+
+
+def _load_panel_fixtures() -> dict[str, Any]:
+    authenticated = _authenticated_panel_fixture_record()
+    data = FIXTURES.read_bytes() if authenticated is None else authenticated["source"]
+    value = json.loads(data.decode("utf-8"))
+    return value if isinstance(value, dict) else {}
+
+
+def _run_production_event_validation_mutant(
+    source_path: Path, environment: dict[str, str]
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the mutation control from held validator, module, and fixture bytes."""
+    held_source_present = "__authenticated_source_bytes__" in globals()
+    held_modules_present = "__authenticated_module_sources__" in globals()
+    held_resources_present = "__authenticated_resource_sources__" in globals()
+    authenticated_source = globals().get("__authenticated_source_bytes__")
+    authenticated_modules = globals().get("__authenticated_module_sources__")
+    inventory_record = (
+        authenticated_modules.get("install_inventory")
+        if isinstance(authenticated_modules, dict)
+        else None
+    )
+    inventory_record_is_valid = (
+        isinstance(authenticated_modules, dict)
+        and set(authenticated_modules) == {"install_inventory"}
+        and isinstance(inventory_record, dict)
+        and set(inventory_record) == {"path", "sha256", "source"}
+        and isinstance(inventory_record.get("path"), str)
+        and isinstance(inventory_record.get("sha256"), str)
+        and SHA256.fullmatch(inventory_record["sha256"]) is not None
+        and isinstance(inventory_record.get("source"), bytes)
+    )
+    if held_source_present or held_modules_present or held_resources_present:
+        fixture_record = _authenticated_panel_fixture_record()
+        if (
+            not isinstance(authenticated_source, bytes)
+            or not inventory_record_is_valid
+            or fixture_record is None
+        ):
+            raise RuntimeError(
+                "held validator requires exact authenticated install_inventory and "
+                "panel fixture bytes and digests"
+            )
+        source = authenticated_source
+        assert isinstance(inventory_record, dict)
+        inventory_path = inventory_record["path"]
+        inventory_source = inventory_record["source"]
+        inventory_sha256 = inventory_record["sha256"]
+        if hashlib.sha256(inventory_source).hexdigest() != inventory_sha256:
+            raise RuntimeError(
+                "authenticated install_inventory bytes differ from their digest"
+            )
+        fixture_path = fixture_record["path"]
+        fixture_source = fixture_record["source"]
+        fixture_sha256 = fixture_record["sha256"]
+    else:
+        source = source_path.read_bytes()
+        inventory_path = str(Path(_install_inventory_module.__file__).resolve())
+        inventory_source = Path(inventory_path).read_bytes()
+        inventory_sha256 = hashlib.sha256(inventory_source).hexdigest()
+        fixture_path = str(FIXTURES)
+        fixture_source = FIXTURES.read_bytes()
+        fixture_sha256 = hashlib.sha256(fixture_source).hexdigest()
+    source_sha256 = hashlib.sha256(source).hexdigest()
+    payload = (
+        len(inventory_source).to_bytes(8, "big")
+        + inventory_source
+        + len(fixture_source).to_bytes(8, "big")
+        + fixture_source
+        + source
+    )
+    driver = (
+        "import hashlib, struct, sys, types\n"
+        "payload = sys.stdin.buffer.read()\n"
+        "if len(payload) < 8:\n"
+        "    raise SystemExit('authenticated mutation payload is truncated')\n"
+        "inventory_size = struct.unpack('>Q', payload[:8])[0]\n"
+        "inventory_end = 8 + inventory_size\n"
+        "if len(payload) < inventory_end + 8:\n"
+        "    raise SystemExit('authenticated mutation payload is truncated')\n"
+        "inventory_source = payload[8:inventory_end]\n"
+        "fixture_size = struct.unpack('>Q', payload[inventory_end:inventory_end + 8])[0]\n"
+        "fixture_start = inventory_end + 8\n"
+        "fixture_end = fixture_start + fixture_size\n"
+        "if fixture_end > len(payload):\n"
+        "    raise SystemExit('authenticated mutation payload is truncated')\n"
+        "fixture_source = payload[fixture_start:fixture_end]\n"
+        "source = payload[fixture_end:]\n"
+        "inventory_expected_sha256 = sys.argv[1]\n"
+        "if hashlib.sha256(inventory_source).hexdigest() != inventory_expected_sha256:\n"
+        "    raise SystemExit('authenticated install_inventory bytes changed in transit')\n"
+        "fixture_expected_sha256 = sys.argv[2]\n"
+        "if hashlib.sha256(fixture_source).hexdigest() != fixture_expected_sha256:\n"
+        "    raise SystemExit('authenticated panel fixture bytes changed in transit')\n"
+        "if hashlib.sha256(source).hexdigest() != sys.argv[3]:\n"
+        "    raise SystemExit('authenticated validator bytes changed in transit')\n"
+        "inventory_path = sys.argv[4]\n"
+        "fixture_path = sys.argv[5]\n"
+        "path = sys.argv[6]\n"
+        "module = types.ModuleType('install_inventory')\n"
+        "module.__file__ = inventory_path\n"
+        "module.__package__ = None\n"
+        "module.__cached__ = None\n"
+        "module.__loader__ = None\n"
+        "module.__spec__ = None\n"
+        "sys.modules['install_inventory'] = module\n"
+        "exec(compile(inventory_source, inventory_path, 'exec'), module.__dict__, module.__dict__)\n"
+        "needle = b'    validate_prepare_events(state.get(\\\"events\\\"), errors)\\n'\n"
+        "if source.count(needle) != 1:\n"
+        "    raise SystemExit('event validation call is not uniquely mutable')\n"
+        "mutant = source.replace(needle, b'    pass  # removed event validation\\n', 1)\n"
+        "sys.argv = [path, *sys.argv[7:]]\n"
+        "module_sources = {'install_inventory': {'path': inventory_path, "
+        "'sha256': inventory_expected_sha256, 'source': inventory_source}}\n"
+        "resource_sources = {'panel_input_fixtures.json': {'path': fixture_path, "
+        "'sha256': fixture_expected_sha256, 'source': fixture_source}}\n"
+        "scope = {\n"
+        "    '__name__': '__main__',\n"
+        "    '__file__': path,\n"
+        "    '__package__': None,\n"
+        "    '__cached__': None,\n"
+        "    '__loader__': None,\n"
+        "    '__spec__': None,\n"
+        "    '__builtins__': __builtins__,\n"
+        "    '__authenticated_source_bytes__': mutant,\n"
+        "    '__authenticated_module_sources__': module_sources,\n"
+        "    '__authenticated_resource_sources__': resource_sources,\n"
+        "    '__panel_event_validation_mutant__': True,\n"
+        "}\n"
+        "exec(compile(mutant, path, 'exec'), scope, scope)\n"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            driver,
+            inventory_sha256,
+            fixture_sha256,
+            source_sha256,
+            inventory_path,
+            fixture_path,
+            str(source_path),
+            "--self-test",
+            "--json",
+        ],
+        cwd=source_path.parent,
+        env=environment,
+        input=payload,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=120,
+    )
+
+
 def self_test(fixtures: dict[str, Any]) -> list[str]:
     errors = fixture_errors(fixtures)
     if errors:
@@ -1204,6 +1494,19 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                 str(Path(sys.executable).resolve()), str(checker_path),
                 "--installed-root", str(exchange_slot), "--self-test", "--json",
             ],
+            "authenticated_launch": {
+                "protocol": AUTHENTICATED_LAUNCH_PROTOCOL,
+                "python_executable": str(Path(sys.executable).resolve()),
+                "isolation_flags": ["-I", "-B"],
+                "source_transport": "inherited-read-only-file-descriptor",
+                "source_path": str(checker_path),
+                "source_sha256": hashlib.sha256(checker_path.read_bytes()).hexdigest(),
+                "logical_argv": [
+                    str(Path(sys.executable).resolve()), str(checker_path),
+                    "--installed-root", str(exchange_slot), "--self-test", "--json",
+                ],
+                "authenticated_source_sha256": {},
+            },
             "checker_sha256": hashlib.sha256(checker_path.read_bytes()).hexdigest(),
             "exit_status": 0,
             "named_mutation_outcomes": outcome,
@@ -1426,7 +1729,7 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                     f"as expected: {found}"
                 )
             write_prepare_pair(record, receipt, state)
-        if os.environ.get("PANEL_EVENT_VALIDATION_MUTANT") == "1":
+        if globals().get("__panel_event_validation_mutant__") is True:
             mutant_record = copy.deepcopy(record)
             mutant_receipt = copy.deepcopy(receipt)
             mutant_state = copy.deepcopy(state)
@@ -1616,30 +1919,14 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
                 write_prepare_pair(mutated, mutated_receipt, mutated_state)
             elif case["target"] == "production":
                 source_path = Path(__file__).resolve()
-                driver = (
-                    "from pathlib import Path\n"
-                    f"path = Path({str(source_path)!r})\n"
-                    "source = path.read_text(encoding='utf-8')\n"
-                    "needle = '    validate_prepare_events(state.get(\\\"events\\\"), errors)\\n'\n"
-                    "if source.count(needle) != 1:\n"
-                    "    raise SystemExit('event validation call is not uniquely mutable')\n"
-                    "mutant = source.replace(needle, '    pass  # removed event validation\\n', 1)\n"
-                    "scope = {'__name__': '__main__', '__file__': str(path)}\n"
-                    "exec(compile(mutant, str(path), 'exec'), scope)\n"
-                )
                 mutant_environment = os.environ.copy()
-                mutant_environment["PANEL_EVENT_VALIDATION_MUTANT"] = "1"
-                completed = subprocess.run(
-                    [sys.executable, "-c", driver, "--self-test", "--json"],
-                    cwd=source_path.parent,
-                    env=mutant_environment,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                    timeout=120,
-                    text=True,
+                completed = _run_production_event_validation_mutant(
+                    source_path,
+                    mutant_environment,
                 )
-                combined_output = completed.stdout + completed.stderr
+                combined_output = (completed.stdout + completed.stderr).decode(
+                    "utf-8", "replace"
+                )
                 production_found = (
                     [case["expect"]]
                     if completed.returncode != 0 and case["expect"] in combined_output
@@ -1792,8 +2079,8 @@ def main() -> int:
     args = parser.parse_args()
     if not args.manifest and not args.self_test: parser.error("provide --manifest and/or --self-test")
     errors: list[str] = []
-    try: fixtures = json.loads(FIXTURES.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    try: fixtures = _load_panel_fixtures()
+    except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError) as exc:
         fixtures = {}; errors.append(f"cannot read panel fixtures: {exc}")
     errors.extend(fixture_errors(fixtures))
     if args.self_test and not errors: errors.extend(self_test(fixtures))

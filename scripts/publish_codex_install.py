@@ -47,6 +47,7 @@ if __package__:
         _validate_relative_path,
         build_inventory,
         parse_inventory,
+        run_authenticated_python as _run_authenticated_python,
         serialize_inventory,
     )
 else:
@@ -66,6 +67,7 @@ else:
         _validate_relative_path,
         build_inventory,
         parse_inventory,
+        run_authenticated_python as _run_authenticated_python,
         serialize_inventory,
     )
 
@@ -92,6 +94,19 @@ READER_UNKNOWN_STATUS_CLEAR = "NONE_OBSERVED"
 EXTERNAL_CLAIM_VALIDATION_SCOPE = (
     "publisher-validates-recorded-external-claim-not-unknowable-world-truth"
 )
+AUTHENTICATED_VALIDATION_SOURCE_PATHS = frozenset(
+    {
+        "scripts/install_inventory.py",
+        "scripts/large_queue_state_contract.json",
+        "scripts/large_queue_state_fixtures.json",
+        "scripts/panel_input_fixtures.json",
+        "scripts/eval/overnight-workflow-routing-cases.json",
+        "scripts/validate_panel_inputs.py",
+        "plugins/overnight-review-client-delivery/scripts/action_authority.py",
+        "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+    }
+)
+AUTHENTICATED_LAUNCH_PROTOCOL = "held-python-fd-v1"
 
 
 class ValidationFailure(PublicationError):
@@ -813,13 +828,14 @@ CheckerRunner = Callable[[Path, Path], Dict[str, Any]]
 Failpoint = Optional[Callable[[str], None]]
 
 
-def run_installed_checker(source_snapshot: Path, installed_root: Path) -> Dict[str, Any]:
+def run_installed_checker(
+    source_snapshot: Path,
+    installed_root: Path,
+    *,
+    expected_checker_sha256: str,
+    authenticated_source_sha256: Mapping[str, str],
+) -> Dict[str, Any]:
     checker = source_snapshot / "scripts/check_large_queue_guidance.py"
-    if checker.is_symlink() or not checker.is_file():
-        raise PublicationError("immutable source has no regular installed-root checker")
-    checker_digest = hashlib.sha256(
-        _read_regular_bytes(checker, label="immutable installed-root checker")
-    ).hexdigest()
     argv = [
         sys.executable,
         str(checker),
@@ -828,7 +844,14 @@ def run_installed_checker(source_snapshot: Path, installed_root: Path) -> Dict[s
         "--self-test",
         "--json",
     ]
-    completed = _run(argv, cwd=source_snapshot)
+    completed, checker_digest = _run_authenticated_python(
+        checker,
+        argv[2:],
+        expected_sha256=expected_checker_sha256,
+        cwd=source_snapshot,
+        label="installed-root checker",
+        authenticated_source_sha256=authenticated_source_sha256,
+    )
     stdout = completed.stdout.decode("utf-8", "replace")
     parsed: Optional[Dict[str, Any]] = None
     try:
@@ -839,6 +862,16 @@ def run_installed_checker(source_snapshot: Path, installed_root: Path) -> Dict[s
         parsed = None
     receipt = {
         "argv": argv,
+        "authenticated_launch": {
+            "protocol": AUTHENTICATED_LAUNCH_PROTOCOL,
+            "python_executable": argv[0],
+            "isolation_flags": ["-I", "-B"],
+            "source_transport": "inherited-read-only-file-descriptor",
+            "source_path": argv[1],
+            "source_sha256": checker_digest,
+            "logical_argv": argv,
+            "authenticated_source_sha256": dict(authenticated_source_sha256),
+        },
         "checker_sha256": checker_digest,
         "stdout": stdout,
         "stderr": completed.stderr.decode("utf-8", "replace"),
@@ -874,8 +907,39 @@ def _run_bound_checker(
     source_record = state.get("immutable_source")
     if not isinstance(source_record, dict) or source_record.get("root") != str(source_snapshot):
         raise PublicationError("checker source root differs from the bound immutable source")
-    _verify_immutable_source(state)
-    receipt = checker_runner(source_snapshot, installed_root)
+    source_inventory = _verify_immutable_source(state)
+    if checker_runner is run_installed_checker:
+        inventory_entries = {entry.path: entry for entry in source_inventory.entries}
+        checker_entry = next(
+            (
+                entry
+                for entry in source_inventory.entries
+                if entry.path == "scripts/check_large_queue_guidance.py"
+            ),
+            None,
+        )
+        if checker_entry is None:
+            raise PublicationError("immutable-source inventory omits installed-root checker")
+        missing_validation_sources = sorted(
+            AUTHENTICATED_VALIDATION_SOURCE_PATHS - inventory_entries.keys()
+        )
+        if missing_validation_sources:
+            raise PublicationError(
+                "immutable-source inventory omits nested validation source paths: "
+                + ", ".join(missing_validation_sources)
+            )
+        authenticated_source_sha256 = {
+            path: inventory_entries[path].sha256
+            for path in sorted(AUTHENTICATED_VALIDATION_SOURCE_PATHS)
+        }
+        receipt = run_installed_checker(
+            source_snapshot,
+            installed_root,
+            expected_checker_sha256=checker_entry.sha256,
+            authenticated_source_sha256=authenticated_source_sha256,
+        )
+    else:
+        receipt = checker_runner(source_snapshot, installed_root)
     _verify_immutable_source(state)
     return receipt
 

@@ -369,6 +369,25 @@ class FinalizationManifestTests(unittest.TestCase):
                 "--self-test",
                 "--json",
             ],
+            "authenticated_launch": {
+                "protocol": panel_inputs.AUTHENTICATED_LAUNCH_PROTOCOL,
+                "python_executable": str(Path(sys.executable).resolve()),
+                "isolation_flags": ["-I", "-B"],
+                "source_transport": "inherited-read-only-file-descriptor",
+                "source_path": str(immutable_checker),
+                "source_sha256": hashlib.sha256(
+                    immutable_checker.read_bytes()
+                ).hexdigest(),
+                "logical_argv": [
+                    str(Path(sys.executable).resolve()),
+                    str(immutable_checker),
+                    "--installed-root",
+                    str(exchange_slot),
+                    "--self-test",
+                    "--json",
+                ],
+                "authenticated_source_sha256": {},
+            },
             "checker_sha256": hashlib.sha256(immutable_checker.read_bytes()).hexdigest(),
             "exit_status": 0,
             "named_mutation_outcomes": outcomes,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib
@@ -95,6 +96,13 @@ class PublisherHarness:
             "raise SystemExit(0)\n",
             encoding="utf-8",
         )
+        for validation_source in publisher.AUTHENTICATED_VALIDATION_SOURCE_PATHS:
+            source = self.repository / validation_source
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(
+                "# fixture nested validation identity\n",
+                encoding="utf-8",
+            )
         run(["git", "add", "."], self.repository)
         run(
             [
@@ -547,6 +555,14 @@ class InventoryTests(unittest.TestCase):
         for name in ("INVENTORY_FORMAT", "PublicationError", "build_inventory"):
             with self.subTest(consumer="panel validator", name=name):
                 self.assertIs(getattr(panel_validator, name), getattr(inventory_codec, name))
+        self.assertIs(
+            publisher._run_authenticated_python,
+            inventory_codec.run_authenticated_python,
+        )
+        self.assertIs(
+            panel_validator._run_authenticated_python,
+            inventory_codec.run_authenticated_python,
+        )
 
         with self.assertRaises(inventory_codec.PublicationError) as raised:
             publisher.parse_inventory(b"not-canonical")
@@ -563,6 +579,14 @@ class InventoryTests(unittest.TestCase):
         self.assertIs(namespace_publisher.build_inventory, namespace_codec.build_inventory)
         self.assertIs(namespace_panel.PublicationError, namespace_codec.PublicationError)
         self.assertIs(namespace_panel.build_inventory, namespace_codec.build_inventory)
+        self.assertIs(
+            namespace_publisher._run_authenticated_python,
+            namespace_codec.run_authenticated_python,
+        )
+        self.assertIs(
+            namespace_panel._run_authenticated_python,
+            namespace_codec.run_authenticated_python,
+        )
 
     def test_inventory_codec_name_matches_checker_and_committed_manifest(self) -> None:
         manifest = json.loads(
@@ -804,7 +828,1011 @@ class PublicationTests(unittest.TestCase):
             receipt["evidence_snapshot"]["sha256"],
         )
 
-    def test_real_prepare_checker_accepts_read_only_immutable_source(self) -> None:
+    def test_checker_path_replacement_after_authentication_never_executes_foreign_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="publisher-checker-fd-race-") as raw:
+            root = Path(raw).resolve()
+            source = root / "source"
+            installed = root / "installed"
+            checker = source / "scripts/check_large_queue_guidance.py"
+            checker.parent.mkdir(parents=True)
+            installed.mkdir()
+            held_sentinel = root / "held-checker-ran"
+            foreign_sentinel = root / "foreign-checker-ran"
+            checker.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                f"Path({str(held_sentinel)!r}).write_text('held', encoding='utf-8')\n"
+                "print(json.dumps({'status': 'PASS', 'named_mutation_outcomes': "
+                "{'HELD_CHECKER_RAN': 'PASS'}}, sort_keys=True))\n",
+                encoding="utf-8",
+            )
+            held_checker_sha256 = hashlib.sha256(checker.read_bytes()).hexdigest()
+            foreign = root / "foreign-checker.py"
+            foreign.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                f"Path({str(foreign_sentinel)!r}).write_text('foreign', encoding='utf-8')\n"
+                "print(json.dumps({'status': 'PASS', 'named_mutation_outcomes': "
+                "{'FOREIGN_CHECKER_RAN': 'PASS'}}, sort_keys=True))\n",
+                encoding="utf-8",
+            )
+            original_run = inventory_codec.subprocess.run
+
+            def replace_path_then_run(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                os.replace(foreign, checker)
+                return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+            with mock.patch.object(
+                inventory_codec.subprocess,
+                "run",
+                side_effect=replace_path_then_run,
+            ):
+                with self.assertRaisesRegex(
+                    publisher.PublicationError,
+                    "authenticated installed-root checker path changed",
+                ):
+                    publisher.run_installed_checker(
+                        source,
+                        installed,
+                        expected_checker_sha256=held_checker_sha256,
+                        authenticated_source_sha256={},
+                    )
+
+            self.assertEqual("held", held_sentinel.read_text(encoding="utf-8"))
+            self.assertFalse(foreign_sentinel.exists())
+            with self.assertRaisesRegex(
+                publisher.PublicationError,
+                "differs from authenticated expected bytes",
+            ):
+                publisher.run_installed_checker(
+                    source,
+                    installed,
+                    expected_checker_sha256=held_checker_sha256,
+                    authenticated_source_sha256={},
+                )
+            self.assertFalse(foreign_sentinel.exists())
+
+    def test_panel_recheck_holds_authenticated_checker_bytes_across_path_replacement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="panel-checker-fd-race-") as raw:
+            root = Path(raw).resolve()
+            immutable_root = root / "operation/immutable-source"
+            checker = immutable_root / "scripts/check_large_queue_guidance.py"
+            exchange_slot = immutable_root.parent / "exchange-slot"
+            checker.parent.mkdir(parents=True)
+            exchange_slot.mkdir()
+            held_sentinel = root / "held-panel-checker-ran"
+            foreign_sentinel = root / "foreign-panel-checker-ran"
+            result = {
+                "schema_version": 1,
+                "status": "PASS",
+                "named_mutation_outcomes": {"HELD_PANEL_CHECKER_RAN": "PASS"},
+            }
+            expected_stdout = json.dumps(result, sort_keys=True) + "\n"
+            checker.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                f"Path({str(held_sentinel)!r}).write_text('held', encoding='utf-8')\n"
+                f"print(json.dumps({result!r}, sort_keys=True))\n",
+                encoding="utf-8",
+            )
+            checker_bytes = checker.read_bytes()
+            foreign = root / "foreign-panel-checker.py"
+            foreign.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                f"Path({str(foreign_sentinel)!r}).write_text('foreign', encoding='utf-8')\n"
+                f"print(json.dumps({result!r}, sort_keys=True))\n",
+                encoding="utf-8",
+            )
+            staged = {
+                "argv": [
+                    str(Path(sys.executable).resolve()),
+                    str(checker),
+                    "--installed-root",
+                    str(exchange_slot),
+                    "--self-test",
+                    "--json",
+                ],
+                "authenticated_launch": {
+                    "protocol": "held-python-fd-v1",
+                    "python_executable": str(Path(sys.executable).resolve()),
+                    "isolation_flags": ["-I", "-B"],
+                    "source_transport": "inherited-read-only-file-descriptor",
+                    "source_path": str(checker),
+                    "source_sha256": hashlib.sha256(checker_bytes).hexdigest(),
+                    "logical_argv": [
+                        str(Path(sys.executable).resolve()),
+                        str(checker),
+                        "--installed-root",
+                        str(exchange_slot),
+                        "--self-test",
+                        "--json",
+                    ],
+                    "authenticated_source_sha256": {},
+                },
+                "checker_sha256": hashlib.sha256(checker_bytes).hexdigest(),
+                "exit_status": 0,
+                "named_mutation_outcomes": result["named_mutation_outcomes"],
+                "result": result,
+                "stderr": "",
+                "stdout": expected_stdout,
+            }
+            receipt = {
+                "immutable_source": {"root": str(immutable_root)},
+                "staged_validation": staged,
+                "named_mutation_outcomes": {
+                    "staged": result["named_mutation_outcomes"]
+                },
+            }
+            original_run = panel_validator.subprocess.run
+
+            def replace_path_then_run(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                os.replace(foreign, checker)
+                return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+            errors: list[str] = []
+            with mock.patch.object(
+                panel_validator.subprocess,
+                "run",
+                side_effect=replace_path_then_run,
+            ):
+                panel_validator.validate_staged_validation(
+                    receipt,
+                    {},
+                    {
+                        "path": "scripts/check_large_queue_guidance.py",
+                        "sha256": hashlib.sha256(checker_bytes).hexdigest(),
+                        "bytes": len(checker_bytes),
+                        "authenticated_source_sha256": {},
+                    },
+                    True,
+                    errors,
+                )
+
+            self.assertTrue(
+                any("authenticated staged checker path changed" in item for item in errors),
+                errors,
+            )
+            self.assertEqual("held", held_sentinel.read_text(encoding="utf-8"))
+            self.assertFalse(foreign_sentinel.exists())
+            pre_open_errors: list[str] = []
+            panel_validator.validate_staged_validation(
+                receipt,
+                {},
+                {
+                    "path": "scripts/check_large_queue_guidance.py",
+                    "sha256": hashlib.sha256(checker_bytes).hexdigest(),
+                    "bytes": len(checker_bytes),
+                    "authenticated_source_sha256": {},
+                },
+                True,
+                pre_open_errors,
+            )
+            self.assertTrue(
+                any(
+                    "differs from authenticated expected bytes" in item
+                    for item in pre_open_errors
+                ),
+                pre_open_errors,
+            )
+            self.assertFalse(foreign_sentinel.exists())
+
+    def test_panel_rejects_authenticated_launch_metadata_drift_before_child_launch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="panel-launch-metadata-") as raw:
+            root = Path(raw).resolve()
+            immutable_root = root / "operation/immutable-source"
+            checker = immutable_root / "scripts/check_large_queue_guidance.py"
+            exchange_slot = immutable_root.parent / "exchange-slot"
+            checker.parent.mkdir(parents=True)
+            exchange_slot.mkdir()
+            checker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+            checker_bytes = checker.read_bytes()
+            checker_sha256 = hashlib.sha256(checker_bytes).hexdigest()
+            authenticated_source_sha256 = {
+                "scripts/validate_panel_inputs.py": "1" * 64,
+            }
+            logical_argv = [
+                str(Path(sys.executable).resolve()),
+                str(checker),
+                "--installed-root",
+                str(exchange_slot),
+                "--self-test",
+                "--json",
+            ]
+            result = {
+                "schema_version": 1,
+                "status": "PASS",
+                "named_mutation_outcomes": {"metadata.control": "PASS"},
+            }
+            staged = {
+                "argv": logical_argv,
+                "authenticated_launch": {
+                    "protocol": "held-python-fd-v1",
+                    "python_executable": logical_argv[0],
+                    "isolation_flags": ["-I", "-B"],
+                    "source_transport": "inherited-read-only-file-descriptor",
+                    "source_path": logical_argv[1],
+                    "source_sha256": checker_sha256,
+                    "logical_argv": logical_argv,
+                    "authenticated_source_sha256": authenticated_source_sha256,
+                },
+                "checker_sha256": checker_sha256,
+                "exit_status": 0,
+                "named_mutation_outcomes": result["named_mutation_outcomes"],
+                "result": result,
+                "stderr": "",
+                "stdout": json.dumps(result, sort_keys=True, separators=(",", ":"))
+                + "\n",
+            }
+            receipt = {
+                "immutable_source": {"root": str(immutable_root)},
+                "staged_validation": staged,
+                "named_mutation_outcomes": {
+                    "staged": result["named_mutation_outcomes"]
+                },
+            }
+            checker_inventory_entry = {
+                "path": "scripts/check_large_queue_guidance.py",
+                "sha256": checker_sha256,
+                "bytes": len(checker_bytes),
+                "authenticated_source_sha256": authenticated_source_sha256,
+            }
+            for mutation in ("protocol", "source_path", "nested_digest"):
+                with self.subTest(mutation=mutation):
+                    mutated = copy.deepcopy(receipt)
+                    launch = mutated["staged_validation"]["authenticated_launch"]
+                    if mutation == "protocol":
+                        launch["protocol"] = "path-python-v0"
+                    elif mutation == "source_path":
+                        launch["source_path"] = str(root / "other-checker.py")
+                    else:
+                        launch["authenticated_source_sha256"][
+                            "scripts/validate_panel_inputs.py"
+                        ] = "0" * 64
+                    child = mock.Mock()
+                    errors: list[str] = []
+                    with mock.patch.object(
+                        panel_validator,
+                        "_run_authenticated_python",
+                        child,
+                    ):
+                        panel_validator.validate_staged_validation(
+                            mutated,
+                            {},
+                            checker_inventory_entry,
+                            True,
+                            errors,
+                        )
+                    self.assertTrue(
+                        any(
+                            "authenticated_launch differs" in error
+                            for error in errors
+                        ),
+                        errors,
+                    )
+                    child.assert_not_called()
+
+    def test_panel_production_mutant_holds_real_validator_and_inventory_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="panel-production-mutant-bytes-") as raw:
+            root = Path(raw).resolve()
+            source_root = Path(__file__).resolve().parents[1]
+            validator = root / "scripts/validate_panel_inputs.py"
+            inventory_module = root / "scripts/install_inventory.py"
+            fixtures = root / "scripts/panel_input_fixtures.json"
+            manifest = root / "codex/overnight-workflows/install-manifest.json"
+            validator.parent.mkdir(parents=True)
+            manifest.parent.mkdir(parents=True)
+            held_validator_source = (
+                source_root / "scripts/validate_panel_inputs.py"
+            ).read_bytes()
+            held_inventory_sentinel = root / "held-production-inventory-ran"
+            held_inventory_source = (
+                source_root / "scripts/install_inventory.py"
+            ).read_bytes() + (
+                "\nfrom pathlib import Path as _HeldPath\n"
+                f"_HeldPath({str(held_inventory_sentinel)!r}).write_text("
+                "'held', encoding='utf-8')\n"
+            ).encode("utf-8")
+            held_fixture_source = (
+                source_root / "scripts/panel_input_fixtures.json"
+            ).read_bytes()
+            validator.write_bytes(held_validator_source)
+            inventory_module.write_bytes(held_inventory_source)
+            shutil.copy2(
+                source_root / "scripts/panel_input_fixtures.json",
+                fixtures,
+            )
+            shutil.copy2(
+                source_root / "codex/overnight-workflows/install-manifest.json",
+                manifest,
+            )
+            foreign_validator_sentinel = root / "foreign-production-validator-ran"
+            foreign_inventory_sentinel = root / "foreign-production-inventory-ran"
+            foreign_validator = root / "foreign-validator.py"
+            foreign_validator.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(foreign_validator_sentinel)!r}).write_text("
+                "'foreign', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            foreign_inventory = root / "foreign-inventory.py"
+            foreign_inventory.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(foreign_inventory_sentinel)!r}).write_text("
+                "'foreign', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            foreign_fixtures = root / "foreign-panel-input-fixtures.json"
+            foreign_fixtures.write_text("{}\n", encoding="utf-8")
+            original_run = panel_validator.subprocess.run
+
+            def replace_path_then_run(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                os.replace(foreign_validator, validator)
+                os.replace(foreign_inventory, inventory_module)
+                os.replace(foreign_fixtures, fixtures)
+                return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+            mutant_environment = os.environ.copy()
+            with mock.patch.object(
+                panel_validator,
+                "FIXTURES",
+                fixtures,
+            ), mock.patch.object(
+                panel_validator,
+                "__authenticated_source_bytes__",
+                held_validator_source,
+                create=True,
+            ), mock.patch.object(
+                panel_validator,
+                "__authenticated_module_sources__",
+                {
+                    "install_inventory": {
+                        "path": str(inventory_module),
+                        "sha256": hashlib.sha256(held_inventory_source).hexdigest(),
+                        "source": held_inventory_source,
+                    }
+                },
+                create=True,
+            ), mock.patch.object(
+                panel_validator,
+                "__authenticated_resource_sources__",
+                {
+                    "panel_input_fixtures.json": {
+                        "path": str(fixtures),
+                        "sha256": hashlib.sha256(held_fixture_source).hexdigest(),
+                        "source": held_fixture_source,
+                    }
+                },
+                create=True,
+            ), mock.patch.object(
+                panel_validator.subprocess,
+                "run",
+                side_effect=replace_path_then_run,
+            ):
+                completed = panel_validator._run_production_event_validation_mutant(
+                    validator,
+                    mutant_environment,
+                )
+
+            combined = (completed.stdout + completed.stderr).decode("utf-8", "replace")
+            self.assertNotEqual(0, completed.returncode, combined)
+            self.assertIn(
+                "production event validation mutation probe did not fail",
+                combined,
+            )
+            self.assertEqual(
+                "held", held_inventory_sentinel.read_text(encoding="utf-8")
+            )
+            self.assertFalse(foreign_validator_sentinel.exists())
+            self.assertFalse(foreign_inventory_sentinel.exists())
+
+    def test_checker_stops_nested_execution_when_runtime_sources_differ_from_bound_inventory(
+        self,
+    ) -> None:
+        mappings = guidance.expected_install_mappings()
+        authenticated = {
+            mapping["canonical_source"]: mapping["source_sha256"]
+            for mapping in mappings
+            if mapping["canonical_source"]
+            in guidance.AUTHENTICATED_VALIDATION_SOURCE_PATHS
+        }
+        for path in guidance.AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS:
+            authenticated[path] = hashlib.sha256(
+                (guidance.ROOT / path).read_bytes()
+            ).hexdigest()
+        self.assertEqual(8, len(authenticated))
+        runtime_mappings = copy.deepcopy(mappings)
+        for mapping in runtime_mappings:
+            if mapping["canonical_source"] == "scripts/panel_input_fixtures.json":
+                mapping["source_sha256"] = "0" * 64
+                break
+        install_controls = mock.Mock()
+        authority_controls = mock.Mock()
+        with mock.patch.object(
+            guidance,
+            "__authenticated_source_sha256__",
+            authenticated,
+            create=True,
+        ), mock.patch.object(
+            guidance,
+            "expected_install_mappings",
+            return_value=runtime_mappings,
+        ), mock.patch.object(
+            guidance,
+            "run_install_negative_controls",
+            install_controls,
+        ), mock.patch.object(
+            guidance,
+            "run_materialized_authority_controls",
+            authority_controls,
+        ), mock.patch.object(
+            sys,
+            "argv",
+            ["check_large_queue_guidance.py", "--self-test", "--json"],
+        ):
+            with mock.patch("builtins.print"):
+                status = guidance.main()
+
+        self.assertEqual(1, status)
+        install_controls.assert_not_called()
+        authority_controls.assert_not_called()
+
+    def test_held_checker_rejects_each_outer_control_omission_and_digest_drift(
+        self,
+    ) -> None:
+        mappings = guidance.expected_install_mappings()
+        control_paths = {
+            "scripts/large_queue_state_contract.json",
+            "scripts/large_queue_state_fixtures.json",
+            "scripts/eval/overnight-workflow-routing-cases.json",
+        }
+        authenticated = {
+            mapping["canonical_source"]: mapping["source_sha256"]
+            for mapping in mappings
+            if mapping["canonical_source"]
+            in guidance.AUTHENTICATED_VALIDATION_SOURCE_PATHS
+        }
+        for path in control_paths:
+            authenticated[path] = hashlib.sha256(
+                (guidance.ROOT / path).read_bytes()
+            ).hexdigest()
+        self.assertEqual(
+            guidance.AUTHENTICATED_VALIDATION_SOURCE_PATHS,
+            set(authenticated),
+        )
+
+        for path in sorted(control_paths):
+            for mutation in ("omission", "digest_drift"):
+                with self.subTest(path=path, mutation=mutation):
+                    mutated = dict(authenticated)
+                    if mutation == "omission":
+                        mutated.pop(path)
+                    else:
+                        mutated[path] = "0" * 64
+                    errors: list[str] = []
+                    with mock.patch.object(
+                        guidance,
+                        "__authenticated_source_bytes__",
+                        b"held checker bytes",
+                        create=True,
+                    ), mock.patch.object(
+                        guidance,
+                        "__authenticated_source_sha256__",
+                        mutated,
+                        create=True,
+                    ):
+                        bound = guidance.bind_authenticated_validation_sources(
+                            mappings,
+                            errors,
+                        )
+
+                    self.assertIsNone(bound)
+                    if mutation == "omission":
+                        self.assertTrue(
+                            any("exact eight" in error for error in errors),
+                            errors,
+                        )
+                    else:
+                        self.assertTrue(
+                            any(
+                                "control bytes differ" in error
+                                for error in errors
+                            ),
+                            errors,
+                        )
+
+    def test_held_checker_uses_bound_outer_control_bytes_after_path_replacement(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="held-checker-controls-") as raw:
+            root = Path(raw).resolve()
+            mappings: list[dict[str, str]] = []
+            authenticated: dict[str, str] = {}
+            for relative in guidance.AUTHENTICATED_NESTED_VALIDATION_SOURCE_PATHS:
+                digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+                mappings.append(
+                    {"canonical_source": relative, "source_sha256": digest}
+                )
+                authenticated[relative] = digest
+            expected_values: dict[str, dict[str, object]] = {}
+            for index, relative in enumerate(
+                sorted(guidance.AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS)
+            ):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                value = {"held_control": relative, "index": index}
+                path.write_text(
+                    json.dumps(value, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                expected_values[relative] = value
+                authenticated[relative] = hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+
+            errors: list[str] = []
+            with mock.patch.object(
+                guidance,
+                "ROOT",
+                root,
+            ), mock.patch.object(
+                guidance,
+                "__authenticated_source_bytes__",
+                b"held checker bytes",
+                create=True,
+            ), mock.patch.object(
+                guidance,
+                "__authenticated_source_sha256__",
+                authenticated,
+                create=True,
+            ):
+                bound = guidance.bind_authenticated_validation_sources(
+                    mappings,
+                    errors,
+                )
+                self.assertIsNotNone(bound)
+                assert bound is not None
+                for relative in guidance.AUTHENTICATED_CHECKER_CONTROL_SOURCE_PATHS:
+                    (root / relative).write_text(
+                        '{"foreign_control":true}\n',
+                        encoding="utf-8",
+                    )
+                    parsed = guidance.read_json(
+                        root / relative,
+                        errors,
+                        authenticated_bytes=bound[relative],
+                    )
+                    self.assertEqual(expected_values[relative], parsed)
+
+            self.assertEqual([], errors)
+
+    def test_held_checker_requires_nested_digest_context_before_any_nested_execution(
+        self,
+    ) -> None:
+        install_controls = mock.Mock()
+        authority_controls = mock.Mock()
+        with mock.patch.object(
+            guidance,
+            "__authenticated_source_bytes__",
+            b"held checker bytes",
+            create=True,
+        ), mock.patch.object(
+            guidance,
+            "__authenticated_source_sha256__",
+            None,
+            create=True,
+        ), mock.patch.object(
+            guidance,
+            "run_install_negative_controls",
+            install_controls,
+        ), mock.patch.object(
+            guidance,
+            "run_materialized_authority_controls",
+            authority_controls,
+        ), mock.patch.object(
+            sys,
+            "argv",
+            ["check_large_queue_guidance.py", "--self-test", "--json"],
+        ):
+            with mock.patch("builtins.print"):
+                status = guidance.main()
+
+        self.assertEqual(1, status)
+        install_controls.assert_not_called()
+        authority_controls.assert_not_called()
+
+    def test_held_panel_validator_requires_complete_held_context_before_child_launch(
+        self,
+    ) -> None:
+        child_run = mock.Mock()
+        inventory_source = Path(inventory_codec.__file__).read_bytes()
+        fixture_source = panel_validator.FIXTURES.read_bytes()
+        valid_modules = {
+            "install_inventory": {
+                "path": str(Path(inventory_codec.__file__).resolve()),
+                "sha256": hashlib.sha256(inventory_source).hexdigest(),
+                "source": inventory_source,
+            }
+        }
+        valid_resources = {
+            "panel_input_fixtures.json": {
+                "path": str(panel_validator.FIXTURES),
+                "sha256": hashlib.sha256(fixture_source).hexdigest(),
+                "source": fixture_source,
+            }
+        }
+        cases = (
+            (None, valid_resources, "authenticated install_inventory"),
+            (valid_modules, None, "authenticated panel fixture"),
+            ({"install_inventory": {}}, valid_resources, "authenticated install_inventory"),
+            (valid_modules, {"panel_input_fixtures.json": {}}, "authenticated panel fixture"),
+        )
+        for authenticated_modules, authenticated_resources, expected in cases:
+            with self.subTest(
+                authenticated_modules=authenticated_modules,
+                authenticated_resources=authenticated_resources,
+            ):
+                with mock.patch.object(
+                    panel_validator,
+                    "__authenticated_source_bytes__",
+                    b"held validator bytes",
+                    create=True,
+                ), mock.patch.object(
+                    panel_validator,
+                    "__authenticated_module_sources__",
+                    authenticated_modules,
+                    create=True,
+                ), mock.patch.object(
+                    panel_validator,
+                    "__authenticated_resource_sources__",
+                    authenticated_resources,
+                    create=True,
+                ), mock.patch.object(
+                    panel_validator.subprocess,
+                    "run",
+                    child_run,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        expected,
+                    ):
+                        panel_validator._run_production_event_validation_mutant(
+                            Path(panel_validator.__file__).resolve(),
+                            os.environ.copy(),
+                        )
+        child_run.assert_not_called()
+
+    def test_ambient_mutation_marker_cannot_short_circuit_panel_self_test(self) -> None:
+        fixtures = json.loads(panel_validator.FIXTURES.read_text(encoding="utf-8"))
+        panel_validation = mock.Mock(return_value=[])
+        mutation_child = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout=b"",
+                stderr=(
+                    b"production event validation mutation probe did not fail"
+                ),
+            )
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"PANEL_EVENT_VALIDATION_MUTANT": "1"},
+        ), mock.patch.object(
+            panel_validator,
+            "validate_panel_input",
+            panel_validation,
+        ), mock.patch.object(
+            panel_validator,
+            "_run_production_event_validation_mutant",
+            mutation_child,
+        ):
+            panel_validator.self_test(fixtures)
+
+        self.assertGreater(panel_validation.call_count, 2)
+        mutation_child.assert_called_once()
+
+    def test_installed_panel_validator_holds_validator_and_dependency_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="installed-validator-fd-race-") as raw:
+            root = Path(raw).resolve()
+            installed = root / "overnight-workflows"
+            scripts_root = installed.joinpath(
+                *Path(guidance.PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts
+            )
+            scripts_root.mkdir(parents=True)
+            validator = scripts_root / "validate_panel_inputs.py"
+            inventory_module = scripts_root / "install_inventory.py"
+            (scripts_root / "panel_input_fixtures.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            held_sentinel = root / "held-validator-ran"
+            foreign_sentinel = root / "foreign-validator-ran"
+            held_dependency_sentinel = root / "held-dependency-ran"
+            foreign_dependency_sentinel = root / "foreign-dependency-ran"
+            inventory_module.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(held_dependency_sentinel)!r}).write_text('held', encoding='utf-8')\n"
+                "AUTHENTICATED_DEPENDENCY = True\n",
+                encoding="utf-8",
+            )
+            validator.write_text(
+                "from pathlib import Path\n"
+                "from install_inventory import AUTHENTICATED_DEPENDENCY\n"
+                "assert AUTHENTICATED_DEPENDENCY is True\n"
+                f"Path({str(held_sentinel)!r}).write_text('held', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            foreign_validator = root / "foreign-validator.py"
+            foreign_validator.write_text(
+                "from pathlib import Path\n"
+                "from install_inventory import AUTHENTICATED_DEPENDENCY\n"
+                f"Path({str(foreign_sentinel)!r}).write_text('foreign', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            foreign_inventory = root / "foreign-install-inventory.py"
+            foreign_inventory.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(foreign_dependency_sentinel)!r}).write_text('foreign', encoding='utf-8')\n"
+                "AUTHENTICATED_DEPENDENCY = False\n",
+                encoding="utf-8",
+            )
+            original_run = guidance.subprocess.run
+
+            def replace_path_then_run(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                os.replace(foreign_validator, validator)
+                os.replace(foreign_inventory, inventory_module)
+                return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+            errors: list[str] = []
+            expected_resource_sha256 = {
+                "validate_panel_inputs.py": hashlib.sha256(
+                    validator.read_bytes()
+                ).hexdigest(),
+                "install_inventory.py": hashlib.sha256(
+                    inventory_module.read_bytes()
+                ).hexdigest(),
+                "panel_input_fixtures.json": hashlib.sha256(
+                    (scripts_root / "panel_input_fixtures.json").read_bytes()
+                ).hexdigest(),
+            }
+            with mock.patch.object(
+                guidance.subprocess,
+                "run",
+                side_effect=replace_path_then_run,
+            ):
+                guidance.check_installed_panel_validator(
+                    installed,
+                    expected_resource_sha256,
+                    errors,
+                )
+
+            self.assertTrue(
+                any("authenticated installed panel validator path changed" in item for item in errors),
+                errors,
+            )
+            self.assertEqual("held", held_sentinel.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "held", held_dependency_sentinel.read_text(encoding="utf-8")
+            )
+            self.assertFalse(foreign_sentinel.exists())
+            self.assertFalse(foreign_dependency_sentinel.exists())
+            pre_open_errors: list[str] = []
+            guidance.check_installed_panel_validator(
+                installed,
+                expected_resource_sha256,
+                pre_open_errors,
+            )
+            self.assertTrue(
+                any(
+                    "differs from authenticated package mapping" in item
+                    for item in pre_open_errors
+                ),
+                pre_open_errors,
+            )
+            self.assertFalse(foreign_sentinel.exists())
+            self.assertFalse(foreign_dependency_sentinel.exists())
+
+    def test_installed_panel_validator_holds_fixture_bytes_during_replace_restore(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="installed-validator-fixture-race-") as raw:
+            root = Path(raw).resolve()
+            source_root = Path(__file__).resolve().parents[1]
+            installed = root / "overnight-workflows"
+            scripts_root = installed.joinpath(
+                *Path(guidance.PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts
+            )
+            scripts_root.mkdir(parents=True)
+            validator = scripts_root / "validate_panel_inputs.py"
+            inventory_module = scripts_root / "install_inventory.py"
+            fixtures = scripts_root / "panel_input_fixtures.json"
+            mutation_child_sentinel = root / "production-mutation-child-ran"
+            validator_source = (
+                source_root / "scripts/validate_panel_inputs.py"
+            ).read_bytes()
+            marker = (
+                b'    """Run the mutation control from held validator, '
+                b'module, and fixture bytes."""\n'
+            )
+            self.assertEqual(1, validator_source.count(marker))
+            validator_source = validator_source.replace(
+                marker,
+                marker
+                + (
+                    f"    Path({str(mutation_child_sentinel)!r}).write_text("
+                    "'ran', encoding='utf-8')\n"
+                ).encode("utf-8"),
+                1,
+            )
+            validator.write_bytes(validator_source)
+            shutil.copy2(
+                source_root / "scripts/install_inventory.py",
+                inventory_module,
+            )
+            shutil.copy2(
+                source_root / "scripts/panel_input_fixtures.json",
+                fixtures,
+            )
+            foreign_fixture = root / "foreign-panel-input-fixtures.json"
+            foreign_value = json.loads(fixtures.read_text(encoding="utf-8"))
+            production_case = next(
+                case
+                for case in foreign_value["prepare_cases"]
+                if case["name"] == "removed_production_event_validation"
+            )
+            production_case.update(
+                {
+                    "target": "record",
+                    "path": ["schema_version"],
+                    "value": 999,
+                    "expect": "must declare schema_version 3",
+                }
+            )
+            foreign_fixture.write_text(
+                json.dumps(foreign_value, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            held_fixture_backup = root / "held-panel-input-fixtures.json"
+            original_run = guidance.subprocess.run
+
+            def replace_fixture_then_restore(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                os.replace(fixtures, held_fixture_backup)
+                os.replace(foreign_fixture, fixtures)
+                try:
+                    return original_run(command, **kwargs)  # type: ignore[arg-type]
+                finally:
+                    os.replace(fixtures, foreign_fixture)
+                    os.replace(held_fixture_backup, fixtures)
+
+            errors: list[str] = []
+            expected_resource_sha256 = {
+                "validate_panel_inputs.py": hashlib.sha256(
+                    validator.read_bytes()
+                ).hexdigest(),
+                "install_inventory.py": hashlib.sha256(
+                    inventory_module.read_bytes()
+                ).hexdigest(),
+                "panel_input_fixtures.json": hashlib.sha256(
+                    fixtures.read_bytes()
+                ).hexdigest(),
+            }
+            with mock.patch.object(
+                guidance.subprocess,
+                "run",
+                side_effect=replace_fixture_then_restore,
+            ):
+                guidance.check_installed_panel_validator(
+                    installed,
+                    expected_resource_sha256,
+                    errors,
+                )
+
+            self.assertTrue(
+                any(
+                    "authenticated installed panel validator fixture dependency"
+                    in error
+                    for error in errors
+                ),
+                errors,
+            )
+            self.assertEqual(
+                "ran", mutation_child_sentinel.read_text(encoding="utf-8")
+            )
+
+    def test_loaded_route_uses_held_bytes_when_path_is_replaced_before_execution(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="loaded-route-race-") as raw:
+            root = Path(raw).resolve()
+            helper = root / "authority.py"
+            held_sentinel = root / "held-route-ran"
+            foreign_sentinel = root / "foreign-route-ran"
+            helper.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(held_sentinel)!r}).write_text('held', encoding='utf-8')\n"
+                "ORIGIN = 'held'\n",
+                encoding="utf-8",
+            )
+            expected_sha256 = hashlib.sha256(helper.read_bytes()).hexdigest()
+            foreign = root / "foreign-route.py"
+            foreign.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(foreign_sentinel)!r}).write_text('foreign', encoding='utf-8')\n"
+                "ORIGIN = 'foreign'\n",
+                encoding="utf-8",
+            )
+            original_compile = compile
+            injected = False
+
+            def inject_replacement() -> None:
+                nonlocal injected
+                if not injected:
+                    os.replace(foreign, helper)
+                    injected = True
+
+            def replace_before_compile(
+                source: object,
+                filename: object,
+                mode: object,
+                *args: object,
+                **kwargs: object,
+            ) -> object:
+                inject_replacement()
+                return original_compile(  # type: ignore[call-overload]
+                    source, filename, mode, *args, **kwargs
+                )
+
+            with mock.patch(
+                "builtins.compile",
+                side_effect=replace_before_compile,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "authenticated routed helper path changed",
+                ):
+                    guidance._load_routed_helper(
+                        helper,
+                        "authority helper",
+                        expected_sha256,
+                    )
+
+            self.assertTrue(injected)
+            self.assertEqual("held", held_sentinel.read_text(encoding="utf-8"))
+            self.assertFalse(foreign_sentinel.exists())
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "differs from authenticated package mapping",
+            ):
+                guidance._load_routed_helper(
+                    helper,
+                    "authority helper",
+                    expected_sha256,
+                )
+            self.assertFalse(foreign_sentinel.exists())
+
+    def test_real_prepare_checker_accepts_read_only_source_and_holds_executed_bytes(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix="publisher-real-read-only-") as raw:
             root = Path(raw).resolve()
             canonical_root = Path(__file__).resolve().parents[1]
@@ -918,6 +1946,136 @@ class PublicationTests(unittest.TestCase):
             outcomes = receipt["staged_validation"]["named_mutation_outcomes"]
             self.assertGreaterEqual(len(outcomes), 1)
             self.assertTrue(all(result == "PASS" for result in outcomes.values()))
+            authenticated_launch = receipt["staged_validation"]["authenticated_launch"]
+            self.assertEqual("held-python-fd-v1", authenticated_launch["protocol"])
+            self.assertEqual(
+                receipt["staged_validation"]["argv"],
+                authenticated_launch["logical_argv"],
+            )
+            self.assertEqual(["-I", "-B"], authenticated_launch["isolation_flags"])
+            self.assertEqual(
+                "inherited-read-only-file-descriptor",
+                authenticated_launch["source_transport"],
+            )
+            self.assertEqual(
+                publisher.AUTHENTICATED_VALIDATION_SOURCE_PATHS,
+                set(authenticated_launch["authenticated_source_sha256"]),
+            )
+
+            foreign_sentinel = root / "foreign-real-checker-ran"
+            foreign = root / "foreign-real-checker.py"
+            foreign.write_text(
+                "import json\n"
+                "from pathlib import Path\n"
+                f"Path({str(foreign_sentinel)!r}).write_text('foreign', encoding='utf-8')\n"
+                "print(json.dumps({'schema_version': 1, 'status': 'PASS', "
+                "'named_mutation_outcomes': {'FOREIGN_CHECKER_RAN': 'PASS'}}, "
+                "sort_keys=True))\n",
+                encoding="utf-8",
+            )
+            original_run = inventory_codec.subprocess.run
+            injected_paths: list[Path] = []
+            real_checker_statuses: list[int] = []
+
+            def replace_real_checker_then_run(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                passed = kwargs.get("pass_fds")
+                if passed and not injected_paths:
+                    checker_paths = [
+                        Path(argument)
+                        for argument in command
+                        if argument.endswith("/scripts/check_large_queue_guidance.py")
+                    ]
+                    self.assertEqual(1, len(checker_paths))
+                    checker_path = checker_paths[0]
+                    os.chmod(checker_path.parent, 0o700)
+                    try:
+                        os.replace(foreign, checker_path)
+                    finally:
+                        os.chmod(checker_path.parent, 0o500)
+                    injected_paths.append(checker_path)
+                    completed = original_run(command, **kwargs)  # type: ignore[arg-type]
+                    real_checker_statuses.append(completed.returncode)
+                    return completed
+                return original_run(command, **kwargs)  # type: ignore[arg-type]
+
+            with mock.patch.object(
+                inventory_codec.subprocess,
+                "run",
+                side_effect=replace_real_checker_then_run,
+            ):
+                with self.assertRaisesRegex(
+                    publisher.PublicationError,
+                    "authenticated installed-root checker path changed",
+                ):
+                    publisher.prepare_operation(
+                        source_repository=repository,
+                        source_commit=commit,
+                        expected_live_source_commit=commit,
+                        manifest_path=manifest_path,
+                        install_root=install_root,
+                        state_root=state_root,
+                        evidence_root=root / "evidence/held-real-checker",
+                        operation="held-real-checker",
+                    )
+
+            self.assertEqual(1, len(injected_paths))
+            self.assertEqual([0], real_checker_statuses)
+            self.assertFalse(foreign_sentinel.exists())
+
+            nested_operation = "held-real-nested-validator"
+            nested_paths = publisher._operation_paths(state_root, nested_operation)
+            nested_source_validator = (
+                nested_paths["source"] / "scripts/validate_panel_inputs.py"
+            )
+            nested_installed_validator = nested_paths["slot"].joinpath(
+                *Path(guidance.PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts,
+                "validate_panel_inputs.py",
+            )
+            foreign_nested_sentinel = root / "foreign-real-nested-validator-ran"
+            foreign_source_validator = root / "foreign-source-validator.py"
+            foreign_installed_validator = root / "foreign-installed-validator.py"
+            foreign_validator_bytes = (
+                "from pathlib import Path\n"
+                f"Path({str(foreign_nested_sentinel)!r}).write_text("
+                "'foreign', encoding='utf-8')\n"
+            ).encode("utf-8")
+            foreign_source_validator.write_bytes(foreign_validator_bytes)
+            foreign_installed_validator.write_bytes(foreign_validator_bytes)
+            original_launcher = inventory_codec._HELD_PYTHON_FD_LAUNCHER
+            nested_swap_prefix = (
+                "from pathlib import Path\n"
+                "import os\n"
+                f"replacements = {[(str(foreign_source_validator), str(nested_source_validator)), (str(foreign_installed_validator), str(nested_installed_validator))]!r}\n"
+                "for replacement, destination in replacements:\n"
+                "    parent = Path(destination).parent\n"
+                "    os.chmod(parent, 0o700)\n"
+                "    try:\n"
+                "        os.replace(replacement, destination)\n"
+                "    finally:\n"
+                "        os.chmod(parent, 0o500)\n"
+            )
+            with mock.patch.object(
+                inventory_codec,
+                "_HELD_PYTHON_FD_LAUNCHER",
+                nested_swap_prefix + original_launcher,
+            ):
+                with self.assertRaisesRegex(
+                    publisher.ValidationFailure,
+                    "installed-root checker --self-test failed",
+                ):
+                    publisher.prepare_operation(
+                        source_repository=repository,
+                        source_commit=commit,
+                        expected_live_source_commit=commit,
+                        manifest_path=manifest_path,
+                        install_root=install_root,
+                        state_root=state_root,
+                        evidence_root=root / "evidence/held-real-nested-validator",
+                        operation=nested_operation,
+                    )
+            self.assertFalse(foreign_nested_sentinel.exists())
 
     def test_prepare_rejects_incorrect_expected_live_source_commit(self) -> None:
         temporary, harness = self.make_harness()

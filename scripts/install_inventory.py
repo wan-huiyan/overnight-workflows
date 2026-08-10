@@ -5,16 +5,69 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+import subprocess
+import sys
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 
 INVENTORY_FORMAT = "sha256-size-path-v1"
 HEX_64_RE = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_COMPONENT_FORBIDDEN = {"", ".", ".."}
+_HELD_PYTHON_FD_LAUNCHER = r"""
+import hashlib
+import json
+import os
+import stat
+import sys
+
+descriptor = int(sys.argv[1])
+expected_sha256 = sys.argv[2]
+display_path = sys.argv[3]
+authenticated_source_sha256 = json.loads(sys.argv[4])
+script_arguments = sys.argv[5:]
+before = os.fstat(descriptor)
+if not stat.S_ISREG(before.st_mode):
+    raise SystemExit("held Python source is not a regular file")
+chunks = []
+offset = 0
+while True:
+    chunk = os.pread(descriptor, 1024 * 1024, offset)
+    if not chunk:
+        break
+    chunks.append(chunk)
+    offset += len(chunk)
+source = b"".join(chunks)
+after = os.fstat(descriptor)
+identity = lambda value: (
+    value.st_dev,
+    value.st_ino,
+    value.st_size,
+    value.st_mtime_ns,
+    value.st_ctime_ns,
+)
+if identity(before) != identity(after) or len(source) != after.st_size:
+    raise SystemExit("held Python source changed while it was read")
+if hashlib.sha256(source).hexdigest() != expected_sha256:
+    raise SystemExit("held Python source digest differs from authenticated bytes")
+sys.argv = [display_path, *script_arguments]
+namespace = {
+    "__name__": "__main__",
+    "__file__": display_path,
+    "__package__": None,
+    "__cached__": None,
+    "__loader__": None,
+    "__spec__": None,
+    "__builtins__": __builtins__,
+    "__authenticated_source_bytes__": source,
+    "__authenticated_source_sha256__": authenticated_source_sha256,
+}
+exec(compile(source, display_path, "exec"), namespace, namespace)
+"""
 
 
 class PublicationError(RuntimeError):
@@ -157,6 +210,125 @@ def _safe_absolute(path: Path, *, label: str, must_exist: bool = False) -> Path:
     if must_exist and not path.exists():
         raise PublicationError(f"{label} does not exist: {path}")
     return path
+
+
+def run_authenticated_python(
+    path: Path,
+    arguments: Sequence[str],
+    *,
+    expected_sha256: str,
+    cwd: Optional[Path] = None,
+    timeout: Optional[float] = None,
+    label: str = "Python source",
+    authenticated_source_sha256: Optional[Mapping[str, str]] = None,
+) -> Tuple[subprocess.CompletedProcess[bytes], str]:
+    """Execute exact regular-file bytes through a held descriptor and isolated Python."""
+    path = _safe_absolute(path, label=label, must_exist=True)
+    authenticated_context: Optional[Dict[str, str]] = None
+    if authenticated_source_sha256 is not None:
+        authenticated_context = {}
+        for source_path, digest in authenticated_source_sha256.items():
+            _validate_relative_path(source_path, label="authenticated source path")
+            if not isinstance(digest, str) or not HEX_64_RE.fullmatch(digest):
+                raise PublicationError(
+                    f"invalid authenticated source SHA-256 for {source_path!r}"
+                )
+            authenticated_context[source_path] = digest
+    authenticated_context_json = json.dumps(
+        authenticated_context,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    observed = os.lstat(path)
+    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+        raise PublicationError(f"{label} is not a regular single-link file: {path}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (observed.st_dev, observed.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise PublicationError(f"{label} changed before it was opened: {path}")
+        chunks: List[bytes] = []
+        offset = 0
+        while True:
+            chunk = os.pread(descriptor, 1024 * 1024, offset)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            offset += len(chunk)
+        source = b"".join(chunks)
+        after_read = os.fstat(descriptor)
+        identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if identity != (
+            after_read.st_dev,
+            after_read.st_ino,
+            after_read.st_size,
+            after_read.st_mtime_ns,
+            after_read.st_ctime_ns,
+        ) or len(source) != after_read.st_size:
+            raise PublicationError(f"{label} changed while it was read: {path}")
+        digest = hashlib.sha256(source).hexdigest()
+        if digest != expected_sha256:
+            raise PublicationError(f"{label} differs from authenticated expected bytes")
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    _HELD_PYTHON_FD_LAUNCHER,
+                    str(descriptor),
+                    digest,
+                    str(path),
+                    authenticated_context_json,
+                    *arguments,
+                ],
+                cwd=str(cwd) if cwd else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=timeout,
+                pass_fds=(descriptor,),
+            )
+        except OSError as exc:
+            raise PublicationError(f"cannot execute authenticated {label}: {exc}") from exc
+        try:
+            current = os.lstat(path)
+        except FileNotFoundError as exc:
+            raise PublicationError(
+                f"authenticated {label} path changed during execution"
+            ) from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != identity[:2]
+        ):
+            raise PublicationError(f"authenticated {label} path changed during execution")
+        held = os.fstat(descriptor)
+        if (
+            held.st_dev,
+            held.st_ino,
+            held.st_size,
+            held.st_mtime_ns,
+            held.st_ctime_ns,
+        ) != identity:
+            raise PublicationError(f"authenticated {label} bytes changed during execution")
+        return completed, digest
+    finally:
+        os.close(descriptor)
 
 
 def _hash_open_file(directory_fd: int, name: str, observed: os.stat_result) -> Tuple[str, int]:
