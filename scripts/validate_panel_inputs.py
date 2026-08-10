@@ -100,6 +100,12 @@ AUTHENTICATED_LAUNCH_FIELDS = {
     "authenticated_source_sha256",
 }
 AUTHENTICATED_LAUNCH_PROTOCOL = "held-python-fd-v1"
+STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS = 300
+STAGED_CHECKER_NESTED_VALIDATOR_TIMEOUT_SECONDS = 120
+STAGED_CHECKER_NON_VALIDATOR_OVERHEAD_SECONDS = 60
+STAGED_CHECKER_REQUIRED_HEADROOM_SECONDS = 120
+PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS = 60
+PANEL_VALIDATOR_REQUIRED_PARENT_MARGIN_SECONDS = 60
 AUTHENTICATED_VALIDATION_SOURCE_PATHS = frozenset(
     {
         "scripts/install_inventory.py",
@@ -218,6 +224,45 @@ FIXTURE_CLASSES = {
     "file_safety_cases": FILE_SAFETY_NAMES,
     "compatibility_cases": COMPATIBILITY_NAMES,
 }
+
+
+def check_validation_time_budget_contract(errors: list[str]) -> None:
+    """Require enough outer time for the nested validator and checker work."""
+    if STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS != 300:
+        errors.append("staged checker replay timeout budget must be 300 seconds")
+    if STAGED_CHECKER_NESTED_VALIDATOR_TIMEOUT_SECONDS != 120:
+        errors.append(
+            "staged checker nested validator timeout budget must be 120 seconds"
+        )
+    if STAGED_CHECKER_NON_VALIDATOR_OVERHEAD_SECONDS != 60:
+        errors.append("staged checker non-validator overhead budget must be 60 seconds")
+    if STAGED_CHECKER_REQUIRED_HEADROOM_SECONDS != 120:
+        errors.append("staged checker required headroom must be 120 seconds")
+    if PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS != 60:
+        errors.append(
+            "production event validation mutant timeout budget must be 60 seconds"
+        )
+    if PANEL_VALIDATOR_REQUIRED_PARENT_MARGIN_SECONDS != 60:
+        errors.append("panel validator required parent margin must be 60 seconds")
+    if (
+        PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS
+        + PANEL_VALIDATOR_REQUIRED_PARENT_MARGIN_SECONDS
+        > STAGED_CHECKER_NESTED_VALIDATOR_TIMEOUT_SECONDS
+    ):
+        errors.append(
+            "production event validation mutant budget must retain a 60-second "
+            "panel-validator parent margin"
+        )
+    remaining = (
+        STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS
+        - STAGED_CHECKER_NESTED_VALIDATOR_TIMEOUT_SECONDS
+        - STAGED_CHECKER_NON_VALIDATOR_OVERHEAD_SECONDS
+    )
+    if remaining < STAGED_CHECKER_REQUIRED_HEADROOM_SECONDS:
+        errors.append(
+            "staged checker replay budget must retain at least 120 seconds of "
+            "headroom after the nested validator and checker overhead"
+        )
 
 
 def absolute(value: Any) -> Optional[Path]:
@@ -768,13 +813,18 @@ def validate_staged_validation(
                 argv[2:],
                 expected_sha256=checker_inventory_entry["sha256"],
                 cwd=immutable_root,
-                timeout=120,
+                timeout=STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS,
                 label="staged checker",
                 authenticated_source_sha256=checker_inventory_entry.get(
                     "authenticated_source_sha256"
                 ),
             )
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            errors.append(
+                "prepare staged checker timed out after "
+                f"{STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS} seconds: {exc}"
+            )
+        except (OSError, RuntimeError) as exc:
             errors.append(f"prepare staged checker could not be re-executed: {exc}")
         else:
             exit_status = completed.returncode
@@ -787,6 +837,22 @@ def validate_staged_validation(
             except (UnicodeError, json.JSONDecodeError) as exc:
                 errors.append(f"fresh staged checker result is malformed: {exc}")
             else:
+                if isinstance(fresh_result, dict) and fresh_result.get("status") == "FAIL":
+                    child_errors = fresh_result.get("errors")
+                    if (
+                        isinstance(child_errors, list)
+                        and child_errors
+                        and all(isinstance(item, str) and item for item in child_errors)
+                    ):
+                        errors.append(
+                            "fresh staged checker reported FAIL: "
+                            + " | ".join(child_errors)
+                        )
+                    else:
+                        errors.append(
+                            "fresh staged checker reported FAIL without a nonempty "
+                            "string errors list"
+                        )
                 if exit_status != staged.get("exit_status"):
                     errors.append("fresh staged checker exit status differs from recorded result")
                 if fresh_stderr_text != staged.get("stderr"):
@@ -1385,12 +1451,13 @@ def _run_production_event_validation_mutant(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
-        timeout=120,
+        timeout=PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS,
     )
 
 
 def self_test(fixtures: dict[str, Any]) -> list[str]:
     errors = fixture_errors(fixtures)
+    check_validation_time_budget_contract(errors)
     if errors:
         return errors
     for section in FIXTURE_CLASSES:
@@ -1920,18 +1987,27 @@ def self_test(fixtures: dict[str, Any]) -> list[str]:
             elif case["target"] == "production":
                 source_path = Path(__file__).resolve()
                 mutant_environment = os.environ.copy()
-                completed = _run_production_event_validation_mutant(
-                    source_path,
-                    mutant_environment,
-                )
-                combined_output = (completed.stdout + completed.stderr).decode(
-                    "utf-8", "replace"
-                )
-                production_found = (
-                    [case["expect"]]
-                    if completed.returncode != 0 and case["expect"] in combined_output
-                    else []
-                )
+                try:
+                    completed = _run_production_event_validation_mutant(
+                        source_path,
+                        mutant_environment,
+                    )
+                except subprocess.TimeoutExpired:
+                    errors.append(
+                        "production event validation mutant timed out after "
+                        f"{PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS} seconds"
+                    )
+                    production_found = []
+                else:
+                    combined_output = (completed.stdout + completed.stderr).decode(
+                        "utf-8", "replace"
+                    )
+                    production_found = (
+                        [case["expect"]]
+                        if completed.returncode != 0
+                        and case["expect"] in combined_output
+                        else []
+                    )
             found = (
                 production_found
                 if production_found is not None
@@ -2079,6 +2155,7 @@ def main() -> int:
     args = parser.parse_args()
     if not args.manifest and not args.self_test: parser.error("provide --manifest and/or --self-test")
     errors: list[str] = []
+    check_validation_time_budget_contract(errors)
     try: fixtures = _load_panel_fixtures()
     except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError) as exc:
         fixtures = {}; errors.append(f"cannot read panel fixtures: {exc}")
@@ -2097,6 +2174,10 @@ def main() -> int:
     if args.json:
         outcomes: dict[str, str] = {}
         if args.self_test:
+            outcomes["panel.production_event_mutant.timeout_budget_60_seconds"] = "PASS"
+            outcomes["panel.production_event_mutant.parent_margin_60_seconds"] = "PASS"
+            outcomes["panel.staged_checker.timeout_budget_300_seconds"] = "PASS"
+            outcomes["panel.staged_checker.timeout_headroom_120_seconds"] = "PASS"
             outcomes["panel.schema3.non_doodle_repository_roles"] = "PASS"
             outcomes["panel.schema2.legacy_two_repository_read"] = "PASS"
             for section in FIXTURE_CLASSES:

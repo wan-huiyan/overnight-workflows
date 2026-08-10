@@ -86,10 +86,18 @@
         {
           "version": "1.5.3",
           "content_version": "1.5.3",
-          "source_commit": "working-tree-release",
+          "source_commit": "4b077cb517202938cfbfcd748f0d3da0986d5b35",
           "payload_sha256": "b504eaee7298b6e8cc46b9fa006f858406d5e6310bfa9d6149b40d3ca0dd84b5",
           "file_count": 3,
           "total_bytes": 97672
+        },
+        {
+          "version": "1.5.4",
+          "content_version": "1.5.4",
+          "source_commit": "working-tree-release",
+          "payload_sha256": "8a68e7697242c53902fc34fa5d76e793e1a6950a4c747ec084bdcb4dccce0023",
+          "file_count": 3,
+          "total_bytes": 98416
         }
       ]
     },

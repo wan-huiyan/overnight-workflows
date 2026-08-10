@@ -624,6 +624,17 @@ fi
 python3 -B "$PANEL_VALIDATOR" --self-test --manifest "$PANEL_MANIFEST"
 ```
 
+The validator's production-event mutation child has 60 seconds. The installed
+checker gives the parent panel-validator self-test 120 seconds, preserving a
+60-second parent margin. The panel validator gives a complete authenticated
+checker replay 300 seconds: 120 seconds for that nested validator, 60 seconds
+for the checker's other controls, and at least 120 seconds of remaining
+headroom. These are named self-test contracts rather than incidental
+subprocess defaults. A child checker that returns JSON `FAIL` must expose its
+`errors` in the outer panel diagnostics, and any timeout must name the budget
+that expired. Keep every parent budget larger than its child budget plus
+explicit overhead; do not make parent and child timeouts equal.
+
 Run that schema-3 validation before dispatch and again before acceptance. A
 missing validator or dependency, a failed self-test, missing fields, or any
 ref, argv, diff, manifest, inventory, source, or generation drift invalidates

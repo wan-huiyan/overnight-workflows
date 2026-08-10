@@ -785,6 +785,460 @@ class PublicationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="publisher-operation-")
         return temporary, PublisherHarness(Path(temporary.name).resolve())
 
+    def make_staged_checker_fixture(
+        self, root: Path
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        list[str],
+        bytes,
+    ]:
+        immutable_root = root / "operation/immutable-source"
+        checker = immutable_root / "scripts/check_large_queue_guidance.py"
+        exchange_slot = immutable_root.parent / "exchange-slot"
+        checker.parent.mkdir(parents=True)
+        exchange_slot.mkdir()
+        checker.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        checker_bytes = checker.read_bytes()
+        checker_sha256 = hashlib.sha256(checker_bytes).hexdigest()
+        authenticated_source_sha256 = {
+            "scripts/validate_panel_inputs.py": "1" * 64,
+        }
+        logical_argv = [
+            str(Path(sys.executable).resolve()),
+            str(checker),
+            "--installed-root",
+            str(exchange_slot),
+            "--self-test",
+            "--json",
+        ]
+        result = {
+            "schema_version": 1,
+            "status": "PASS",
+            "named_mutation_outcomes": {"timing.contract": "PASS"},
+        }
+        stdout = (
+            json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        staged = {
+            "argv": logical_argv,
+            "authenticated_launch": {
+                "protocol": "held-python-fd-v1",
+                "python_executable": logical_argv[0],
+                "isolation_flags": ["-I", "-B"],
+                "source_transport": "inherited-read-only-file-descriptor",
+                "source_path": logical_argv[1],
+                "source_sha256": checker_sha256,
+                "logical_argv": logical_argv,
+                "authenticated_source_sha256": authenticated_source_sha256,
+            },
+            "checker_sha256": checker_sha256,
+            "exit_status": 0,
+            "named_mutation_outcomes": result["named_mutation_outcomes"],
+            "result": result,
+            "stderr": "",
+            "stdout": stdout.decode("utf-8"),
+        }
+        receipt: dict[str, object] = {
+            "immutable_source": {"root": str(immutable_root)},
+            "staged_validation": staged,
+            "named_mutation_outcomes": {
+                "staged": result["named_mutation_outcomes"]
+            },
+        }
+        checker_inventory_entry: dict[str, object] = {
+            "path": "scripts/check_large_queue_guidance.py",
+            "sha256": checker_sha256,
+            "bytes": len(checker_bytes),
+            "authenticated_source_sha256": authenticated_source_sha256,
+        }
+        return receipt, checker_inventory_entry, logical_argv, stdout
+
+    def test_nested_panel_validator_uses_120_second_named_budget_and_held_launch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="panel-validator-time-budget-") as raw:
+            scripts_root = Path(raw).resolve()
+            validator = scripts_root / "validate_panel_inputs.py"
+            inventory_module = scripts_root / "install_inventory.py"
+            fixtures = scripts_root / "panel_input_fixtures.json"
+            validator.write_bytes(b"validator\n")
+            inventory_module.write_bytes(b"inventory\n")
+            fixtures.write_bytes(b"{}\n")
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout="", stderr=""
+            )
+            with mock.patch.object(
+                guidance.subprocess,
+                "run",
+                return_value=completed,
+            ) as child:
+                observed = guidance._run_authenticated_installed_validator(
+                    validator,
+                    inventory_module,
+                    fixtures,
+                    expected_validator_sha256=hashlib.sha256(
+                        validator.read_bytes()
+                    ).hexdigest(),
+                    expected_inventory_sha256=hashlib.sha256(
+                        inventory_module.read_bytes()
+                    ).hexdigest(),
+                    expected_fixture_sha256=hashlib.sha256(
+                        fixtures.read_bytes()
+                    ).hexdigest(),
+                    cwd=str(scripts_root),
+                    env=os.environ.copy(),
+                )
+
+            self.assertIs(completed, observed)
+            command = child.call_args.args[0]
+            call = child.call_args.kwargs
+            self.assertEqual([sys.executable, "-I", "-B", "-c"], command[:4])
+            self.assertEqual("--self-test", command[-1])
+            self.assertEqual(3, len(call["pass_fds"]))
+            self.assertEqual(120, call["timeout"])
+            self.assertEqual(
+                120,
+                guidance.INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS,
+            )
+
+    def test_staged_checker_replay_uses_300_second_named_budget_and_held_launch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="staged-checker-time-budget-") as raw:
+            root = Path(raw).resolve()
+            receipt, checker_entry, logical_argv, stdout = (
+                self.make_staged_checker_fixture(root)
+            )
+            completed = subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=stdout, stderr=b""
+            )
+            errors: list[str] = []
+            with mock.patch.object(
+                panel_validator,
+                "_run_authenticated_python",
+                return_value=(completed, {}),
+            ) as child:
+                panel_validator.validate_staged_validation(
+                    receipt,
+                    {},
+                    checker_entry,
+                    True,
+                    errors,
+                )
+
+            self.assertEqual([], errors)
+            call = child.call_args
+            self.assertEqual(Path(logical_argv[1]), call.args[0])
+            self.assertEqual(logical_argv[2:], call.args[1])
+            self.assertEqual("staged checker", call.kwargs["label"])
+            self.assertEqual(300, call.kwargs["timeout"])
+            self.assertEqual(
+                checker_entry["authenticated_source_sha256"],
+                call.kwargs["authenticated_source_sha256"],
+            )
+
+    def test_production_event_mutant_uses_60_second_named_budget_and_direct_launch(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout=b"mutation rejected\n", stderr=b""
+        )
+        environment = os.environ.copy()
+        source_path = Path(panel_validator.__file__).resolve()
+        with mock.patch.object(
+            panel_validator.subprocess,
+            "run",
+            return_value=completed,
+        ) as child:
+            observed = panel_validator._run_production_event_validation_mutant(
+                source_path,
+                environment,
+            )
+
+        self.assertIs(completed, observed)
+        command = child.call_args.args[0]
+        call = child.call_args.kwargs
+        self.assertEqual([sys.executable, "-I", "-B", "-c"], command[:4])
+        self.assertEqual(
+            [str(source_path), "--self-test", "--json"],
+            command[-3:],
+        )
+        self.assertEqual(source_path.parent, call["cwd"])
+        self.assertIs(environment, call["env"])
+        self.assertIsInstance(call["input"], bytes)
+        self.assertEqual(60, call["timeout"])
+        self.assertEqual(
+            60,
+            panel_validator.PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS,
+        )
+
+    def test_production_event_mutant_timeout_is_compact_and_names_its_budget(
+        self,
+    ) -> None:
+        fixtures = json.loads(panel_validator.FIXTURES.read_text(encoding="utf-8"))
+        long_command = ["python", "x" * 5000]
+        with mock.patch.object(
+            panel_validator,
+            "validate_panel_input",
+            return_value=[],
+        ), mock.patch.object(
+            panel_validator,
+            "_run_production_event_validation_mutant",
+            side_effect=subprocess.TimeoutExpired(
+                cmd=long_command,
+                timeout=60,
+            ),
+        ):
+            errors = panel_validator.self_test(fixtures)
+
+        expected = (
+            "production event validation mutant timed out after 60 seconds"
+        )
+        self.assertIn(expected, errors)
+        self.assertTrue(all("x" * 100 not in error for error in errors))
+
+    def test_compact_mutant_timeout_survives_checker_diagnostic_cap(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="compact-mutant-timeout-") as raw:
+            installed = Path(raw).resolve() / "overnight-workflows"
+            scripts_root = installed.joinpath(
+                *Path(guidance.PANEL_VALIDATOR_INSTALLED_DIRECTORY).parts
+            )
+            scripts_root.mkdir(parents=True)
+            for resource in guidance.PANEL_VALIDATOR_RESOURCES:
+                (scripts_root / resource).write_text("fixture\n", encoding="utf-8")
+            message = (
+                "production event validation mutant timed out after 60 seconds"
+            )
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr=f"ERROR: {message}\n",
+            )
+            errors: list[str] = []
+            with mock.patch.object(
+                guidance,
+                "_run_authenticated_installed_validator",
+                return_value=completed,
+            ):
+                guidance.check_installed_panel_validator(
+                    installed,
+                    {resource: "0" * 64 for resource in guidance.PANEL_VALIDATOR_RESOURCES},
+                    errors,
+                )
+
+        self.assertTrue(any(message in error for error in errors), errors)
+
+    def test_staged_checker_budget_keeps_explicit_overhead_and_headroom(
+        self,
+    ) -> None:
+        self.assertEqual(
+            300,
+            panel_validator.STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            60,
+            panel_validator.STAGED_CHECKER_NON_VALIDATOR_OVERHEAD_SECONDS,
+        )
+        self.assertEqual(
+            guidance.INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS,
+            panel_validator.STAGED_CHECKER_NESTED_VALIDATOR_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            60,
+            panel_validator.PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            60,
+            panel_validator.PANEL_VALIDATOR_REQUIRED_PARENT_MARGIN_SECONDS,
+        )
+        self.assertLessEqual(
+            panel_validator.PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS
+            + panel_validator.PANEL_VALIDATOR_REQUIRED_PARENT_MARGIN_SECONDS,
+            guidance.INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
+            120,
+            panel_validator.STAGED_CHECKER_REQUIRED_HEADROOM_SECONDS,
+        )
+        remaining = (
+            panel_validator.STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS
+            - guidance.INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS
+            - panel_validator.STAGED_CHECKER_NON_VALIDATOR_OVERHEAD_SECONDS
+        )
+        self.assertGreaterEqual(
+            remaining,
+            panel_validator.STAGED_CHECKER_REQUIRED_HEADROOM_SECONDS,
+        )
+
+    def test_time_budget_mutants_fail_named_self_test_contracts(self) -> None:
+        checker_errors: list[str] = []
+        with mock.patch.object(
+            guidance,
+            "INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS",
+            45,
+        ):
+            guidance.check_validation_time_budget_contract(checker_errors)
+        self.assertTrue(
+            any("120 seconds" in error for error in checker_errors),
+            checker_errors,
+        )
+
+        panel_errors: list[str] = []
+        with mock.patch.object(
+            panel_validator,
+            "STAGED_CHECKER_REPLAY_TIMEOUT_SECONDS",
+            120,
+        ):
+            panel_validator.check_validation_time_budget_contract(panel_errors)
+        self.assertTrue(
+            any("headroom" in error for error in panel_errors),
+            panel_errors,
+        )
+
+        deepest_child_errors: list[str] = []
+        with mock.patch.object(
+            panel_validator,
+            "PRODUCTION_EVENT_VALIDATION_MUTANT_TIMEOUT_SECONDS",
+            120,
+        ):
+            panel_validator.check_validation_time_budget_contract(
+                deepest_child_errors
+            )
+        self.assertTrue(
+            any("parent margin" in error for error in deepest_child_errors),
+            deepest_child_errors,
+        )
+
+        checker_outcomes = guidance.named_self_test_outcomes(
+            {},
+            {},
+            {"positive": [], "negative": []},
+            "",
+            False,
+        )
+        self.assertEqual(
+            "PASS",
+            checker_outcomes[
+                "install.panel_validator.timeout_budget_120_seconds"
+            ],
+        )
+
+        fixtures = {section: [] for section in panel_validator.FIXTURE_CLASSES}
+        stdout = io.StringIO()
+        with mock.patch.object(
+            panel_validator,
+            "_load_panel_fixtures",
+            return_value=fixtures,
+        ), mock.patch.object(
+            panel_validator,
+            "fixture_errors",
+            return_value=[],
+        ), mock.patch.object(
+            panel_validator,
+            "self_test",
+            return_value=[],
+        ), mock.patch.object(
+            sys,
+            "argv",
+            ["validate_panel_inputs.py", "--self-test", "--json"],
+        ), contextlib.redirect_stdout(stdout):
+            status = panel_validator.main()
+        self.assertEqual(0, status)
+        panel_outcomes = json.loads(stdout.getvalue())["named_mutation_outcomes"]
+        self.assertEqual(
+            "PASS",
+            panel_outcomes["panel.staged_checker.timeout_budget_300_seconds"],
+        )
+        self.assertEqual(
+            "PASS",
+            panel_outcomes["panel.staged_checker.timeout_headroom_120_seconds"],
+        )
+        self.assertEqual(
+            "PASS",
+            panel_outcomes[
+                "panel.production_event_mutant.timeout_budget_60_seconds"
+            ],
+        )
+        self.assertEqual(
+            "PASS",
+            panel_outcomes[
+                "panel.production_event_mutant.parent_margin_60_seconds"
+            ],
+        )
+
+    def test_staged_checker_replay_surfaces_child_json_failure_and_timeout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="staged-checker-diagnostics-") as raw:
+            root = Path(raw).resolve()
+            receipt, checker_entry, _logical_argv, _stdout = (
+                self.make_staged_checker_fixture(root)
+            )
+            child_message = (
+                "production event validation mutant timed out after 60 seconds"
+            )
+            failure = {
+                "schema_version": 1,
+                "status": "FAIL",
+                "named_mutation_outcomes": {},
+                "errors": [child_message],
+            }
+            completed = subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout=(
+                    json.dumps(failure, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                ).encode("utf-8"),
+                stderr=b"",
+            )
+            child_errors: list[str] = []
+            with mock.patch.object(
+                panel_validator,
+                "_run_authenticated_python",
+                return_value=(completed, {}),
+            ):
+                panel_validator.validate_staged_validation(
+                    receipt,
+                    {},
+                    checker_entry,
+                    True,
+                    child_errors,
+                )
+            self.assertTrue(
+                any(child_message in error for error in child_errors),
+                child_errors,
+            )
+
+            timeout_errors: list[str] = []
+
+            def timeout_child(
+                _source: Path, _arguments: list[str], **kwargs: object
+            ) -> tuple[subprocess.CompletedProcess[bytes], dict[str, object]]:
+                raise subprocess.TimeoutExpired(
+                    cmd="held staged checker",
+                    timeout=kwargs["timeout"],
+                )
+
+            with mock.patch.object(
+                panel_validator,
+                "_run_authenticated_python",
+                side_effect=timeout_child,
+            ):
+                panel_validator.validate_staged_validation(
+                    receipt,
+                    {},
+                    checker_entry,
+                    True,
+                    timeout_errors,
+                )
+            self.assertTrue(
+                any("timed out after 300 seconds" in error for error in timeout_errors),
+                timeout_errors,
+            )
+
     def finalize_fixture(
         self, harness: PublisherHarness, operation: str
     ) -> tuple[Path, dict[str, Path]]:

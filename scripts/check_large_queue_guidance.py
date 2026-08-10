@@ -45,6 +45,7 @@ INSTALL_IDENTITY_FRAMING = "overnight-workflows-install-input-v1"
 INSTALL_INVENTORY_FORMAT = "sha256-size-path-v1"
 EXPECTED_CODEX_VERSION = "0.147.0"
 MULTI_ISSUE_PLUGIN = "overnight-multi-issue-implementation"
+INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS = 120
 _HELD_PYTHON_WITH_DEPENDENCIES_FD_LAUNCHER = r"""
 import hashlib
 import os
@@ -1021,7 +1022,13 @@ def check_installed_panel_validator(
             cwd=str(scripts_root),
             env=environment,
         )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        errors.append(
+            "installed panel validator self-test timed out after "
+            f"{INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS} seconds: {exc}"
+        )
+        return
+    except (OSError, RuntimeError) as exc:
         errors.append(f"installed panel validator self-test could not run: {exc}")
         return
     if completed.returncode != 0:
@@ -1195,7 +1202,7 @@ def _run_authenticated_installed_validator(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    timeout=45,
+                    timeout=INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS,
                     check=False,
                     pass_fds=(
                         validator_descriptor,
@@ -1228,6 +1235,14 @@ def _run_authenticated_installed_validator(
             os.close(inventory_descriptor)
     finally:
         os.close(validator_descriptor)
+
+
+def check_validation_time_budget_contract(errors: list[str]) -> None:
+    """Keep the nested validator budget large enough for its real self-test."""
+    if INSTALLED_PANEL_VALIDATOR_SELF_TEST_TIMEOUT_SECONDS != 120:
+        errors.append(
+            "installed panel validator self-test timeout budget must be 120 seconds"
+        )
 
 
 def check_installed_inventory(
@@ -3681,6 +3696,7 @@ def named_self_test_outcomes(
             "install.missing_markdown_autolink",
             "install.nested_skill_exposure",
             "install.panel_validator.self_test",
+            "install.panel_validator.timeout_budget_120_seconds",
             "install.panel_validator.mutating_publisher_absent",
             "install.symlink",
             "routing.unrelated_prompt",
@@ -3775,6 +3791,7 @@ def main() -> int:
         parser.error("choose only one of --real-loader, --release-gate, or --ci-loader-gate")
 
     errors: list[str] = []
+    check_validation_time_budget_contract(errors)
     try:
         skill = SKILL.read_text(encoding="utf-8")
         reference = REFERENCE.read_text(encoding="utf-8")

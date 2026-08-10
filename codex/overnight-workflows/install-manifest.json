@@ -4,7 +4,7 @@
   "layout": "per-workflow-package",
   "input_identity": {
     "format": "overnight-workflows-install-input-v1",
-    "digest": "814a03b9e622a5fe8a1d91f2fdfcd367f3c95df88d254706c4610cac8bda1e0c"
+    "digest": "b6ef6cfe44f0958d00619637c766b45d966b7b4b314b5bfb5b048771df97af74"
   },
   "evidence_inventory_format": "sha256-size-path-v1",
   "loader_contract": {
@@ -180,12 +180,12 @@
       "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
       "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
-      "source_sha256": "9dcc7642c0a65a2558ccec88f5b39a53d8b9000b7e4e33ed0024af70e37fe69a"
+      "source_sha256": "a89b21056f3efe156d8089020cce90e3c63367d82c1ceb2e3423e8e4c01ff4a5"
     },
     {
       "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
-      "source_sha256": "996af42a11b1044c75a31e594129202717436f13aebcbb2d48e175421e330298"
+      "source_sha256": "8b1ae074de656a14784e3fef0d78c4eb1c0f6616ecf985c5a18e30f6b645a439"
     },
     {
       "canonical_source": "scripts/install_inventory.py",
@@ -200,7 +200,7 @@
     {
       "canonical_source": "scripts/validate_panel_inputs.py",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py",
-      "source_sha256": "11b683949909aade39738629dafc781f0eb96836e0216c3dc63eb2710b5ff861"
+      "source_sha256": "16aeb03d5b909eb6e237531ca7a6df4882584cac339cc13fe8b13d610bc51016"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",

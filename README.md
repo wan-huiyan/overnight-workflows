@@ -368,6 +368,17 @@ All three plugins encode patterns from real overnight runs. `overnight-review-cl
 
 ## Version history
 
+- **2026-08-10** — `overnight-multi-issue-implementation` → **v1.5.4**:
+  removes a timing false negative in the authenticated prepublication check.
+  The production-event mutation child now has a named 60-second budget, its
+  panel-validator parent has 120 seconds and a 60-second margin, and the outer
+  staged-checker replay has 300 seconds. That outer budget leaves another 60
+  seconds for checker controls and at least 120 seconds of headroom.
+  Deterministic controls capture all three subprocess budgets, reject old or
+  reduced-budget mutants, preserve direct and held-file-descriptor launches,
+  and surface a child's JSON `FAIL`, error list, or timeout in the outer
+  diagnostics. The 44-file package remains unpublished and bundle `VERSION`
+  remains **1.5.0**.
 - **2026-08-09** — `overnight-multi-issue-implementation` → **v1.5.3**:
   generic raw-input rows are now postpublication-only, so prepublication
   source/staged dispatch cannot bypass its source-input validation gate. The
