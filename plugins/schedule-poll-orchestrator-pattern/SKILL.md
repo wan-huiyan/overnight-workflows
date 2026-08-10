@@ -16,11 +16,21 @@ description: |
   (in-session parent polling a subagent) — this is for scheduled-trigger
   orchestrators that need to survive session ends.
 author: Claude Code
-version: 1.0.1
-date: 2026-08-06
+version: 1.0.4
+date: 2026-08-09
 ---
 
 # Schedule-Poll Orchestrator Pattern
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Solution](#solution)
+- [Verification](#verification)
+- [Example](#example)
+- [Notes and references](#notes)
+- [Version history](#version-history)
 
 ## Problem
 
@@ -46,163 +56,199 @@ Failure modes of the fixed-timer pattern:
 
 ## Context / Trigger Conditions
 
-This skill applies when ALL of these are true:
+Use this route only for two or more scheduled tracks whose completion time is
+variable and whose successor must survive the original session ending. For
+in-session agents, use `successor-handoff`.
 
-- You have 2+ parallel tracks/subagents that run 3–12h each.
-- Track completion time has high variance (50%+ spread between fastest and
-  slowest possible finish).
-- You're dispatching via Claude Code's `schedule` skill or equivalent
-  (RemoteTrigger / CronCreate), NOT via in-session foreground Agent calls.
-- The orchestrator work (consolidation, HTML rendering, PR open) must run
-  AFTER all tracks complete.
-- You want "fire ASAP when ready" semantics, not "wake up at a fixed hour."
-
-If the tracks are in-session subagents (`Agent` tool calls), use
-`successor-handoff` instead — that's the in-session pattern.
+Routing here grants no execution authority. Before each action, read the
+recorded grant for that exact action. Commit, push, pull-request creation,
+network access, paid calls, and every other external write are separate grants.
+If a grant is absent or denied, record `MISSING_AUTHORITY` and stop at the
+durable local handoff. Local consolidation and pull-request creation are
+separate steps.
 
 ## Solution
 
-### Pattern: tracks at t+0, orchestrator polls + self-reschedules
+### Use the installed state-machine helper
 
-```
-Dispatch plan (via Skill(schedule) or equivalent):
+Resolve this workflow from the active umbrella loader and run the helper beside
+this file:
 
-  Trigger 1: "track-A"         — fire at t+0,  wallclock 4–6h
-  Trigger 2: "track-B"         — fire at t+0,  wallclock 4–6h
-  Trigger 3: "track-C"         — fire at t+0,  wallclock 4–6h
-  Trigger 4: "track-D"         — fire at t+0,  wallclock 4–6h
-  Trigger 5: "orchestrator"    — fire at t+3h  (first poll; tune to
-                                  shortest-possible track completion time)
-```
+```bash
+POLL_HELPER="$(cd "$(dirname "$ACTIVE_WORKFLOW")" && pwd -P)/scripts/poll_orchestrator.py"
+STATUS=/absolute/state/status.json
+JOURNAL=/absolute/state/orchestrator-poll.jsonl
 
-Each track writes to a shared state directory on completion:
-
-```
-state/status.json:
-{
-  "dispatch_epoch": <unix_ts>,
-  "track_a": { "phase": "complete", "completed_at": <ts>, ... },
-  "track_b": { "phase": "running",  ... },
-  "track_c": { "phase": "complete", ... },
-  "track_d": { "phase": "tapped_out", "reason": "...", ... }
-}
+python3 -B "$POLL_HELPER" init \
+  --status "$STATUS" \
+  --journal "$JOURNAL" \
+  --run-id v5-run \
+  --dispatch-epoch 1786233600 \
+  --hard-ceiling-seconds 50400 \
+  --poll-interval-seconds 1800 \
+  --track track-a --track track-b --track track-c --track track-d
 ```
 
-### Orchestrator trigger protocol
+Do not hand-edit `status.json`. Each track records its terminal result through
+`mark-track`; the helper holds one journal-derived run lock, validates the
+complete track set, atomically replaces status, and appends one locked journal
+event. The exact-schema-2 status and initialization row bind the normalized
+absolute status path, journal path, and full initialization configuration plus
+its digest. Missing, corrupt, linked, truncated, aliased, copied, or undeclared
+state fails closed before another operation can be claimed. A nonterminal
+`running` heartbeat also requires a caller-supplied stable `--update-id`; an
+exact retry reuses that ID and cannot split or overwrite the journal. Schema-1
+poll state is not migrated: inspect it manually and initialize a reviewed new
+run instead of carrying an old `CLAIMED` state forward.
 
-The orchestrator runs the following check on EVERY fire (not just the first):
-
-```python
-import json, time
-from pathlib import Path
-
-status = json.load(open("state/status.json"))
-tracks = ["track_a", "track_b", "track_c", "track_d"]
-phases = {t: status.get(t, {}).get("phase") for t in tracks}
-done = all(p in ("complete", "tapped_out") for p in phases.values())
-elapsed_h = (time.time() - status["dispatch_epoch"]) / 3600
-
-# Log the poll outcome
-Path("state/orchestrator_poll_log.jsonl").write_text(
-    json.dumps({"ts": time.time(), "phases": phases, "elapsed_h": elapsed_h}) + "\n",
-    mode="a",
-)
-
-HARD_CEILING_HOURS = 14  # or whatever your max-patience is
-
-if done:
-    # All tracks report terminal state (complete or tapped_out)
-    # Proceed to consolidation inline, stay alive through completion
-    run_consolidation_and_pr()
-elif elapsed_h < HARD_CEILING_HOURS:
-    # Re-schedule self for t+30min and exit cleanly
-    schedule_self_at(minutes_from_now=30)
-    exit(0)
-else:
-    # Force-proceed: tap-out any incomplete tracks, run anyway
-    for t in tracks:
-        if phases[t] not in ("complete", "tapped_out"):
-            status[t]["phase"] = "tapped_out"
-            status[t]["reason"] = "[TAPPED — wallclock ceiling hit]"
-    json.dump(status, open("state/status.json", "w"))
-    run_consolidation_and_pr()
+```bash
+python3 -B "$POLL_HELPER" mark-track \
+  --status "$STATUS" --journal "$JOURNAL" --run-id v5-run \
+  --track track-a --phase complete --reason "verified output complete"
 ```
 
-Key properties:
+Every scheduled orchestrator invocation has one stable trigger ID:
 
-- **First poll at t+3h** (or shortest-possible-track-complete time). Earlier
-  polls waste trigger budget; later polls delay consolidation.
-- **Re-schedule interval = 30 min.** Small enough that worst-case delay is
-  modest (30 min after last track finishes); large enough that the
-  orchestrator_poll_log stays human-scannable.
-- **Hard ceiling = 14h** (or 2× expected max track duration). Prevents
-  runaway polling if a track deadlocks.
-- **Each poll is idempotent** — the protocol is the same code whether it's
-  poll #1 or poll #6. Orchestrator trigger doesn't need to know its own
-  iteration count.
-
-### Dispatch trigger sketch (`Skill(schedule)` call)
-
+```bash
+python3 -B "$POLL_HELPER" poll \
+  --status "$STATUS" --journal "$JOURNAL" \
+  --run-id v5-run --trigger-id v5-orchestrator-0001
 ```
-Skill(schedule) with:
-  - "v5-track-A"      at t+0,   run track_prompts/A.md, max wallclock 6h
-  - "v5-track-B"      at t+0,   run track_prompts/B.md, max wallclock 4h
-  - "v5-track-C"      at t+0,   run track_prompts/C.md, max wallclock 4h
-  - "v5-track-D"      at t+0,   run track_prompts/D.md, max wallclock 6h
-  - "v5-orchestrator" at t+3h,  run RESUME_MORNING.md  (implements the
-                                 poll protocol above; may re-schedule self)
+
+Interpret the returned action literally:
+
+- `RESCHEDULE`: the helper returns one stable `next_trigger_id` and time.
+  Inspect the schedule for that ID before creating it. Creating or changing the
+  trigger requires the separately recorded network and external-write grants.
+  Before that API call, run `decide-action --action schedule-trigger`; without
+  both grants, its durable decision is `MISSING_AUTHORITY` and the route hands
+  off locally.
+- `CONSOLIDATION_CLAIMED`: the helper durably recorded the one local
+  consolidation operation ID. Run that local operation once. If it needs a
+  commit or paid call, run `decide-action --action commit` or
+  `decide-action --action paid-call` at that action point and stop unless the
+  corresponding durable decision is `AUTHORIZED`.
+- `RESUME_CONSOLIDATION_CLAIM`: do not run consolidation again. Inspect the
+  stable output path, then either complete the existing claim with its exact
+  evidence digest or stop for recovery.
+- `LOCAL_COMPLETE_EXTERNAL_ACTIONS_NOT_AUTHORIZED`: consolidation is complete;
+  no push, network call, or pull request has been authorized or attempted.
+- `RESUME_PULL_REQUEST_CLAIM`: query the remote by the returned idempotency
+  key. Do not create a second pull request.
+- `COMPLETE`: both durable claims and their exact evidence receipts are
+  complete.
+
+After local consolidation, bind its output:
+
+```bash
+python3 -B "$POLL_HELPER" complete-consolidation \
+  --status "$STATUS" --journal "$JOURNAL" --run-id v5-run \
+  --operation-id <returned-operation-id> \
+  --evidence-path /absolute/output.html --evidence-sha256 <sha256>
 ```
+
+Every external action has a separate create-once decision. For example:
+
+```bash
+python3 -B "$POLL_HELPER" decide-action \
+  --run-id v5-run --action push \
+  --decision-output /absolute/state/push-authority-decision.json \
+  --authority-receipt /absolute/authority.json
+```
+
+Only a result whose `callable` field is `true` permits that exact action. Run
+the command separately for `schedule-trigger`, `commit`, `push`,
+`pull-request`, `paid-call`, or `external-write`; one decision never authorizes
+another action. The CLI performs no external action. A loaded caller must pass
+the decision, exact action name, and its injected action callback through
+`run_guarded_action`; the guard rereads the authority receipt and calls the
+callback once only while every required grant remains present. Do not invoke a
+callback merely by branching on the serialized `callable` field.
+
+Pull-request creation is optional and separately authorized. The authority
+receipt has exact schema 1, record type
+`schedule_external_action_authority`, this run ID, an owner and UTC time, and
+exact Boolean grants for `commit`, `push`, `pull_request`, `network`,
+`paid_call`, and `external_write`. The PR action requires pull-request, network,
+and external-write grants. Commit and push each require their own prior action
+decision; a route choice or overnight request cannot supply any grant.
+
+```bash
+python3 -B "$POLL_HELPER" claim-pr \
+  --status "$STATUS" --journal "$JOURNAL" --run-id v5-run \
+  --decision-output /absolute/state/pull-request-authority-decision.json \
+  --authority-receipt /absolute/authority.json
+# Inspect or create exactly one PR using the returned idempotency key.
+python3 -B "$POLL_HELPER" complete-pr \
+  --status "$STATUS" --journal "$JOURNAL" --run-id v5-run \
+  --operation-id <returned-operation-id> \
+  --receipt-path /absolute/pr-receipt.json --receipt-sha256 <sha256>
+```
+
+The create-once PR receipt must be nonempty exact-schema JSON with record type
+`schedule_pull_request_receipt`, this run ID, the returned operation ID as both
+`operation_id` and `idempotency_key`, provider, `owner/repository`, provider PR
+identity, HTTPS URL, `OPEN` or `EXISTING_OPEN` state, and UTC time. Empty,
+wrong-operation, or drifted receipts do not complete the latch.
+
+At the hard ceiling, the helper records every incomplete track as
+`tapped_out` with a reason before claiming consolidation. It never indexes a
+missing track and never truncates status. A retry after any crash reads the
+durable `CLAIMED` or `COMPLETE` state and returns the existing operation;
+outside the injected `run_guarded_action` boundary,
+the helper itself never consolidates, commits, pushes, schedules, spends, or
+opens a pull request.
+
+### Dispatch plan
+
+Dispatch tracks at t+0 and the first orchestrator poll near the shortest
+plausible track completion. Thirty minutes is a useful default poll interval;
+the hard ceiling should be explicit and finite. Every RemoteTrigger or
+CronCreate call still needs its separately recorded external-action grant.
 
 ## Verification
 
-The pattern is working correctly when:
+Run:
 
-1. **First poll logs `done: False` with some tracks still running.** Visible
-   in `state/orchestrator_poll_log.jsonl`. Orchestrator exited without
-   running consolidation.
-2. **Next scheduled run of the orchestrator appears in the schedule list.**
-   `Skill(schedule) list` shows a new trigger at `first_poll + 30min`.
-3. **When all tracks report `phase: complete`, the next poll runs
-   consolidation.** `state/orchestrator_poll_log.jsonl` shows the `done:
-   True` entry, and PR-open + HTML-render run that same pass.
-4. **Total wallclock is close to `max(track_durations) + 30 min + consolidation`.**
-   Not close to the hard ceiling unless a track genuinely ran long.
+```bash
+python3 -m unittest scripts.test_schedule_poll_orchestrator -v
+```
+
+The controls cover first poll, missing and corrupt track state, hard ceiling,
+duplicate and concurrent triggers, crash after claim, crash after local
+completion, crash after remote PR creation, denied authority, exact replay,
+linked or partial journals, and one durable consolidation/PR claim. Also check:
+
+1. A running track returns `RESCHEDULE` without a consolidation claim.
+2. All-terminal or ceiling state creates one `CONSOLIDATION_CLAIMED` record.
+3. A duplicate consolidation trigger returns the stable operation as a resume,
+   never a second instruction to run consolidation.
+4. Denied commit, push, PR, network, paid-call, scheduling, or external-write
+   grants produce durable `MISSING_AUTHORITY` decisions and no denied call.
+5. Reintroducing an inline consolidation/PR call, an unlocked/truncating write,
+   or the invalid `Path.write_text(..., mode="a")` example fails the source
+   checker and tests.
+6. Alternate or copied status files sharing a journal cannot initialize or
+   claim; status/journal/lock aliases fail before any control-file write.
+7. A crash after the initialized state is written but before its journal row
+   retries to exactly one initialization row and a usable poll state.
 
 ## Example
 
-v5 the client ah-ha insight run (2026-04-21):
-
-- 4 tracks dispatched at t+0: Track B (LLM-autonomous, 6h budget), Track C
-  (deterministic scan, 4h budget), Track D (sub-code decomposition, 4h),
-  Track E (engagement vocab sweep, 6h).
-- Orchestrator first poll at t+3h. Expected path:
-  - Poll at t+3h: Track C done, B/D/E running → re-schedule.
-  - Poll at t+3.5h: C done, D done, B/E running → re-schedule.
-  - Poll at t+4h: C/D done, B done, E running → re-schedule.
-  - Poll at t+5.5h: all 4 done → proceed to Track F + consolidation + PR.
-- Total wallclock: ~8h for the full workflow vs. 10h had we used fixed t+10h
-  timer. Orchestrator + consolidation fires at first 30-min boundary after
-  last track finishes.
+For four tracks, initialize all four names, schedule the first poll at t+3h,
+and use a 30-minute interval. If the last track completes at t+5h, the next
+poll claims consolidation at or before t+5.5h. If a track never reports, the
+hard-ceiling poll records it as `tapped_out` and claims the same single
+consolidation operation. No PR is implied.
 
 ## Notes
 
-- **This pattern assumes tracks report completion atomically** to
-  `state/status.json`. If a track crashes without writing status, the
-  orchestrator will keep polling until hard-ceiling. Mitigation: wrap track
-  main() in `try/finally` that always writes `phase: tapped_out` with a
-  reason on exit.
-- **The first-poll delay tuning matters.** Too early and you waste polls on
-  certain-not-done state. Too late and you delay consolidation. Pick the
-  95th-percentile shortest-track-completion as a rule of thumb.
-- **Don't use this for in-session subagents.** If your tracks are `Agent`
-  tool calls in a single Claude Code session, use `successor-handoff`
-  instead. This skill is specifically for scheduled-trigger dispatch where
-  the orchestrator session may not be alive between polls.
-- **Polling infrastructure is cheap but not free.** Each poll consumes one
-  trigger invocation + a small amount of BigQuery / status-read cost.
-  Typical cost: 2–6 polls per run → negligible.
-- **Hard ceiling is a safety net, not a target.** If you routinely hit it,
-  your track budgets are wrong; fix those instead of raising the ceiling.
+- Track writers must use `mark-track`; direct writes do not participate in
+  the lock or exact expected-track contract.
+- Poll infrastructure consumes external trigger calls. Record a finite trigger
+  and cost budget before dispatch.
+- An expired timer does not authorize takeover of a claimed operation. Inspect
+  the durable claim and its evidence before any recovery decision.
 
 ## References
 
@@ -218,6 +264,16 @@ v5 the client ah-ha insight run (2026-04-21):
 
 ## Version history
 
+- **v1.0.4** (2026-08-09) — Bound exact-schema-2 state and initialization to
+  one normalized status path, journal path, full configuration digest, and
+  journal-derived run lock. Alternate, copied, aliased, and legacy claimed
+  state now fails closed; initialization can repair its one missing crash row.
+- **v1.0.3** (2026-08-09) — Replaced the non-executable polling sketch with
+  the installed, mutation-tested state machine. It atomically records one
+  consolidation/PR claim and requires separate authority for every external
+  action.
+- **v1.0.2** (2026-08-09) — Added the schedule-poll route to the Codex umbrella
+  candidate.
 - **v1.0.1** (2026-08-06) — The three References entries above were markdown
   links to `~/.claude/skills/<name>/SKILL.md`. That path only exists when a
   skill was copied in by hand; a plugin install puts it under

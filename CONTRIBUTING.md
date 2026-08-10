@@ -7,12 +7,29 @@ applies to its always-resident skill listing.
 
 ## What runs automatically
 
-**CI** (`.github/workflows/ci.yml`) runs three checks on every PR and push:
+**CI** (`.github/workflows/ci.yml`) runs eleven checks on every pull request and on pushes
+to `main`:
 
-1. `.github/scripts/validate_plugins.py` — marketplace + plugin structure.
+1. `.github/scripts/validate_plugins.py --self-test` — marketplace/plugin
+   structure plus the payload/version release ledger and its negative controls.
 2. `scripts/leak_scan.sh` — low-false-positive generic patterns: Salesforce custom fields
    (`__c` / `__r`), API keys / tokens, and real email addresses. A hit fails the check.
 3. `scripts/check_skill_descriptions.py` — the **skill-description cap gate**.
+4. `scripts/check_large_queue_guidance.py --self-test` — durable state,
+   recovery, exact routing contract, and installed-package negative controls.
+5. `scripts/validate_panel_inputs.py --self-test` — immutable diff and installed
+   evidence-snapshot omission/drift controls.
+6. `scripts/test_finalization_manifest.py` — canonical JSONL grammar, safe
+   append/seal behavior, historical controller rows, and mutation controls.
+7. `scripts/test_final_byte_review.py` — immutable renderable snapshots, independent
+   final approval, cycle binding, and byte-drift invalidation.
+8. `scripts/test_client_delivery_action_authority.py` — point-of-action deny and
+   exact-grant controls for commit, push, PR, merge, deploy, paid, and external writes.
+9. `scripts/test_schedule_poll_orchestrator.py` — idempotent poll claims,
+   crash repair, hard-ceiling, authority, concurrency, and unsafe-file controls.
+10. `scripts/test_publish_codex_install.py` — focused publisher unit tests.
+11. `scripts/publish_codex_install.py self-test` — deterministic fake-exchange
+   publication, rollback, concurrency, drift, and capability controls.
 
 ## The skill-description cap gate
 
@@ -60,7 +77,10 @@ hand: turning `trigger on X — and separately, watch for Y` into `trigger on X 
 identical word set, so every word-overlap score is blind to it, while the trigger now only fires
 for users who already diagnosed Y. `score_trigger_coverage.py` is the coverage harness and
 `scripts/eval/description-trigger-suite.json` its committed suite — if a PR quotes coverage
-numbers, they must come from a committed harness a reviewer can re-run.
+numbers, they must come from a committed harness a reviewer can re-run. Word overlap is
+diagnostic only. The nonzero overnight route gate is the exact prompt-class-to-route contract
+inside `check_large_queue_guidance.py`, backed by the real Codex loader inventory probe when
+Codex 0.147.0 is locally available.
 
 The gate script is vendored from `wan-huiyan/context-police`; fix it upstream and re-vendor
 rather than editing the copy here.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "wan-huiyan-overnight-workflows",
-  "description": "Autonomous overnight workflows for client-facing delivery and insight discovery \u2014 multi-agent review panels baked in.",
+  "description": "Autonomous overnight workflows for implementation, large live queues, client-facing delivery, and insight discovery, with durable recovery and review gates.",
   "owner": {
     "name": "wan-huiyan"
   },
@@ -10,43 +10,43 @@
       "name": "overnight-insight-discovery",
       "source": "./plugins/overnight-insight-discovery",
       "description": "Overnight autonomous B-vs-C parallel insight discovery that surfaces genuinely ah-ha findings from data, with a cohort-conditional novelty gate, an observational-analysis validity gate (composition / leak / anchor-timing / marker-vs-lever), adaptive tuning, and an agent-review-panel loop.",
-      "version": "1.2.0"
+      "version": "1.2.1"
     },
     {
       "name": "overnight-review-client-delivery",
       "source": "./plugins/overnight-review-client-delivery",
       "description": "Overnight autonomous work session that produces a polished client delivery package by morning, with an 8-agent review panel to catch factual errors before they reach the client.",
-      "version": "1.0.0"
+      "version": "1.0.3"
     },
     {
       "name": "overnight-review-panel-blocked-reviewer-reads-as-clean",
       "source": "./plugins/overnight-review-panel-blocked-reviewer-reads-as-clean",
       "description": "Companion safety pattern: in an unattended overnight review panel, a reviewer that couldn't see the code reads as a CLEAN one \u2014 usually because the code-review subagent lacks a Bash tool, so when told to `gh pr diff`/checkout a PR it returns a BLOCKED report (or reviews main, which predates the PR). Pre-generate per-base diffs + materialize worktrees + hand explicit paths, and treat BLOCKED as not-clean. Overnight specialization of the general skill code-reviewer-subagent-no-bash-blocked-on-pr-diff.",
-      "version": "1.0.1"
+      "version": "1.0.2"
     },
     {
       "name": "overnight-multi-issue-implementation",
       "source": "./plugins/overnight-multi-issue-implementation",
-      "description": "Overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1 review-panel finding set) and ships them to merged stacked PRs by morning. Builds on subagent-driven-development with overnight-specific discipline: stacked PRs (so PR2 doesn't wait on a human PR1-merge mid-night), pre-flight tracker-id audit (concurrent sessions on main steal IDs), final PR-level code review before proposing merge, review findings preserved as PR comments before squash. Sister to overnight-review-client-delivery and overnight-insight-discovery.",
-      "version": "1.4.0"
+      "description": "Overnight autonomous implementation for either a related GitHub issue cluster or a large mixed live queue, with stale and partial classification, granular authority, shared-file ownership, durable recovery, immutable base/head review, and serial integration.",
+      "version": "1.5.4"
     },
     {
       "name": "large-redesign-parallel-branch-collision-audit",
       "source": "./plugins/large-redesign-parallel-branch-collision-audit",
       "description": "Pre-flight audit before starting a large multi-PR redesign that rewrites shared files. Catches the failure mode where a long-running parallel feature branch (e.g. client-variant, staging, whitelabel) has unmerged commits touching the same files the redesign is about to rewrite \u2014 so they end up stranded with head-on conflicts that can't be cleanly cherry-picked. Sister to pre-merge-client-variant-regression-audit (audits a variant branch BEING merged into main; this audits BEFORE main diverges from a variant) and parallel-pr-scope-overlap-tiebreaker-delta-check (two simultaneous PRs vs. one redesign on main + WIP elsewhere). Companion to overnight-multi-issue-implementation for the file-collision dimension that the existing tracker-id audit doesn't cover.",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "name": "subagent-review-tier-calibration-for-overnight-pr-chains",
       "source": "./plugins/subagent-review-tier-calibration-for-overnight-pr-chains",
       "description": "Calibrate review intensity per-PR (Tier 1 two-stage / Tier 2 combined single-agent / Tier 3 bash-only verification) when orchestrating a long chain (10+ PRs) of independent tasks overnight from a single implementation plan. Specializes subagent-driven-development's review step for throughput-tuned chains: prescribes three tiers, a decision rubric, and a concrete bash-verification recipe for low-risk visual-restyle PRs. Sister to subagent-driven-development (master pattern; this specializes the review step) and overnight-multi-issue-implementation (different shape: stacked PRs from issues vs. independent PRs from plan). Companion to large-redesign-parallel-branch-collision-audit (pre-flight before STARTING a chain).",
-      "version": "1.0.0"
+      "version": "1.0.1"
     },
     {
       "name": "schedule-poll-orchestrator-pattern",
       "source": "./plugins/schedule-poll-orchestrator-pattern",
       "description": "Fire-ASAP orchestrator pattern for multi-track autonomous overnight workflows on scheduled triggers \u2014 a self-rescheduling poll loop that consolidates the moment all tracks report complete, and survives a 12-20h session end. Companion safety pattern.",
-      "version": "1.0.1"
+      "version": "1.0.4"
     },
     {
       "name": "observational-analysis-rigor",

@@ -1,0 +1,245 @@
+{
+  "schema_version": 3,
+  "installed_skill": "overnight-workflows",
+  "layout": "per-workflow-package",
+  "input_identity": {
+    "format": "overnight-workflows-install-input-v1",
+    "digest": "b6ef6cfe44f0958d00619637c766b45d966b7b4b314b5bfb5b048771df97af74"
+  },
+  "evidence_inventory_format": "sha256-size-path-v1",
+  "loader_contract": {
+    "codex_cli_version": "0.147.0",
+    "reserved_entrypoints": [
+      "SKILL.md"
+    ]
+  },
+  "mappings": [
+    {
+      "canonical_source": "codex/overnight-workflows/SKILL.md",
+      "installed_path": "SKILL.md",
+      "source_sha256": "c0004754f0a863e1a7700f921110e674a7bb62b4acf6fd1a4f8c9a8ea581c7d2"
+    },
+    {
+      "canonical_source": "codex/overnight-workflows/agents/openai.yaml",
+      "installed_path": "agents/openai.yaml",
+      "source_sha256": "28cd63985db9251f6ebc326823c0b6e0087ddadd2601d3f626b832027455ff36"
+    },
+    {
+      "canonical_source": "plugins/large-redesign-parallel-branch-collision-audit/SKILL.md",
+      "installed_path": "references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md",
+      "source_sha256": "7a819d8c69577c29b6e00ccb18a6f80701d3ff05cf44bd991957972cc9cb0df7"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/SKILL.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-insight-discovery/WORKFLOW.md",
+      "source_sha256": "178f2c0ff67fdc416fc990943821c9c170f117a6f85ebb635f7cba0e0f47edb9"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/adaptive_tuning.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/adaptive_tuning.md",
+      "source_sha256": "79390be3b36f51e84e3904e4903035d2729f33f8ac8f244f795d2689f5d2297c"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/bq_shell_quoting.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/bq_shell_quoting.md",
+      "source_sha256": "897c1ad681e6c48e5d0f2bb8482af41cbc80285a15cd51c9e862d47b2f99e5c8"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/ccr_env_toolchain_preflight.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/ccr_env_toolchain_preflight.md",
+      "source_sha256": "c90654cd2d062c798bbeec723e47b1539fe8632620e51f3e6cbdc123ca85ad15"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cdp_event_temporal_proxy.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cdp_event_temporal_proxy.md",
+      "source_sha256": "41d4512ab98499b4f5b97645386ec5d780d5862b9eabcf34b4d74e74ac2cca57"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/chart_divergence_check.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/chart_divergence_check.md",
+      "source_sha256": "3bfabde959e132f75b4e4b52fa1c7d55cdcc2e65e08c4278f244202086d4203d"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cohort_novelty_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cohort_novelty_gate.md",
+      "source_sha256": "df0aad38d7c940ac619da640517415ca77c15528844873e09cbab29f226e1cda"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/country_bucket_decomposition.sql",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/country_bucket_decomposition.sql",
+      "source_sha256": "5e2ba775ed4d6613ec0072cdb3ea8930edd7a9592b61d54e3c38b5dda31b5582"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/cross_model_tiebreaker.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/cross_model_tiebreaker.md",
+      "source_sha256": "4a4fae94fec5c5f52f85c6bdc64a883ad822dee86c2a1a23bff0bceace5ff1ea"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/meltdown_circuit_breaker.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/meltdown_circuit_breaker.md",
+      "source_sha256": "b81d60feef75449635ef5b95b6193dcc9b9bf23a22ae879cfcd18cb05095d3be"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/observational_analysis_rigor.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/observational_analysis_rigor.md",
+      "source_sha256": "ae191a5c53a52ffac2908ca201e3dd908cb27104eef704d751d70a226d7b5231"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_6_historical_scoring.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_6_historical_scoring.md",
+      "source_sha256": "641ff533d344b7fc46a227871c44f9ce8f1f015400d12690351569673bf29643"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_predispatch_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_predispatch_gate.md",
+      "source_sha256": "1d09b0b3577a061e36db0337dca60454bf12f893462036e0404bd4354a572fce"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_0_preparation.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_0_preparation.md",
+      "source_sha256": "fd6a0eb6c91673705aa65fec9c9581bee0e532a778895456ec712c7d93c38592"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_a_tracks.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_a_tracks.md",
+      "source_sha256": "88c4ed2fe76e86633220f8ceb4450e8321786e836ea12a41eddf74c649fb02bc"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_b_review_loop.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_b_review_loop.md",
+      "source_sha256": "a2e47fdbe3bb40de796176816976ce4e5a1764cbe3399076998613256ccc45b5"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/phase_c_consolidation.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/phase_c_consolidation.md",
+      "source_sha256": "3330ce81b5495268433b79fce91121923e978471a0b029240d33af55ab69b095"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sf_endpoint_defined_cohort_hazard.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sf_endpoint_defined_cohort_hazard.md",
+      "source_sha256": "886e62b25862adc55cfbb7efa6bdcc913c860682854a404a7b45129a9f5d862e"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sf_profile_per_cycle.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sf_profile_per_cycle.md",
+      "source_sha256": "1f133f2fd01e2b3e406d2167986170a7013a476803caa7579c55d095663a1ec7"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/shap_interaction_scoring.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/shap_interaction_scoring.md",
+      "source_sha256": "782d7f77c7ab07ab8c845e26923268009777fc4742c86137a6fe6edf47d35254"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/sql_reexecution_gate.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/sql_reexecution_gate.md",
+      "source_sha256": "899229d7112f8e46ab6ca8c6930111f182b46a75e2fcc1f5d5aa825d4609ad35"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/references/stitched_view_case_completeness.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/references/stitched_view_case_completeness.md",
+      "source_sha256": "0aaf1517bd879bcf1216e5b06053ac5756e8e822c9c2c18dc0b2ae50d87b56ca"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/canonical_numbers_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/canonical_numbers_template.md",
+      "source_sha256": "085dca343bef1ba4d6c59621c024753c70fcc91e4797eb55738539c9b81ebd3f"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/config_yaml_template.yaml",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/config_yaml_template.yaml",
+      "source_sha256": "293c8bbeeb1f40ffd4b81ae5f9b3bbca2394f0fb50f0468ee36091cab786d282"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/morning_summary_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/morning_summary_template.md",
+      "source_sha256": "49e2c33ea515fd5172a303a31e7642a37a5518b19f7fd13b7378ea6a4b012a49"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/pr_body_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/pr_body_template.md",
+      "source_sha256": "0eb0a364bb32dfee59f3dce43e3a6c3f6e1e124281bd5b524469601444ec85ba"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/assets/tiebreaker_prompt_template.md",
+      "installed_path": "references/workflows/overnight-insight-discovery/assets/tiebreaker_prompt_template.md",
+      "source_sha256": "a81560628c68224abe9e24ce602e8bcb46a891379091b2145542852fe5221483"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/scripts/bq_budget.py",
+      "installed_path": "references/workflows/overnight-insight-discovery/scripts/bq_budget.py",
+      "source_sha256": "9f7d829c6082a8dcaee998709f64d2b012a6cb25b58077ea585a2d33823453e5"
+    },
+    {
+      "canonical_source": "plugins/overnight-insight-discovery/scripts/render_html.py",
+      "installed_path": "references/workflows/overnight-insight-discovery/scripts/render_html.py",
+      "source_sha256": "a3c6ee35bf1ffb87d1311595038e79b9e21c8f4a4fd14bb770c73b821c8a8ec7"
+    },
+    {
+      "canonical_source": "plugins/overnight-multi-issue-implementation/SKILL.md",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
+      "source_sha256": "a89b21056f3efe156d8089020cce90e3c63367d82c1ceb2e3423e8e4c01ff4a5"
+    },
+    {
+      "canonical_source": "plugins/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/references/large-live-queue-orchestration.md",
+      "source_sha256": "8b1ae074de656a14784e3fef0d78c4eb1c0f6616ecf985c5a18e30f6b645a439"
+    },
+    {
+      "canonical_source": "scripts/install_inventory.py",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/install_inventory.py",
+      "source_sha256": "bafce306ec7495cee3991d67e07015257ddfb315aa5be587e1cc4076d300c1b2"
+    },
+    {
+      "canonical_source": "scripts/panel_input_fixtures.json",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/panel_input_fixtures.json",
+      "source_sha256": "b36485a0233c5a80188349d11c9d3b62d5355bb4a1f4454bdbb8363c0cba16ab"
+    },
+    {
+      "canonical_source": "scripts/validate_panel_inputs.py",
+      "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py",
+      "source_sha256": "16aeb03d5b909eb6e237531ca7a6df4882584cac339cc13fe8b13d610bc51016"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-client-delivery/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-client-delivery/WORKFLOW.md",
+      "source_sha256": "588ae0d32a507a3c9920d8d5615c1ae06ebd4cd26aea5a5eb2643a682059c2a9"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/scripts/action_authority.py",
+      "installed_path": "references/workflows/overnight-review-client-delivery/scripts/action_authority.py",
+      "source_sha256": "b9ec134926fb7419eefacc754c9155d3d8d5797fbea554b138ac6acabfd0bea5"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-client-delivery/scripts/final_byte_review.py",
+      "installed_path": "references/workflows/overnight-review-client-delivery/scripts/final_byte_review.py",
+      "source_sha256": "c530f83a8673c372e3aa8160a33bd3667027aae309db6d333e343db9117aec6d"
+    },
+    {
+      "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
+      "installed_path": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md",
+      "source_sha256": "404a74ee5d46c32d92a39b3902fe2bfba1afcf691160471095f9d78ca309a393"
+    },
+    {
+      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/SKILL.md",
+      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
+      "source_sha256": "a3494fe328c67bd214d53b8b9a4971f1b0620afb11a216acb5347f7b4c36d022"
+    },
+    {
+      "canonical_source": "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+      "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
+      "source_sha256": "19fd51983144afedf50eb1caaeb24b8cd1987b48c5d76bf441e84f04cb047f4c"
+    },
+    {
+      "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
+      "installed_path": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md",
+      "navigation_stub": "codex/overnight-workflows/references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md",
+      "source_sha256": "937fe1d07ea6a3b6b403fa516e5b945f2395017acc3fc227ccc091f93a101f9a"
+    }
+  ]
+}

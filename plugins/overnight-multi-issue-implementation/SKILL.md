@@ -2,8 +2,9 @@
 name: overnight-multi-issue-implementation
 description: |
   Run an overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1
-  review-panel finding set) and ships them to merged PRs by morning. Use when: (1) the user wants 6-15 related
-  issues closed in one autonomous run, (2) the issues split naturally into two PRs (e.g., hardening + features,
+  review-panel finding set), or a large mixed live queue, and prepares reviewed commits/PRs by morning; merge only
+  under an explicit recorded merge grant. Use when:
+  (1) the user wants 6-15 related issues closed in one autonomous run, (2) the issues split naturally into two PRs (e.g., hardening + features,
   or refactor + new-functionality), (3) the user is going to sleep and won't be available to merge PR1 between
   phases, (4) each issue has clear acceptance criteria so each task can be implemented + tested + reviewed
   independently, (5) the backlog is UNVALIDATED and needs Phase 0 first — stale-issue triage biased against
@@ -11,47 +12,64 @@ description: |
   Specializes `superpowers:subagent-driven-development` for the "issues -> stacked PRs by morning" problem
   shape: PR2 is stacked on PR1's branch so it doesn't wait for a human PR1-merge mid-night. ALWAYS use this
   skill when the user says "implement these issues overnight", "ship #N–#M autonomously", "wake up to merged
-  PRs", "two-PR overnight plan", "triage this backlog first", "some of these might be stale", "apply the
-  owner's rulings", or wants a stacked-PR autonomous run from an issue cluster. NOT for: synchronous single-PR
-  work (use plain `subagent-driven-development`), polishing an existing deliverable (use
-  `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
+  PRs" (an explicit merge grant), "two-PR overnight plan", "triage this backlog first", "some of these might be stale", "apply the
+  owner's rulings", "classify this live queue", or wants a stacked-PR autonomous run from an issue cluster.
+  NOT for: synchronous single-PR work, polishing an existing deliverable, or generating insights from data.
 author: wan-huiyan + Claude Code
-version: 1.4.0
-date: 2026-05-29
+version: 1.5.4
+date: 2026-08-10
 ---
 
 # Overnight Multi-Issue Implementation
 
+## Contents
+
+- [Overview](#overview)
+- [When to use](#when-to-use)
+- [Large mixed live queue](#variant-large-mixed-live-queue)
+- [Authority](#authority-before-any-command)
+- [Issue-cluster procedure](#issue-cluster-procedure)
+- [Verification](#verification)
+- [References](#references)
+
 ## Overview
 
-An overnight autonomous workflow specialized for the "cluster of GitHub issues →
-stacked PRs by morning" problem. Builds on `superpowers:subagent-driven-
-development` with overnight-specific discipline: stacked PRs (so PR2 doesn't
-wait on a human PR1-merge), pre-flight tracker-id audit (concurrent sessions
-on main steal your IDs), final PR-level code review (not just per-task), and
-review-finding preservation as PR comments before squash.
+This skill has two input shapes:
+
+1. **Issue cluster:** related GitHub issues become stacked PRs by morning.
+2. **Large mixed queue:** every source row is reconciled first, then its
+   authorized slices move through dependency waves and serial integration.
+
+Both shapes add overnight-specific discipline to implementation: isolated
+writers, shared-file ownership, current-target checks, recoverable state,
+final integrated-diff review, and honest blocked or unchecked outcomes. The
+issue-cluster path also carries the pre-flight tracker-ID audit and preserves
+review findings as PR comments before squash when those external writes are
+authorized.
 
 Sister to `overnight-review-client-delivery` (polishes existing deliverables)
 and `overnight-insight-discovery` (generates insights from data). Different
 problem shape, same overnight-autonomous philosophy.
 
 Two real runs back this skill, and both are written up at the end. Passages
-below that say **"the observed run"** or "the observed night" all mean the
-larger one: 2026-08-05, 17 items across 4 orchestrated workflows, 91
-subagents, ~11 hours, 20 PRs merged by morning. The 2026-05-08 chatbox
-session is the smaller run the skill was first extracted from.
+below that say **"the observed run"** or "the observed night" mean the larger
+2026-08-05 run. Its surviving handoff does not verify exact agent or workflow
+counts, so this skill does not repeat them. The 2026-05-08 chatbox session is
+the smaller run the skill was first extracted from.
 
 ## When to use
 
-All of these conditions:
-1. **Input**: 6-15 related GitHub issues, typically a P1 review-panel cluster.
-2. **Output**: 2 stacked PRs (occasionally 1 large PR or 3 — see "PR shape").
-3. **Human availability**: user is going to sleep / away for 6-10 hours; not
-   available to merge PR1 between phases.
-4. **Issue quality**: each issue has clear acceptance criteria (so per-issue
-   tasks are implementable + testable independently).
-5. **Codebase familiarity**: agent has implementation context (CLAUDE.md,
-   existing tests, conventions) — this isn't for greenfield bootstrapping.
+Choose one input shape:
+
+- **Issue cluster:** 6–15 related issues, normally with clear acceptance
+  criteria, that naturally form two stacked PRs (occasionally one or three).
+- **Large mixed queue:** a live index, tracker, handoff directory, or backlog
+  with roughly 15 or more rows whose current states and file claims must be
+  proved before dispatch. Read the large-queue reference named below.
+
+Both require an unattended time window, enough repository context to verify
+current state, explicit limits on external actions, reviewable units, and a
+durable recovery record. This is not greenfield bootstrapping.
 
 NOT for:
 - Synchronous single-PR work → use plain `superpowers:subagent-driven-development`
@@ -59,9 +77,41 @@ NOT for:
 - Generating insights from data → use `overnight-insight-discovery`
 - One-shot experiments without merge intent → just iterate
 
-## Phase 0: backlog triage + owner-ruling application (when issues are NOT pre-validated)
+## Variant: large mixed live queue
 
-"When to use" condition 4 assumes each issue is live and well-specified. When the input is
+When the source is a live index, tracker, handoff directory, or backlog with
+roughly 15 or more mixed rows, do not force it into the two-stacked-PR shape.
+Read [`references/large-live-queue-orchestration.md`](references/large-live-queue-orchestration.md)
+before classification or dispatch. That procedure adds mechanical coverage
+proof, split classifications, granular authority, per-item budgets and file
+claims, a durable state schema, serial integration, immutable base/head review,
+and an adversarial plan preflight.
+
+The authority section immediately below applies to both input shapes. After
+recording those grants, the large-queue reference is the complete procedure for
+that shape, including its closeout checklist. A large queue does **not** continue
+into the issue-cluster Phase 0, Phase A/B/C graph, stacked-PR procedure,
+tracker-ID examples, issue-comment workflow, or issue-cluster morning checklist
+below.
+
+## Authority before any command
+
+Record the grants for network access, branch and commit, push, PR comments,
+issue writes, merge, deploy, paid calls, generation, and external repositories
+before running commands that exercise them. Every network or shared-state
+command later in this skill is conditional on its matching grant, even when a
+worked example uses imperative wording. Without fetch authority, freshness is
+`UNCHECKED` and execution or merge must stop; without push or PR authority,
+review an immutable local commit and report the remaining action.
+
+## Issue-cluster procedure
+
+The remainder of this file applies to the issue-cluster input shape. Large
+mixed queues use the reference above instead.
+
+### Phase 0: backlog triage + owner-ruling application (when issues are NOT pre-validated)
+
+The issue-cluster path normally assumes each issue is live and well-specified. When the input is
 instead a **backlog** — dozens of issues filed over weeks, some possibly already fixed by
 intervening PRs, some obsolete — running the overnight build directly either re-does merged
 work or (worse) silently drops still-live issues. Insert a decision layer first. In practice
@@ -120,12 +170,16 @@ The Phase A/B/C structure below still applies, but:
 
 ```bash
 # after PR-of-task-N squash-merges:
-git checkout <work-branch> && git fetch origin --prune
-git reset --hard origin/main            # absorb task-N's merge before branching N+1
-git checkout -b feat/task-N+1 ...
+git fetch origin main --prune
+git worktree add ../task-N+1 -b feat/task-N+1 origin/main
 ```
 
-Bucket the plan's tasks by file-overlap up front: file-disjoint sets may parallelize; same-file sets become an ordered sequence with `reset --hard origin/main` after every merge. Skipping the resync is how task N+1 silently reverts task N (see `stale-base-pr-silently-reverts-upstream-content`).
+Bucket the plan's tasks by file overlap up front: file-disjoint sets may
+parallelize; same-file sets become an ordered sequence, and every subsequent
+task starts from the newly fetched `origin/main` in its own worktree. Do not
+reset an unknown working tree. Starting task N+1 from task N's stale base is
+how it silently reverts task N (see
+`stale-base-pr-silently-reverts-upstream-content`).
 
 ## Phases
 
@@ -248,6 +302,11 @@ audits, and it reads as more alarming than the truth. Check omissions in both di
 ### Tier 3 — Bash-only verification (no reviewer subagent)
 
 Controller verifies inline via bash/grep on the PR diff, no subagent dispatch.
+
+**Repository-specific review rules override this generic rubric.** If the
+repository requires full review for a rendered product surface, registered
+statistic, security boundary, or widely consumed constant, a visually small
+diff does not qualify for Tier 3.
 
 Use when:
 - Task is a pure visual restyle (existing template, swap CSS classes, no markup restructure)
@@ -489,9 +548,12 @@ session you can only negotiate with.
 
 **Claim your intent on a shared board, in the repo, before you start.** One entry appended to a
 committed file (this project uses `docs/site/assets/live.json`) carrying: an id, a state, a
-plain-English label, and **the list of files this run intends to touch**. It works — during the
-observed run a parallel session read the board, saw two of its three assigned tasks already claimed,
-and correctly did only the third. That coordination cost one small merged PR.
+plain-English label, and **the list of files this run intends to touch**. Distinguish the
+controller's liveness from an item's path reservation: stopping a controller must not leave a
+false running session, while an open branch or PR may still need an explicitly owned collision
+reservation. It works — during the observed run a parallel session read the board, saw two of its
+three assigned tasks already claimed, and correctly did only the third. That coordination cost one
+small merged PR.
 
 **Rules that make the board load-bearing rather than decorative:**
 
@@ -502,10 +564,15 @@ and correctly did only the third. That coordination cost one small merged PR.
 - **A pause needs an honest state — and your validator may reject the one you invent.** `paused` was
   refused by the project's own schema (`running | waiting | blocked`), which is the gate working. An
   absent state often defaults to "running", so it must be set explicitly.
-- **Do NOT delete your claim while your PRs are still open.** It is tempting on a pause: it frees the
-  files. It also invites another session to pick up half-reviewed PRs and land them. Keep the claim,
-  list the open PR numbers in the note, and say plainly what to do if the run never comes back.
-- **Take it down at the end.** Nothing expires it. There is no heartbeat and no TTL.
+- **Do NOT delete an item's path reservation while its PR is still active.** It is tempting on a
+  pause: it frees the files. It also invites another session to pick up half-reviewed work and land
+  it. Record the open PR, current owner, nullable expiry, mandatory takeover condition, and next
+  action. This is a
+  reservation, not proof that the original controller is still running.
+- **Take controller liveness down when the controller stops.** Nothing expires it. Release the item
+  reservation after verified merge/content, explicit abandonment or supersession, or a named
+  transfer to a successor. Do not leave a false running entry merely because merge authority is
+  absent.
 
 ## Amend a running orchestration through a file on disk, not the script
 
@@ -603,7 +670,7 @@ other.
 
 Before proposing merge to user:
 
-1. **Final PR-level review on the full PR diff** (not just per-task).
+1. **Final PR-level review on one immutable two-tree diff** (not just per-task).
    Per-task reviews catch implementation bugs; PR-level review catches
    cross-task integration concerns. For any **non-trivial** PR, run the
    **`roundtable:agent-review-panel`** skill with **all panel agents set to
@@ -616,7 +683,24 @@ Before proposing merge to user:
    full panel** — fall back to a single reviewer (`voltagent-qa-sec:code-reviewer`
    or the `code-review:code-review` skill); use the same non-trivial threshold
    as the tier rubric above. Run PR1 + PR2 reviews in parallel (single message,
-   multiple Agent calls).
+   multiple Agent calls). Commit every integrator-owned tracker, release-note,
+   index, and handoff edit first; push only when authorized. Require a clean
+   worktree and record literal `target_ref`, `target_ref_sha_at_dispatch`, its
+   repeated immutable `target_sha`,
+   `merge_base_sha`, `head_sha`, `head_tree_oid`, the diff artifact path,
+   SHA-256 digest, and literal argv array. Require `merge_base_sha == target_sha`
+   before review. Materialize the deterministic two-tree diff with the same
+   contract used by the large-queue reference, then hash the file:
+
+   ```bash
+   git diff --binary --full-index --no-color --no-ext-diff --no-textconv \
+     --no-renames --diff-algorithm=myers --unified=3 \
+     "$TARGET_SHA" "$HEAD_SHA" -- > "$DIFF_PATH"
+   shasum -a 256 "$DIFF_PATH"
+   ```
+
+   A later head commit, rebase, target change, merge-base change, or digest
+   change invalidates the affected verdict and requires review again.
 
 2. **Surface findings as PR comments BEFORE merge**. Squash discards the
    in-branch commit messages; review-finding text only persists if posted
@@ -646,11 +730,13 @@ Before proposing merge to user:
    ```
    The user must do this once; agent cannot self-grant.
 
-4. **Ask before merging**. Merging is a hard-to-reverse, affects-shared-
-   state action. Even with explicit "merge if review passes" instruction
-   from the previous evening, confirm with `AskUserQuestion` once findings
-   are surfaced. The 30-second confirmation cost is cheap compared to a
-   "wait, that wasn't supposed to merge yet" recovery.
+4. **Apply the merge grant recorded before the run.** If the current brief
+   explicitly authorizes merge after named checks and review gates pass, merge
+   under those terms; do not add a human prompt the unattended workflow cannot
+   answer. If merge authority is absent or ambiguous, stop at a reviewed local
+   or, when push was separately authorized, pushed `READY` commit with reason
+   `AUTHORITY`, and report the exact next action. Never infer merge authority
+   from permission to implement, push, open a PR, or deploy.
 
 ## Recovery patterns
 
@@ -658,10 +744,13 @@ Before proposing merge to user:
 
 A subagent dispatched to handle a long-running task (e.g., a finalization
 task that runs the full pytest suite + `gh pr create`) may pause waiting
-for a Monitor event or long shell. Don't wait indefinitely. Take over
-directly: read git log to see what landed, finish the remaining commands
-inline. Don't re-dispatch — the partial state is harder to recover via
-fresh subagent than via direct controller continuation.
+for a monitor event or long shell. A yielded or timed-out tool call may still
+be running. Before retrying, inspect the tool session, PID, log, worktree,
+branch, and output file. Resume or poll the existing process when possible;
+never start a duplicate long test, paid call, generation job, or merge because
+the first call stopped printing. If takeover is needed, read the journal and
+git state first, then finish the remaining commands directly. Do not
+redispatch over unknown partial state.
 
 ### Conflict resolution mid-merge
 
@@ -719,7 +808,7 @@ Prevention: for partial work, use a non-keyword verb (`Scopes part of #N`,
 `Partial for #N`, `Defers the rest of #N`) and **verify `#N` is still OPEN
 after each merge** in the chain. See `prep-pr-close-keyword-auto-closes-issue`.
 
-## Output (morning checklist)
+## Issue-cluster output (morning checklist)
 
 By morning the user should have:
 
@@ -748,9 +837,9 @@ By morning the user should have:
   context-corrupts mid-run, you need the plan on disk to resume.
 - **Don't** swallow review findings in commit messages. Squash-merge
   drops them. Use PR comments + follow-up issues.
-- **Don't** auto-merge after the final code review without asking.
-  Overnight authorization to "implement" is not authorization to "merge"
-  — explicit confirmation each time.
+- **Don't** infer merge authority from permission to implement. Record the
+  merge grant before the run; honor an explicit merge-on-green grant, and stop
+  in a reviewed ready state when the grant is absent.
 - **Don't** auto-deploy after merge. The user is asleep; even if your
   project has auto-deploy-on-merge wired, the deploy preflight (e.g.,
   `deploy-from-stale-worktree-silent-rollback`) needs human review for
@@ -801,8 +890,11 @@ By morning the user should have:
 - `prep-pr-close-keyword-auto-closes-issue` — handles the **issue** auto-close
   trap (a close-keyword, even negated, in a partial-impl PR's commit/body
   closes a multi-part issue prematurely).
+- [`references/large-live-queue-orchestration.md`](references/large-live-queue-orchestration.md)
+  — exhaustive classification, authority, contention, state, recovery, review,
+  and serial landing for large mixed queues.
 - `stale-base-pr-silently-reverts-upstream-content` — why same-file sequential
-  PRs need `git reset --hard origin/main` between merges.
+  PRs must start from a freshly fetched target rather than a stale predecessor.
 
 ## Worked example — 2026-05-08 chatbox session
 
@@ -824,18 +916,19 @@ pass before merging PRs), this skill.
 
 ## Worked example — 2026-08-05 overnight run ("the observed run")
 
-17 items across 4 orchestrated workflows, 91 subagents, ~11 hours, 20 PRs
-merged by morning, on a repo with no CI and no branch protection. This is the
-run every "observed run" above refers to. What it cost, in the order the
-lessons appear:
+This was a large multi-session run on a repository with no continuous
+integration and no branch protection. Its surviving handoff explicitly leaves
+agent and workflow totals unverified, so they are omitted here. This is the run
+every "observed run" above refers to. What it taught, in the order the lessons
+appear:
 
 - One of six critical findings was lost to a `slice(0, 9000)` on the reviews
   payload, and was recovered only because the merging agent said the payload
   looked cut → "Never truncate a findings payload".
-- Five of the twenty merged PRs shipped a fresh instance of the defect they
-  repaired — a count the host repo later reopened, so read it as "common", not
-  as a rate. Every one was caught by re-deriving a number → the verbatim
-  reviewer line in the tier rubric.
+- Multiple merged PRs shipped a fresh instance of the defect they repaired —
+  common enough to budget a check, but not a verified rate. The cases were
+  caught by re-deriving a number → the verbatim reviewer line in the tier
+  rubric.
 - The published test counts moved under the run (`server 269` → `314`) and an
   item quoted its own brief → the stale-baseline rule.
 - A parallel session read the shared board, found two of its three assigned

@@ -1,0 +1,353 @@
+{
+  "schema_version": 1,
+  "record_mutations": [
+    {
+      "name": "rename_log_path",
+      "record_type": "task_transition",
+      "rename": {"log_path": "log_paths"},
+      "expect_error": "missing required field log_path"
+    },
+    {
+      "name": "rename_review_artifacts",
+      "record_type": "task_transition",
+      "rename": {"review_artifacts": "review_report_paths"},
+      "expect_error": "missing required field review_artifacts"
+    },
+    {
+      "name": "missing_controller_expiry",
+      "record_type": "controller_liveness",
+      "remove": ["heartbeat_expires_at"],
+      "expect_error": "missing required field heartbeat_expires_at"
+    },
+    {
+      "name": "empty_controller_takeover_condition",
+      "record_type": "controller_liveness",
+      "set": {"takeover_condition": ""},
+      "expect_error": "nonempty field takeover_condition"
+    },
+    {
+      "name": "missing_authorized_successors",
+      "record_type": "controller_liveness",
+      "remove": ["authorized_successor_ids"],
+      "expect_error": "missing required field authorized_successor_ids"
+    },
+    {
+      "name": "lease_without_controller_join",
+      "record_type": "execution_lease",
+      "remove": ["controller_id"],
+      "expect_error": "missing required field controller_id"
+    },
+    {
+      "name": "null_reservation_paths",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": null},
+      "expect_error": "field exact_paths has type null"
+    },
+    {
+      "name": "empty_controller_identity",
+      "record_type": "controller_liveness",
+      "set": {"controller_id": ""},
+      "expect_error": "controller_id must be a nonempty identity"
+    },
+    {
+      "name": "empty_run_identity",
+      "record_type": "controller_liveness",
+      "set": {"run_id": ""},
+      "expect_error": "run_id must be a nonempty identity"
+    },
+    {
+      "name": "malformed_repository_identity",
+      "record_type": "controller_liveness",
+      "set": {"repository_id": "repo"},
+      "expect_error": "repository_id must be a canonical repository identity"
+    },
+    {
+      "name": "parent_repository_identity",
+      "record_type": "controller_liveness",
+      "set": {"repository_id": "github.com/../repo"},
+      "expect_error": "repository_id must be a canonical repository identity"
+    },
+    {
+      "name": "dot_repository_identity",
+      "record_type": "controller_liveness",
+      "set": {"repository_id": "github.com/./repo"},
+      "expect_error": "repository_id must be a canonical repository identity"
+    },
+    {
+      "name": "malformed_controller_timestamp",
+      "record_type": "controller_liveness",
+      "set": {"time": "not-a-time"},
+      "expect_error": "time must be an ISO-8601 UTC timestamp ending Z"
+    },
+    {
+      "name": "timezone_naive_controller_timestamp",
+      "record_type": "controller_liveness",
+      "set": {"heartbeat_at": "2026-08-08T22:59:00"},
+      "expect_error": "heartbeat_at must be an ISO-8601 UTC timestamp ending Z"
+    },
+    {
+      "name": "controller_timestamp_order",
+      "record_type": "controller_liveness",
+      "set": {"heartbeat_at": "2026-08-08T23:01:00Z"},
+      "expect_error": "timestamp heartbeat_at must not follow time"
+    },
+    {
+      "name": "negative_controller_pid",
+      "record_type": "controller_liveness",
+      "set": {"pid": -7},
+      "expect_error": "pid must be a positive integer or null"
+    },
+    {
+      "name": "empty_authorized_successors",
+      "record_type": "controller_liveness",
+      "set": {"authorized_successor_ids": []},
+      "expect_error": "authorized_successor_ids must be a nonempty array"
+    },
+    {
+      "name": "malformed_authorized_successor",
+      "record_type": "controller_liveness",
+      "set": {"authorized_successor_ids": [" bad "]},
+      "expect_error": "authorized_successor_ids entries must be normalized identities"
+    },
+    {
+      "name": "unknown_reservation_owner",
+      "record_type": "path_reservation",
+      "set": {"owner": {"junk": true}},
+      "expect_error": "owner must contain exactly kind, id, and branch"
+    },
+    {
+      "name": "dot_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["."]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "parent_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/../data.js"]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "tab_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/\tdata.js"]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "newline_reservation_path",
+      "record_type": "path_reservation",
+      "set": {"exact_paths": ["docs/\ndata.js"]},
+      "expect_error": "path is not normalized repository-relative"
+    },
+    {
+      "name": "relative_lease_worktree",
+      "record_type": "execution_lease",
+      "set": {"worktree": "relative/worktree"},
+      "expect_error": "worktree must be a normalized absolute path"
+    },
+    {
+      "name": "duplicate_task_reservation_join",
+      "record_type": "task_transition",
+      "set": {"reservation_ids": ["reservation-pr-934-data-js", "reservation-pr-934-data-js"]},
+      "expect_error": "reservation_ids must contain unique strings"
+    },
+    {
+      "name": "nonstring_task_reservation_join",
+      "record_type": "task_transition",
+      "set": {"reservation_ids": [7]},
+      "expect_error": "reservation_ids entries must be nonempty identities"
+    },
+    {
+      "name": "unknown_task_reason_code",
+      "record_type": "task_transition",
+      "set": {"reason_code": "MADE_UP"},
+      "expect_error": "invalid reason_code"
+    },
+    {
+      "name": "empty_task_next_action",
+      "record_type": "task_transition",
+      "set": {"next_action": ""},
+      "expect_error": "next_action must be a nonempty string or null"
+    },
+    {
+      "name": "forbidden_task_snapshot",
+      "record_type": "task_transition",
+      "set": {"controller_state": "STOPPED"},
+      "expect_error": "forbidden field controller_state"
+    }
+  ],
+  "sequence_cases": [
+    {"name": "increasing", "sequences": [17, 20, 24], "expected_valid": true},
+    {"name": "duplicate", "sequences": [17, 17], "expected_valid": false},
+    {"name": "out_of_order", "sequences": [20, 19], "expected_valid": false},
+    {"name": "nonpositive", "sequences": [0, 1], "expected_valid": false}
+  ],
+  "operational_separation_cases": [
+    {
+      "name": "controller_stop_retains_active_pr_reservation",
+      "controller_state": "STOPPED",
+      "lease_state": "ENDED",
+      "reservation_state": "ACTIVE",
+      "reservation_owner_kind": "pull_request",
+      "expected_valid": true
+    },
+    {
+      "name": "controller_stop_cannot_release_open_pr_reservation",
+      "controller_state": "STOPPED",
+      "lease_state": "ENDED",
+      "reservation_state": "RELEASED",
+      "reservation_owner_kind": "pull_request",
+      "release_reason": "controller stopped while pull request remains open",
+      "release_reason_code": "ABANDONED",
+      "expected_valid": false
+    }
+  ],
+  "takeover_cases": [
+    {
+      "name": "complete_inspected_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": true
+    },
+    {
+      "name": "stale_controller_without_inspection",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": false,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "unavailable_pid_is_unchecked",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {"pid": {"status": "UNKNOWN", "detail": "could not inspect; unavailable"}},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "active_pid_blocks_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {"pid": {"status": "ACTIVE", "detail": "recorded PID is still running"}},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "active_tool_session_blocks_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {"tool_session": {"status": "ACTIVE", "detail": "tool session still accepts polls"}},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "unknown_tool_session_blocks_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {"tool_session": {"status": "UNKNOWN", "detail": "tool session could not be inspected"}},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "active_lease_blocks_takeover",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": true,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "expiry_alone_does_not_stop",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": false,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "unauthorized_successor",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-intruder",
+      "expected_valid": false
+    },
+    {
+      "name": "heartbeat_not_expired",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2999-01-01T00:00:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "controller-1",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    },
+    {
+      "name": "lease_joined_to_different_controller",
+      "observed_at": "2026-08-09T01:00:00Z",
+      "controller_heartbeat_expires_at": "2026-08-09T00:40:00Z",
+      "inspection_complete": true,
+      "inspection_status_overrides": {},
+      "joined_lease_controller_id": "different-controller",
+      "active_lease_remains": false,
+      "stop_appended": true,
+      "stopped_by": "controller-successor",
+      "expected_valid": false
+    }
+  ],
+  "transfer_cases": [
+    {"name": "valid_prior_replacement", "replacement_sequence": 20, "transfer_sequence": 21, "expected_valid": true},
+    {"name": "future_replacement", "replacement_sequence": 22, "transfer_sequence": 21, "expected_valid": false},
+    {"name": "cross_run_replacement", "replacement_sequence": 20, "transfer_sequence": 21, "replacement_run_id": "other-run", "expected_valid": false},
+    {"name": "same_id_replacement", "replacement_sequence": 20, "transfer_sequence": 21, "same_id": true, "expected_valid": false},
+    {"name": "released_replacement", "replacement_sequence": 20, "transfer_sequence": 21, "replacement_state": "RELEASED", "expected_valid": false}
+  ],
+  "journal_cases": [
+    {"name": "valid_joined_journal", "mutation": "none", "expected_valid": true},
+    {"name": "missing_controller_join", "mutation": "missing_controller_join", "expected_valid": false},
+    {"name": "duplicate_global_sequence", "mutation": "duplicate_global_sequence", "expected_valid": false},
+    {"name": "two_live_controllers", "mutation": "two_live_controllers", "expected_valid": false},
+    {"name": "released_open_pr_after_stop", "mutation": "released_open_pr_after_stop", "pr_open": true, "expected_valid": false}
+  ]
+}

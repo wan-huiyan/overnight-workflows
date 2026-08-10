@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "umbrella_skill": "overnight-workflows",
+  "positive": [
+    {
+      "name": "parallel_branch_collision_audit",
+      "prompt": "Before this large redesign, inspect every unmerged feature branch for shared-file collisions.",
+      "prompt_contract": ["large redesign", "unmerged feature branch"],
+      "umbrella_clause": "large redesign with unmerged parallel branches",
+      "installed_workflow": "references/workflows/large-redesign-parallel-branch-collision-audit/WORKFLOW.md",
+      "required_markers": ["unmerged feature branches", "rewrite shared files"]
+    },
+    {
+      "name": "insight_discovery",
+      "prompt": "Run an overnight B-vs-C analysis to surface surprising client insights from data.",
+      "prompt_contract": ["overnight B-vs-C", "client insights from data"],
+      "umbrella_clause": "new client-facing insight discovery from data",
+      "installed_workflow": "references/workflows/overnight-insight-discovery/WORKFLOW.md",
+      "required_markers": ["B-vs-C", "insight-discovery"]
+    },
+    {
+      "name": "multi_issue_or_live_queue",
+      "prompt": "Classify this large mixed live queue and execute only its authorized slices overnight.",
+      "prompt_contract": ["large mixed live queue", "authorized slices overnight"],
+      "umbrella_clause": "related issue cluster, stacked pull requests, or large mixed live queue",
+      "installed_workflow": "references/workflows/overnight-multi-issue-implementation/WORKFLOW.md",
+      "required_markers": ["large mixed live queue", "explicit recorded merge grant"]
+    },
+    {
+      "name": "client_delivery",
+      "prompt": "Polish this existing client report overnight and return a reviewed delivery package.",
+      "prompt_contract": ["existing client report overnight", "reviewed delivery package"],
+      "umbrella_clause": "polish an existing client deliverable",
+      "installed_workflow": "references/workflows/overnight-review-client-delivery/WORKFLOW.md",
+      "required_markers": ["client delivery", "review panel"],
+      "authority_markers": [
+        "Routing never grants execution authority.",
+        "With only local-work authority",
+        "Commit only with a commit grant.",
+        "Push only with push, network, and external-write",
+        "MISSING_AUTHORITY"
+      ],
+      "ordered_markers": [
+        [
+          "After Phase A and every advisory-driven fix are complete",
+          "Dispatch an independent reviewer who did not author or fix the deliverables."
+        ],
+        [
+          "Dispatch an independent reviewer who did not author or fix the deliverables.",
+          "Enter Phase C only while the final reviewer report still matches the frozen"
+        ]
+      ],
+      "required_safety_markers": [
+        "ADVISORY_NON_GATING",
+        "FINAL_REVIEW_PENDING",
+        "Any later byte change invalidates the final review."
+      ],
+      "forbidden_markers": [
+        "The branch should be pushed to origin with a PR opened.",
+        "Push immediately after every commit"
+      ]
+    },
+    {
+      "name": "blocked_reviewer",
+      "prompt": "Harden this unattended panel because one reviewer could not read the pull-request diff.",
+      "prompt_contract": ["unattended panel", "reviewer could not read"],
+      "umbrella_clause": "harden a panel whose reviewer could not read its input",
+      "installed_workflow": "references/workflows/overnight-review-panel-blocked-reviewer-reads-as-clean/WORKFLOW.md",
+      "required_markers": ["BLOCKED", "reviewer"]
+    },
+    {
+      "name": "scheduled_poll",
+      "prompt": "Use scheduled triggers for a fire-ASAP multi-track overnight run that survives session end.",
+      "prompt_contract": ["scheduled triggers", "fire-ASAP multi-track overnight run"],
+      "umbrella_clause": "scheduled fire-ASAP multi-track orchestration",
+      "installed_workflow": "references/workflows/schedule-poll-orchestrator-pattern/WORKFLOW.md",
+      "required_markers": ["Fire-ASAP", "scheduled"],
+      "authority_markers": [
+        "Routing here grants no execution authority.",
+        "Commit, push, pull-request creation,",
+        "Local consolidation and pull-request creation are",
+        "MISSING_AUTHORITY"
+      ],
+      "ordered_markers": [
+        [
+          "Routing here grants no execution authority.",
+          "### Use the installed state-machine helper"
+        ]
+      ],
+      "required_safety_markers": [
+        "scripts/poll_orchestrator.py",
+        "CONSOLIDATION_CLAIMED",
+        "RESUME_CONSOLIDATION_CLAIM",
+        "schedule_external_action_authority",
+        "the helper itself never consolidates, commits, pushes, schedules, spends, or"
+      ],
+      "forbidden_markers": [
+        "Path(\"state/orchestrator_poll_log.jsonl\").write_text",
+        "run_consolidation_and_pr()",
+        "json.dump(status, open(\"state/status.json\", \"w\"))"
+      ]
+    },
+    {
+      "name": "review_tier_calibration",
+      "prompt": "Calibrate review intensity for a chain of twelve independent pull requests overnight.",
+      "prompt_contract": ["review intensity", "independent pull requests overnight"],
+      "umbrella_clause": "calibrate review tiers across a long independent pull-request chain",
+      "installed_workflow": "references/workflows/subagent-review-tier-calibration-for-overnight-pr-chains/WORKFLOW.md",
+      "required_markers": ["review intensity", "10+ PRs"]
+    }
+  ],
+  "negative": [
+    {
+      "name": "summarize_without_execution",
+      "prompt": "Summarize this task index without executing anything.",
+      "prompt_contract": ["summarize", "without executing"],
+      "execution_allowed": false
+    },
+    {
+      "name": "review_without_execution",
+      "prompt": "Review this overnight plan and report findings only.",
+      "prompt_contract": ["review", "report findings only"],
+      "execution_allowed": false
+    },
+    {
+      "name": "authority_is_not_inferred",
+      "prompt": "Prepare the overnight workflow, but I have not authorized pushes, pull requests, merges, deploys, paid calls, or external writes.",
+      "prompt_contract": ["not authorized", "external writes"],
+      "execution_allowed": false
+    }
+  ]
+}

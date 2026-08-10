@@ -20,11 +20,20 @@ description: |
   (which is about two PRs targeting the same scope simultaneously — this is
   about a redesign on main vs WIP on an unrelated long-running branch).
 author: Claude Code
-version: 1.0.0
-date: 2026-05-28
+version: 1.0.1
+date: 2026-08-09
 ---
 
 # Large-Redesign Parallel-Branch Collision Audit
+
+## Contents
+
+- [Problem](#problem)
+- [Context and trigger conditions](#context--trigger-conditions)
+- [Solution](#solution)
+- [Verification](#verification)
+- [Example](#example)
+- [Notes and references](#notes)
 
 ## Problem
 

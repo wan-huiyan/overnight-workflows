@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "record_schema_version": 1,
+  "semantic_constraints": {
+    "timestamp_format": "iso8601-utc-z",
+    "sequence": "positive-globally-unique-append-order",
+    "identity": "nonempty-normalized",
+    "repository_id": "github-owner-repository-or-local-absolute-root",
+    "pid": "positive-integer-or-null",
+    "join_arrays": "unique-nonempty-string-identities",
+    "reservation_paths": "unique-normalized-repository-relative-posix",
+    "transfer": "valid-active-replacement-precedes-terminal-transfer"
+  },
+  "records": {
+    "controller_liveness": {
+      "id_field": "controller_id",
+      "required": [
+        "time", "sequence", "schema_version", "record_type", "run_id",
+        "repository_id", "controller_id", "state", "heartbeat_at",
+        "heartbeat_expires_at", "takeover_condition", "stopped_at",
+        "stop_reason", "inspection_evidence", "stopped_by",
+        "authorized_successor_ids", "tool_session_id", "pid", "host"
+      ],
+      "types": {
+        "time": ["string"], "sequence": ["integer"],
+        "schema_version": ["integer"], "record_type": ["string"],
+        "run_id": ["string"], "repository_id": ["string"],
+        "controller_id": ["string"], "state": ["string"],
+        "heartbeat_at": ["string"], "heartbeat_expires_at": ["string"],
+        "takeover_condition": ["string"], "stopped_at": ["string", "null"],
+        "stop_reason": ["string", "null"],
+        "inspection_evidence": ["object", "null"],
+        "stopped_by": ["string", "null"],
+        "authorized_successor_ids": ["array"],
+        "tool_session_id": ["string", "null"], "pid": ["integer", "null"],
+        "host": ["string"]
+      },
+      "states": ["RUNNING", "STOPPED"],
+      "state_rules": {
+        "RUNNING": {
+          "non_null": ["heartbeat_at", "heartbeat_expires_at", "takeover_condition", "authorized_successor_ids"],
+          "null": ["stopped_at", "stop_reason", "inspection_evidence", "stopped_by"]
+        },
+        "STOPPED": {
+          "non_null": ["heartbeat_at", "heartbeat_expires_at", "takeover_condition", "stopped_at", "stop_reason", "inspection_evidence", "stopped_by", "authorized_successor_ids"]
+        }
+      }
+    },
+    "execution_lease": {
+      "id_field": "lease_id",
+      "required": [
+        "time", "sequence", "schema_version", "record_type", "run_id",
+        "repository_id", "controller_id", "lease_id", "attempt_id",
+        "lease_owner", "state", "started_at", "heartbeat_at",
+        "lease_expires_at", "takeover_condition", "ended_at", "end_reason",
+        "tool_session_id", "pid", "command", "worktree", "branch"
+      ],
+      "types": {
+        "time": ["string"], "sequence": ["integer"],
+        "schema_version": ["integer"], "record_type": ["string"],
+        "run_id": ["string"], "repository_id": ["string"],
+        "controller_id": ["string"], "lease_id": ["string"],
+        "attempt_id": ["string"], "lease_owner": ["string"],
+        "state": ["string"], "started_at": ["string"],
+        "heartbeat_at": ["string"], "lease_expires_at": ["string"],
+        "takeover_condition": ["string"], "ended_at": ["string", "null"],
+        "end_reason": ["string", "null"],
+        "tool_session_id": ["string", "null"], "pid": ["integer", "null"],
+        "command": ["string", "null"], "worktree": ["string"],
+        "branch": ["string"]
+      },
+      "states": ["ACTIVE", "ENDED"],
+      "state_rules": {
+        "ACTIVE": {
+          "non_null": ["controller_id", "started_at", "heartbeat_at", "lease_expires_at", "takeover_condition"],
+          "null": ["ended_at", "end_reason"]
+        },
+        "ENDED": {
+          "non_null": ["controller_id", "ended_at", "end_reason"]
+        }
+      }
+    },
+    "path_reservation": {
+      "id_field": "reservation_id",
+      "required": [
+        "time", "sequence", "schema_version", "record_type", "run_id",
+        "repository_id", "reservation_id", "exact_paths", "owner", "state",
+        "created_at", "expires_at", "takeover_condition", "released_at",
+        "release_reason", "release_reason_code"
+      ],
+      "optional": ["replacement_reservation_id"],
+      "types": {
+        "time": ["string"], "sequence": ["integer"],
+        "schema_version": ["integer"], "record_type": ["string"],
+        "run_id": ["string"], "repository_id": ["string"],
+        "reservation_id": ["string"], "exact_paths": ["array"],
+        "owner": ["object"], "state": ["string"], "created_at": ["string"],
+        "expires_at": ["string", "null"], "takeover_condition": ["string"],
+        "released_at": ["string", "null"],
+        "release_reason": ["string", "null"],
+        "release_reason_code": ["string", "null"],
+        "replacement_reservation_id": ["string", "null"]
+      },
+      "states": ["ACTIVE", "RELEASED", "TRANSFERRED"],
+      "enums": {
+        "release_reason_code": [null, "MERGED_VERIFIED", "ABANDONED", "SUPERSEDED", "TRANSFER"]
+      },
+      "state_rules": {
+        "ACTIVE": {
+          "non_null": ["created_at", "takeover_condition"],
+          "null": ["released_at", "release_reason", "release_reason_code", "replacement_reservation_id"]
+        },
+        "RELEASED": {
+          "non_null": ["released_at", "release_reason", "release_reason_code"],
+          "null": ["replacement_reservation_id"]
+        },
+        "TRANSFERRED": {
+          "non_null": ["released_at", "release_reason", "release_reason_code", "replacement_reservation_id"]
+        }
+      }
+    },
+    "task_transition": {
+      "id_field": "task_id",
+      "required": [
+        "time", "sequence", "schema_version", "record_type", "run_id",
+        "repository_id", "source_occurrence_id", "classification_state",
+        "task_id", "attempt_id", "controller_id", "lease_id",
+        "reservation_ids", "task_state", "reason_code", "verification",
+        "run_disposition", "source_sha", "execution_base_sha", "worktree",
+        "branch", "head_sha", "retry_count", "log_path", "output_paths",
+        "checks", "review_artifacts", "next_action"
+      ],
+      "types": {
+        "time": ["string"], "sequence": ["integer"],
+        "schema_version": ["integer"], "record_type": ["string"],
+        "run_id": ["string"], "repository_id": ["string"],
+        "source_occurrence_id": ["string"], "classification_state": ["string"],
+        "task_id": ["string"], "attempt_id": ["string"],
+        "controller_id": ["string", "null"], "lease_id": ["string", "null"],
+        "reservation_ids": ["array"], "task_state": ["string"],
+        "reason_code": ["string"], "verification": ["string"],
+        "run_disposition": ["string"], "source_sha": ["string"],
+        "execution_base_sha": ["string"], "worktree": ["string"],
+        "branch": ["string"], "head_sha": ["string"],
+        "retry_count": ["integer"], "log_path": ["string", "null"],
+        "output_paths": ["array"], "checks": ["array"],
+        "review_artifacts": ["array"], "next_action": ["string"]
+      },
+      "enums": {
+        "classification_state": ["EXECUTABLE", "CONDITIONAL", "OWNER_BLOCKED", "AUTHORITY_BLOCKED", "STALE_DONE", "SUPERSEDED", "EXCLUDED", "UNCERTAIN"],
+        "task_state": ["QUEUED", "RUNNING", "REVIEW", "READY", "BLOCKED", "FAILED", "MERGED", "SKIPPED"],
+        "reason_code": ["OWNER", "AUTHORITY", "EXISTING_PR", "COLLISION", "REVIEW", "AGENT_FAILURE", "TIME", "NONE"],
+        "verification": ["PASS", "FAIL", "UNCHECKED", "NOT_APPLICABLE"],
+        "run_disposition": ["ACTIVE", "TERMINAL"]
+      },
+      "forbidden": [
+        "log_paths", "review_report_paths", "tool_session_id", "pid", "command",
+        "heartbeat_at", "heartbeat_expires_at", "lease_expires_at",
+        "controller_state", "lease_state", "reservation_state",
+        "reservation_owner", "exact_paths", "expires_at", "takeover_condition"
+      ]
+    }
+  }
+}

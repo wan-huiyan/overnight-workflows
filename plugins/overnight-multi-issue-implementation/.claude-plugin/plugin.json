@@ -1,7 +1,7 @@
 {
   "name": "overnight-multi-issue-implementation",
-  "description": "Overnight autonomous workflow that takes a cluster of related GitHub issues (typically a P1 review-panel finding set) and ships them to merged stacked PRs by morning. Builds on subagent-driven-development with overnight-specific discipline: stacked PRs (so PR2 doesn't wait on a human PR1-merge mid-night), pre-flight tracker-id audit (concurrent sessions on main steal IDs), final PR-level code review before proposing merge, review findings preserved as PR comments before squash. Sister to overnight-review-client-delivery and overnight-insight-discovery. v1.2.0 adds Phase 0 for unvalidated backlogs: stale-issue triage biased against dismissal, owner cut-line ratification, rulings baked as issue comments, and a wave-ordered kickoff prompt.",
-  "version": "1.4.0",
+  "description": "Overnight autonomous implementation for either 6–15 related GitHub issues or a large mixed live queue. Covers stacked PRs, stale and partial classification, owner and authority gates, shared-file ownership, durable recovery, immutable base/head review, and serial integration. Sister to overnight-review-client-delivery and overnight-insight-discovery.",
+  "version": "1.5.4",
   "author": {
     "name": "wan-huiyan"
   },
@@ -14,6 +14,7 @@
     "multi-pr",
     "stacked-pr",
     "issue-implementation",
+    "large-queue",
     "subagent-driven",
     "agent-review-panel",
     "autonomous-workflow"
