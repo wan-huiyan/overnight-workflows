@@ -135,6 +135,44 @@ RFC3339_UTC_RE = re.compile(
 SAFE_COMPONENT_FORBIDDEN = {"", ".", ".."}
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so both are
+    refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
+
 class PollError(RuntimeError):
     """Fail-closed state requiring inspection rather than another side effect."""
 
@@ -528,8 +566,8 @@ def _journal_records(
     records: list[dict[str, Any]] = []
     for row, line in enumerate(raw[:-1].split(b"\n"), 1):
         try:
-            value = json.loads(line.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+            value = _strict_json_loads(line.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
             raise PollError(f"poll journal row {row} is invalid") from exc
         records.append(_validate_journal_record(value, row))
     event_ids = [record["event_id"] for record in records]
@@ -1104,8 +1142,8 @@ def _verify_terminal_track_evidence(state: Mapping[str, Any]) -> None:
 def _load_state(path: Path) -> Dict[str, Any]:
     raw = _read_regular_bytes(path, label="poll status")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PollError("poll status is invalid JSON") from exc
     return _validate_state(value)
 
@@ -1571,8 +1609,8 @@ def _pull_request_receipt_identity(
     identity = _evidence_identity(path, sha256, "pull-request receipt")
     raw = _read_regular_bytes(path, label="pull-request receipt")
     try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        receipt = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PollError("pull-request receipt must be structured JSON") from exc
     if (
         not isinstance(receipt, dict)
@@ -1698,8 +1736,8 @@ def complete_consolidation(
 def _authority_receipt(path: Path, *, run_id: str) -> Dict[str, Any]:
     raw = _read_regular_bytes(path, label="external-action authority receipt")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PollError("external-action authority receipt is invalid JSON") from exc
     required = {
         "schema_version",
@@ -1807,9 +1845,9 @@ def _write_action_decision_once(path: Path, value: Mapping[str, Any]) -> Dict[st
     except FileExistsError:
         try:
             existing = _validate_action_decision(
-                json.loads(_read_regular_bytes(path, label="external-action decision"))
+                _strict_json_loads(_read_regular_bytes(path, label="external-action decision"))
             )
-        except (UnicodeError, json.JSONDecodeError) as exc:
+        except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
             raise PollError("external-action decision is invalid JSON") from exc
         invariant = {key: item for key, item in value.items() if key != "recorded_at"}
         existing_invariant = {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -999,7 +1000,7 @@ class FinalizationManifestTests(unittest.TestCase):
         self.assertLessEqual(helper.lineno, call.lineno)
         self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
         self.assertEqual(
-            ["object_pairs_hook"],
+            ["object_pairs_hook", "parse_constant"],
             [keyword.arg for keyword in call.keywords],
         )
 
@@ -1025,7 +1026,7 @@ class FinalizationManifestTests(unittest.TestCase):
         self.assertLessEqual(helper.lineno, call.lineno)
         self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
         self.assertEqual(
-            ["object_pairs_hook"],
+            ["object_pairs_hook", "parse_constant"],
             [keyword.arg for keyword in call.keywords],
         )
 
@@ -5049,6 +5050,391 @@ class FinalizationManifestTests(unittest.TestCase):
             identity = manifest.validate_manifest(path)
             self.assertEqual(7, identity["record_count"])
             self.assertEqual(list(range(1, 8)), [row["sequence"] for row in self.records(path)])
+
+
+REPO_ROOT = SCRIPT_DIR.parent
+
+# Every module that decodes JSON someone ELSE produced, mapped to the name of the
+# one sanctioned decoder inside it. The finding that started this named three call
+# sites in validate_panel_inputs.py; repairing only those would have left the same
+# ambiguity in every module below, which is the whole reason this list is a list.
+JSON_TRUST_BOUNDARY_MODULES = {
+    "scripts/finalization_manifest.py": "_decode_json_without_duplicate_keys",
+    "scripts/validate_panel_inputs.py": "strict_json_loads",
+    "scripts/publish_codex_install.py": "_strict_json_loads",
+    "scripts/check_large_queue_guidance.py": "_strict_json_loads",
+    "scripts/score_trigger_coverage.py": "_strict_json_loads",
+    ".github/scripts/validate_plugins.py": "_strict_json_loads",
+    "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py": (
+        "_strict_json_loads"
+    ),
+    "plugins/overnight-review-client-delivery/scripts/final_byte_review.py": (
+        "_strict_json_loads"
+    ),
+    "plugins/overnight-review-client-delivery/scripts/action_authority.py": (
+        "_strict_json_loads"
+    ),
+}
+
+# Trust boundaries the sweep FOUND and deliberately did not repair, with what it
+# would cost. This is separate from the allowlist below on purpose: an unrepaired
+# boundary filed as "not a boundary" is how the finding gets lost.
+PLAIN_JSON_DECODE_DEFERRED = {
+    "plugins/overnight-insight-discovery/scripts/bq_budget.py": (
+        "budget.jsonl is a SHARED ledger -- BQBudget.for_owner() gives every "
+        "overnight track its own owner key against one file, and summarize_log "
+        "aggregates across all of them, so cumulative_bytes reads rows other "
+        "processes wrote and check_before gates a real spend decision on them. "
+        "It is a boundary. Repairing it changes the payload bytes of a RELEASED "
+        "plugin (ledger entry 1.2.1, source_commit 40361a7f), which forces a "
+        "version bump through plugin.json, .claude-plugin/marketplace.json, the "
+        "SKILL banner and the README -- a publishing act this branch was not "
+        "asked to make. Left for the owner to release deliberately."
+    ),
+}
+
+# Modules allowed to call json.loads/json.load directly, each with the reason it is
+# not a trust boundary. A reason is required so that adding a file here is a
+# reviewed act rather than a way to make this test go quiet.
+PLAIN_JSON_DECODE_ALLOWED = {
+    "scripts/test_finalization_manifest.py": (
+        "test bodies decode artifacts the code under test just wrote, inside the "
+        "test process; they assert rather than gate, and the duplicate-key "
+        "controls in this file are what prove the production decoders refuse"
+    ),
+    "scripts/test_publish_codex_install.py": "test bodies, as above",
+    "scripts/test_schedule_poll_orchestrator.py": "test bodies, as above",
+    "scripts/test_client_delivery_action_authority.py": "test bodies, as above",
+    "scripts/test_final_byte_review.py": "test bodies, as above",
+}
+
+
+def _module_json_decode_calls(tree: ast.AST) -> list[ast.Call]:
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "json"
+        and node.func.attr in {"load", "loads"}
+    ]
+
+
+class NonConformingJSONSweepTests(unittest.TestCase):
+    """The sweep behind G-006, held in place so it cannot rot back one layer down."""
+
+    @staticmethod
+    def duplicate_key_bytes(value: dict, key: str, first_value: object) -> bytes:
+        """Encode ``value`` with ``key`` repeated, the conflicting copy first."""
+        if key not in value:
+            raise AssertionError(f"fixture lacks duplicate target key {key!r}")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        token = f"{json.dumps(key)}:"
+        replacement = f"{token}{json.dumps(first_value, separators=(',', ':'))},{token}"
+        if encoded.count(token) != 1:
+            raise AssertionError(f"duplicate target key {key!r} is not uniquely placed")
+        return (encoded.replace(token, replacement, 1) + "\n").encode("utf-8")
+
+    @staticmethod
+    def load_module(relative: str):
+        """Import a module by path WITHOUT leaving __pycache__ beside it.
+
+        The plugin payloads are byte-identified: validate_plugins.py walks the
+        real directory and compares file_count/total_bytes/payload_sha256 against
+        scripts/plugin_release_ledger.json. A .pyc dropped next to a plugin
+        script is a new file in that payload, so importing carelessly here makes
+        a DIFFERENT gate fail somewhere else. Suppress bytecode for the load.
+        """
+        path = REPO_ROOT / relative
+        name = f"nonconformingjsonsweep_{path.stem}"
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        return module
+
+    def test_every_trust_boundary_module_routes_json_through_one_guarded_decoder(
+        self,
+    ) -> None:
+        for relative, helper_name in sorted(JSON_TRUST_BOUNDARY_MODULES.items()):
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                helpers = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == helper_name
+                ]
+                self.assertEqual(1, len(helpers), f"{relative} lacks {helper_name}")
+                helper = helpers[0]
+                calls = _module_json_decode_calls(tree)
+                self.assertEqual(
+                    1,
+                    len(calls),
+                    f"{relative} has {len(calls)} raw json decodes: "
+                    + str([call.lineno for call in calls]),
+                )
+                call = calls[0]
+                self.assertLessEqual(helper.lineno, call.lineno)
+                self.assertLessEqual(
+                    call.end_lineno or call.lineno, helper.end_lineno or helper.lineno
+                )
+                self.assertEqual(
+                    ["object_pairs_hook", "parse_constant"],
+                    [keyword.arg for keyword in call.keywords],
+                    f"{relative} decodes without both refusals",
+                )
+
+    def test_no_other_tracked_module_decodes_json_with_a_plain_loader(self) -> None:
+        """The completeness half: a NEW plain decode anywhere goes red here."""
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "*.py"],
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        tracked = [name for name in listed.decode("utf-8").split("\0") if name]
+        self.assertGreater(len(tracked), 10, tracked)
+        unguarded: list[str] = []
+        for relative in tracked:
+            if relative in JSON_TRUST_BOUNDARY_MODULES:
+                continue
+            path = REPO_ROOT / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if not _module_json_decode_calls(tree):
+                continue
+            if relative in PLAIN_JSON_DECODE_ALLOWED:
+                self.assertTrue(PLAIN_JSON_DECODE_ALLOWED[relative].strip())
+                continue
+            if relative in PLAIN_JSON_DECODE_DEFERRED:
+                self.assertTrue(PLAIN_JSON_DECODE_DEFERRED[relative].strip())
+                continue
+            unguarded.append(relative)
+        self.assertEqual([], unguarded)
+
+    def test_the_allowlist_names_only_files_that_still_decode_json(self) -> None:
+        """An allowlist entry that no longer applies is a licence nobody revoked."""
+        listed = {**PLAIN_JSON_DECODE_ALLOWED, **PLAIN_JSON_DECODE_DEFERRED}
+        self.assertEqual(
+            len(listed),
+            len(PLAIN_JSON_DECODE_ALLOWED) + len(PLAIN_JSON_DECODE_DEFERRED),
+            "a module cannot be both a non-boundary and a deferred boundary",
+        )
+        for relative, reason in sorted(listed.items()):
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                self.assertTrue(path.is_file(), relative)
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                self.assertTrue(_module_json_decode_calls(tree), relative)
+                self.assertTrue(reason.strip())
+
+    def test_held_python_launcher_decodes_only_its_own_process_argv(self) -> None:
+        """install_inventory.py's one decode is genuinely not a trust boundary.
+
+        The decode lives inside a launcher template string, so the AST sweep above
+        cannot see it. It reads argv[4], which the SAME process builds two lines
+        earlier with json.dumps over a Python dict -- a dict cannot hold a repeated
+        key, so no producer can put one there. This test pins both halves: if the
+        template ever decodes something else, or the producer stops being a
+        json.dumps of a dict, the claim stops being true and this goes red.
+        """
+        source_path = SCRIPT_DIR / "install_inventory.py"
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(source_path))
+        self.assertEqual([], _module_json_decode_calls(tree))
+        template = next(
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_HELD_PYTHON_FD_LAUNCHER"
+            and isinstance(node.value, ast.Constant)
+        )
+        decodes = [
+            line.strip()
+            for line in template.split("\n")
+            if "json.load" in line
+        ]
+        self.assertEqual(
+            ["authenticated_source_sha256 = json.loads(sys.argv[4])"], decodes
+        )
+        producer = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "authenticated_context_json"
+        )
+        self.assertIsInstance(producer.value, ast.Call)
+        self.assertEqual("dumps", producer.value.func.attr)
+        self.assertEqual("json", producer.value.func.value.id)
+
+    def test_publisher_read_json_file_refuses_duplicate_keys(self) -> None:
+        publisher = self.load_module("scripts/publish_codex_install.py")
+        with tempfile.TemporaryDirectory(prefix="dupkey-publisher-") as raw:
+            path = Path(raw).resolve() / "receipt.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"operation": "publish", "status": "PREPARED"},
+                    "status",
+                    "RESERVED",
+                )
+            )
+            with self.assertRaisesRegex(
+                publisher.PublicationError, "duplicate JSON key 'status'"
+            ):
+                publisher._read_json_file(path, label="prepare receipt")
+
+    def test_large_queue_read_json_refuses_duplicate_keys_at_both_depths(self) -> None:
+        gate = self.load_module("scripts/check_large_queue_guidance.py")
+        for label, document, key, first in (
+            ("top level", {"schema_version": 1, "cases": []}, "schema_version", 2),
+            ("nested", {"outer": {"kept": 1, "state": "ACTIVE"}}, "state", "STALE"),
+        ):
+            with self.subTest(depth=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="dupkey-largequeue-", dir=REPO_ROOT
+                ) as raw:
+                    path = Path(raw).resolve() / "fixture.json"
+                    if label == "nested":
+                        inner = self.duplicate_key_bytes(
+                            document["outer"], key, first
+                        ).decode("utf-8")
+                        path.write_bytes(
+                            ('{"outer":' + inner.strip() + "}\n").encode("utf-8")
+                        )
+                    else:
+                        path.write_bytes(
+                            self.duplicate_key_bytes(document, key, first)
+                        )
+                    errors: list[str] = []
+                    self.assertEqual({}, gate.read_json(path, errors))
+                    self.assertEqual(1, len(errors), errors)
+                    self.assertIn(f"duplicate JSON key {key!r}", errors[0])
+
+    def test_poll_orchestrator_state_and_journal_refuse_duplicate_keys(self) -> None:
+        poll = self.load_module(
+            "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-poll-") as raw:
+            root = Path(raw).resolve()
+            state = root / "status.json"
+            state.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 1, "run_id": "r-1", "tracks": {}},
+                    "run_id",
+                    "r-forged",
+                )
+            )
+            with self.assertRaisesRegex(poll.PollError, "poll status is invalid JSON"):
+                poll._load_state(state)
+            journal = root / "journal.jsonl"
+            journal.write_bytes(
+                self.duplicate_key_bytes(
+                    {"event_id": "e-1", "kind": "poll"}, "event_id", "e-forged"
+                )
+            )
+            with self.assertRaisesRegex(poll.PollError, "row 1 is invalid"):
+                poll._journal_records(journal)
+
+    def test_client_delivery_authority_refuses_duplicate_keys(self) -> None:
+        authority = self.load_module(
+            "plugins/overnight-review-client-delivery/scripts/action_authority.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-authority-") as raw:
+            path = Path(raw).resolve() / "authority.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 1, "review_id": "rv-1", "grants": []},
+                    "review_id",
+                    "rv-forged",
+                )
+            )
+            with self.assertRaisesRegex(
+                authority.AuthorityError, "authority receipt is invalid JSON"
+            ):
+                authority._load_authority(path, review_id="rv-1")
+
+    def test_final_byte_review_state_and_legacy_path_refuse_duplicate_keys(
+        self,
+    ) -> None:
+        """The compatibility path counts: the reviewer named it explicitly."""
+        review = self.load_module(
+            "plugins/overnight-review-client-delivery/scripts/final_byte_review.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-finalbyte-") as raw:
+            path = Path(raw).resolve() / "state.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 2, "review_id": "rv-1", "cycle": 1},
+                    "review_id",
+                    "rv-forged",
+                )
+            )
+            with self.assertRaisesRegex(review.GateError, "must contain one UTF-8 JSON"):
+                review._load_state(path)
+            with self.assertRaisesRegex(
+                review.GateError, "legacy final-byte state is invalid JSON"
+            ):
+                review._legacy_state_invalidation(path, "rv-1")
+
+    def test_every_decoder_refuses_pythons_non_json_constants(self) -> None:
+        """The blind spot the duplicate-key repair left behind, closed and pinned.
+
+        ``json.loads`` accepts NaN/Infinity/-Infinity, which are a Python
+        extension rather than JSON. A conforming parser rejects those same
+        bytes -- the identical "two readings of one document" failure the
+        duplicate-key repair exists to prevent, so refusing one and not the
+        other would have shipped the class this fix repairs.
+        """
+        probes = (
+            b'{"total_bytes": NaN}\n',
+            b'{"nested": {"budget": Infinity}}\n',
+            b'{"drift": -Infinity}\n',
+        )
+        publisher = self.load_module("scripts/publish_codex_install.py")
+        for probe in probes:
+            with self.subTest(probe=probe.decode("utf-8").strip()):
+                with self.assertRaisesRegex(
+                    manifest.PublicationError, "non-JSON constant"
+                ):
+                    manifest._decode_json_without_duplicate_keys(probe, "state evidence")
+                errors: list[str] = []
+                self.assertIsNone(
+                    panel_inputs.json_object(probe, "prepare receipt", errors)
+                )
+                self.assertEqual(1, len(errors), errors)
+                self.assertIn("non-JSON constant", errors[0])
+                with tempfile.TemporaryDirectory(prefix="nonjson-const-") as raw:
+                    root = Path(raw).resolve()
+                    line = root / "panel-manifest.jsonl"
+                    line.write_bytes(probe)
+                    records, found = panel_inputs.load_jsonl(line)
+                    self.assertEqual([], records)
+                    self.assertTrue(
+                        any("non-JSON constant" in item for item in found), found
+                    )
+                    receipt = root / "receipt.json"
+                    receipt.write_bytes(probe)
+                    with self.assertRaisesRegex(
+                        publisher.PublicationError, "non-JSON constant"
+                    ):
+                        publisher._read_json_file(receipt, label="prepare receipt")
+
+    def test_release_identity_reproduction_refuses_duplicate_keys(self) -> None:
+        validator = self.load_module(".github/scripts/validate_plugins.py")
+        payload = self.duplicate_key_bytes(
+            {"name": "a-plugin", "version": "1.0.0"}, "version", "9.9.9"
+        )
+        with mock.patch.object(validator, "git_bytes", return_value=payload):
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key 'version'"):
+                validator.release_identity_at_commit("a-plugin", "deadbeef")
 
 
 if __name__ == "__main__":

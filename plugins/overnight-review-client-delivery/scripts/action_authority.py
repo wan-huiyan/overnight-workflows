@@ -71,6 +71,44 @@ UTC_RE = re.compile(
 )
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so both are
+    refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
+
 class AuthorityError(RuntimeError):
     """Authority evidence or the durable decision is unsafe or malformed."""
 
@@ -165,8 +203,8 @@ def _regular_bytes(path: Path, *, label: str) -> bytes:
 def _load_authority(path: Path, *, review_id: str) -> Dict[str, Any]:
     data = _regular_bytes(path, label="client-delivery authority receipt")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise AuthorityError("client-delivery authority receipt is invalid JSON") from exc
     if not isinstance(value, dict) or set(value) != AUTHORITY_FIELDS:
         raise AuthorityError("client-delivery authority receipt has schema drift")
@@ -252,7 +290,7 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> Dict[str, Any]:
         )
     except FileExistsError:
         existing = _validate_decision(
-            json.loads(_regular_bytes(path, label="client-delivery action decision"))
+            _strict_json_loads(_regular_bytes(path, label="client-delivery action decision"))
         )
         invariant = {key: value for key, value in value.items() if key != "recorded_at"}
         existing_invariant = {

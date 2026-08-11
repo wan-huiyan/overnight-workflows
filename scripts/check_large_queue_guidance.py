@@ -591,6 +591,44 @@ def run_reservation_source_review_guidance_negative_control(
         errors.append("reservation source-review negative control did not fail")
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so both are
+    refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
+
 def read_json(
     path: Path,
     errors: list[str],
@@ -603,8 +641,8 @@ def read_json(
             if authenticated_bytes is None
             else authenticated_bytes.decode("utf-8")
         )
-        value = json.loads(text)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         errors.append(f"{path.relative_to(ROOT)}: cannot read JSON: {exc}")
         return {}
     if not isinstance(value, dict):
@@ -778,8 +816,8 @@ def json_examples(markdown: str, errors: list[str]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for block in re.findall(r"```json\n(.*?)\n```", markdown, flags=re.DOTALL):
         try:
-            value = json.loads(block)
-        except json.JSONDecodeError as exc:
+            value = _strict_json_loads(block)
+        except (json.JSONDecodeError, NonConformingJSON) as exc:
             errors.append(f"large-queue reference has invalid JSON example: {exc}")
             continue
         if isinstance(value, dict) and isinstance(value.get("record_type"), str):
@@ -3227,7 +3265,7 @@ def _loader_skills_for_root(codex_bin: Path, codex_home: Path, root: Path) -> li
             line = process.stdout.readline()
             if not line:
                 break
-            parsed = json.loads(line)
+            parsed = _strict_json_loads(line)
             if parsed.get("id") == response_id:
                 return parsed
         raise RuntimeError(f"Codex app-server timed out waiting for response {response_id}")

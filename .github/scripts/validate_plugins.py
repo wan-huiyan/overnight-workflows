@@ -26,6 +26,45 @@ import re
 import subprocess
 import sys
 
+
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so both are
+    refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 errors = []
 warnings = []
@@ -72,8 +111,8 @@ def frontmatter_name(skill_md):
 def load_json(path):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+            return _strict_json_loads(f.read())
+    except (OSError, json.JSONDecodeError, NonConformingJSON) as e:
         err(f"invalid JSON {path}: {e}")
         return None
 
@@ -183,7 +222,7 @@ def payload_identity_at_commit(plugin_name, commit):
 
 def release_identity_at_commit(plugin_name, commit):
     """Reproduce one complete plugin release identity from immutable Git bytes."""
-    manifest = json.loads(
+    manifest = _strict_json_loads(
         git_bytes(
             "show", f"{commit}:plugins/{plugin_name}/.claude-plugin/plugin.json"
         ).decode("utf-8")

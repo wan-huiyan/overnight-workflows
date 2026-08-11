@@ -115,6 +115,44 @@ INVALIDATION_FIELDS = {
 }
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so both are
+    refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
+
 class GateError(RuntimeError):
     """The final-byte gate is incomplete, unsafe, or invalidated."""
 
@@ -752,8 +790,8 @@ def _report(
     inventory_sha256: str,
 ) -> Dict[str, Any]:
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise GateError("final report must contain one UTF-8 JSON object") from exc
     if not isinstance(value, dict) or set(value) != REPORT_FIELDS:
         raise GateError("final report has schema drift")
@@ -867,8 +905,8 @@ def _locked(state_path: Path) -> Iterator[None]:
 def _load_state(path: Path) -> Dict[str, Any]:
     data = _regular_bytes(path, label="final-byte state")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise GateError("final-byte state must contain one UTF-8 JSON object") from exc
     return _validate_state(value)
 
@@ -877,8 +915,8 @@ def _legacy_state_invalidation(path: Path, review_id: str) -> tuple[int, Dict[st
     """Read only enough v1 identity to invalidate it; never inherit approval."""
     data = _regular_bytes(path, label="legacy final-byte state")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise GateError("legacy final-byte state is invalid JSON") from exc
     inventory = value.get("frozen_inventory") if isinstance(value, dict) else None
     if (

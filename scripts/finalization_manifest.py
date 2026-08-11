@@ -1231,6 +1231,15 @@ def _verify_publication_receipt(record: Mapping[str, Any], label: str) -> Mappin
 
 
 def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
+    """Decode one JSON document, refusing anything with two readings.
+
+    The name says duplicate keys because that is what it was written for, and it
+    now refuses a second ambiguity of the same kind: ``NaN`` / ``Infinity`` /
+    ``-Infinity`` are a Python extension that a conforming parser rejects, so
+    accepting them would leave the same "two parsers, two answers" hole one step
+    to the side of the one this function closes.
+    """
+
     def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
         value: Dict[str, Any] = {}
         for key, item in pairs:
@@ -1239,9 +1248,14 @@ def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
             value[key] = item
         return value
 
+    def reject_non_json_constant(constant: str) -> Any:
+        raise PublicationError(f"{label} contains a non-JSON constant {constant!r}")
+
     try:
         return json.loads(
-            data.decode("utf-8"), object_pairs_hook=reject_duplicate_keys
+            data.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_json_constant,
         )
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise PublicationError(f"{label} is invalid JSON") from exc

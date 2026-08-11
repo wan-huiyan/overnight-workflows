@@ -380,22 +380,35 @@ def regular_bytes(path: Path, label: str, errors: list[str]) -> Optional[bytes]:
             os.close(descriptor)
 
 
-class DuplicateJSONKey(ValueError):
-    """One JSON object at a trust boundary repeated a key."""
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Two ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none: a repeated key
+    (RFC 8259 leaves the outcome undefined and Python keeps the last), and
+    ``NaN`` / ``Infinity`` / ``-Infinity`` (a Python extension, not JSON).
+    """
 
 
 def strict_json_loads(text: str) -> Any:
-    """Decode one JSON document, refusing any object that repeats a key."""
+    """Decode one JSON document, refusing anything with two readings."""
 
     def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
             if key in value:
-                raise DuplicateJSONKey(f"duplicate JSON key {key!r}")
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
             value[key] = item
         return value
 
-    return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
 
 
 def json_object(data: Optional[bytes], label: str, errors: list[str]) -> Optional[dict[str, Any]]:
@@ -403,7 +416,7 @@ def json_object(data: Optional[bytes], label: str, errors: list[str]) -> Optiona
         return None
     try:
         value = strict_json_loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         errors.append(f"{label} must contain one UTF-8 JSON object: {exc}")
         return None
     if not isinstance(value, dict):
@@ -531,7 +544,7 @@ def validate_installed(value: Any, verify: bool, errors: list[str]) -> None:
         if sorted(path for path in expected if PurePosixPath(path).name == "SKILL.md") != ["SKILL.md"]:
             raise ValueError("snapshot must expose only root SKILL.md")
         inventory = build_inventory(root, expected)
-    except (KeyError, ValueError, UnicodeError, json.JSONDecodeError, DuplicateJSONKey, PublicationError) as exc:
+    except (KeyError, ValueError, UnicodeError, json.JSONDecodeError, NonConformingJSON, PublicationError) as exc:
         errors.append(f"installed snapshot inventory could not be validated: {exc}")
         return
     if inventory.data != inventory_bytes:
@@ -817,7 +830,7 @@ def validate_staged_validation(
     else:
         try:
             stdout_result = strict_json_loads(stdout)
-        except (json.JSONDecodeError, DuplicateJSONKey) as exc:
+        except (json.JSONDecodeError, NonConformingJSON) as exc:
             errors.append(f"prepare receipt staged_validation.stdout is invalid JSON: {exc}")
         else:
             if stdout_result != result:
@@ -865,7 +878,7 @@ def validate_staged_validation(
                 fresh_stdout_text = fresh_stdout.decode("utf-8")
                 fresh_stderr_text = fresh_stderr.decode("utf-8")
                 fresh_result = strict_json_loads(fresh_stdout_text)
-            except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
+            except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
                 errors.append(f"fresh staged checker result is malformed: {exc}")
             else:
                 if isinstance(fresh_result, dict) and fresh_result.get("status") == "FAIL":
@@ -2307,7 +2320,7 @@ def load_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
         try:
             line = raw_line.decode("utf-8")
             value = strict_json_loads(line)
-        except (UnicodeError, json.JSONDecodeError, DuplicateJSONKey) as exc:
+        except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
             errors.append(f"panel manifest line {number} is invalid JSON: {exc}"); continue
         if not isinstance(value, dict): errors.append(f"panel manifest line {number} must be an object")
         else: records.append(value)
@@ -2328,7 +2341,7 @@ def main() -> int:
     errors: list[str] = []
     check_validation_time_budget_contract(errors)
     try: fixtures = _load_panel_fixtures()
-    except (OSError, UnicodeError, json.JSONDecodeError, DuplicateJSONKey, RuntimeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError, NonConformingJSON, RuntimeError) as exc:
         fixtures = {}; errors.append(f"cannot read panel fixtures: {exc}")
     errors.extend(fixture_errors(fixtures))
     if args.self_test and not errors: errors.extend(self_test(fixtures))

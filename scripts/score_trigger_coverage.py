@@ -58,6 +58,38 @@ CAP = 1536
 DEFAULT_SUITE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "eval", "description-trigger-suite.json")
 
+
+class NonConformingJSON(ValueError):
+    """One JSON object in the eval suite repeated a key.
+
+    This script reports and does not gate, so the harm here is not a bad
+    publication: it is a QUIET one. ``json.loads`` keeps the last of a repeated
+    key, so a suite that names the same skill twice would silently score one of
+    them and drop the other, and the coverage figures quoted from the run would
+    be right-looking and wrong. Refuse the ambiguity instead.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+    )
+
 # Deliberately small and explicit: a large stopword list is a free parameter that can be
 # tuned until the numbers look good. Keep it to function words only, and keep it here in
 # the repo so a reviewer can see exactly what was excluded.
@@ -148,7 +180,8 @@ def main() -> int:
     ap.add_argument("--markdown", action="store_true", help="emit the PR table")
     a = ap.parse_args()
 
-    suite = json.load(open(a.suite, encoding="utf-8"))["skills"]
+    with open(a.suite, encoding="utf-8") as handle:
+        suite = _strict_json_loads(handle.read())["skills"]
     names = [a.skill] if a.skill else list(suite)
     for n in names:
         if n not in suite:
