@@ -226,8 +226,18 @@ Generic-v2 `raw_input_registered` rows are restricted to the
 `prepublication-source-and-staged-snapshot` dispatch must use
 `source_review_input_registered`, so it cannot select the generic raw-input row
 to evade a declared source-validation artifact. The validation artifact JSON
-is decoded with duplicate-key rejection before its review ID and configured
-PASS field are checked.
+is decoded through the strict decoder before its review ID and configured PASS
+field are checked.
+
+Every module that decodes JSON someone else produced routes it through one
+sanctioned decoder, and each refuses four ways `json.loads` returns a confident
+answer another conforming parser would not: a repeated key, the Python
+constants `NaN` / `Infinity` / `-Infinity`, a number too large for a float such
+as `1e400` (ordinary JSON number syntax, which Python resolves to the same
+infinity and re-encodes as the literal `Infinity` the decoder refuses), and an
+unpaired surrogate escape such as `\ud800` (Python keeps the lone code point,
+Go's encoding/json substitutes U+FFFD, so one document decodes to two different
+strings). A surrogate pair is ordinary non-BMP text and stays accepted.
 
 A generic-v2 source review can seal `judgment` only when its lifecycle joins up.
 Challenge responses must come from exactly the roles that reported, one per

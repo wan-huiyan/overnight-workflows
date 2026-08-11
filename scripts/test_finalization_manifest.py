@@ -1006,7 +1006,7 @@ class FinalizationManifestTests(unittest.TestCase):
         self.assertLessEqual(helper.lineno, call.lineno)
         self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
         self.assertEqual(
-            ["object_pairs_hook", "parse_constant"],
+            ["object_pairs_hook", "parse_constant", "parse_float"],
             [keyword.arg for keyword in call.keywords],
         )
 
@@ -1032,7 +1032,7 @@ class FinalizationManifestTests(unittest.TestCase):
         self.assertLessEqual(helper.lineno, call.lineno)
         self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
         self.assertEqual(
-            ["object_pairs_hook", "parse_constant"],
+            ["object_pairs_hook", "parse_constant", "parse_float"],
             [keyword.arg for keyword in call.keywords],
         )
 
@@ -3829,6 +3829,60 @@ class FinalizationManifestTests(unittest.TestCase):
             )
 
     @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_the_judge_receipt_must_carry_the_re_derived_finding_resolution(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """The five resolution fields were enforced in production, untested.
+
+        The reviewer disabled the clause in ``_verify_judge_receipt`` that
+        compares the receipt against the re-derived join and the whole suite
+        still passed, so the rule that binds a judge's receipt to the finding
+        IDs rather than to a count was resting on nothing.
+
+        ``findings_resolution_sha256`` is the sharpest of the five: it is read
+        in that clause and nowhere else, so a control that forges it is
+        measuring exactly the clause and cannot be satisfied by some other
+        comparison happening to catch the change.  The receipt file and its
+        publication receipt are re-derived after the forgery so the byte and
+        digest checks stay green and the refusal has only one possible cause.
+        """
+        for field, forged in (
+            ("findings_resolution_sha256", "a" * 64),
+            ("findings_reported", 3),
+            ("findings_accepted", 2),
+            ("findings_merged", 0),
+            ("findings_rejected", 1),
+        ):
+            with self.subTest(forged=field):
+                root, path, raw_digest = self.source_review_case(
+                    "finalization-resolution-receipt-"
+                )
+                records = self.records(path)
+                verdict = self.find_row(
+                    records, "source_review_judge_verdict_received"
+                )
+                judge = verdict["judge"]
+                body = json.loads(
+                    Path(str(judge["path"])).read_text(encoding="utf-8")
+                )
+                self.assertNotEqual(forged, body[field])
+                body[field] = forged
+                self.republish_in_place(
+                    judge,
+                    (
+                        json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("utf-8"),
+                )
+                self.write_records(path, records)
+                self.assert_judgment_refused(
+                    root,
+                    path,
+                    raw_digest,
+                    "source-review judge verdict does not bind an accepted judge "
+                    "decision",
+                )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
     def test_a_judgment_seal_minted_before_the_review_contract_still_validates(
         self, panel_validator: mock.Mock
     ) -> None:
@@ -5263,7 +5317,43 @@ PLAIN_JSON_DECODE_ALLOWED = {
 }
 
 
+def _module_invisible_json_decoders(tree: ast.AST) -> list[str]:
+    """Ways to decode JSON that ``_module_json_decode_calls`` cannot follow.
+
+    ``from json import loads``, ``import json as j`` and
+    ``json.JSONDecoder().decode(...)`` all reach the same decoder while
+    presenting nothing the sweep below matches on.  Rather than widen that
+    sweep to chase aliases through a module -- which means tracking assignment
+    -- every tracked file is required to contain NONE of these, which turns the
+    blind spot into a hard error.
+
+    Detected structurally rather than by text.  A guard that greps for
+    ``"from json import"`` cannot tell a file DECODING that way from one
+    DESCRIBING it, and would refuse this very docstring.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "json":
+            names = ", ".join(alias.name for alias in node.names)
+            found.append(f"from json import {names}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "json" and alias.asname:
+                    found.append(f"import json as {alias.asname}")
+        elif isinstance(node, ast.Attribute) and node.attr == "JSONDecoder":
+            found.append("json.JSONDecoder")
+    return found
+
+
 def _module_json_decode_calls(tree: ast.AST) -> list[ast.Call]:
+    """Every ``json.load`` / ``json.loads`` reached through a bare ``json``.
+
+    That is the whole of what this sees, and the docstring says so because the
+    previous one did not: an aliased import or a ``JSONDecoder`` instance is
+    invisible here.  Those are covered by ``_module_invisible_json_decoders``
+    above, which the completeness test refuses outright, so a decode this
+    function cannot see cannot enter the tree unnoticed.
+    """
     return [
         node
         for node in ast.walk(tree)
@@ -5340,13 +5430,103 @@ class NonConformingJSONSweepTests(unittest.TestCase):
                     call.end_lineno or call.lineno, helper.end_lineno or helper.lineno
                 )
                 self.assertEqual(
-                    ["object_pairs_hook", "parse_constant"],
+                    ["object_pairs_hook", "parse_constant", "parse_float"],
                     [keyword.arg for keyword in call.keywords],
-                    f"{relative} decodes without both refusals",
+                    f"{relative} decodes without all three refusal hooks",
+                )
+
+    # One probe per ambiguity, with the words the refusal must say.  Driving
+    # only the spelled-out constant would stay green on the 1e400 hole, which
+    # is the shape this repo keeps re-shipping: the fix for a defect carrying a
+    # fresh instance of that same defect.
+    JSON_AMBIGUITY_PROBES = (
+        ("duplicate key", '{"kept": 1, "kept": 2}', "duplicate JSON key"),
+        ("python constant", '{"kept": Infinity}', "non-JSON constant"),
+        ("float overflow", '{"kept": 1e400}', "out-of-range JSON number"),
+        ("negative overflow", '{"kept": [-1e400]}', "out-of-range JSON number"),
+        ("unpaired surrogate", '{"kept": "\\ud800"}', "unpaired surrogate"),
+    )
+    # A document that exercises everything ADJACENT to the four refusals and is
+    # ordinary JSON.  Without it a decoder that refused every document would
+    # pass every probe above.
+    JSON_UNAMBIGUOUS_DOCUMENT = (
+        '{"emoji": "\\ud83d\\ude00", "underflow": 1e-400, '
+        '"big_int": 123456789012345678901234567890, "plain": "ok"}'
+    )
+
+    def sweep_module(self, relative: str):
+        """The module under test, without importing anything twice.
+
+        finalization_manifest.py and validate_panel_inputs.py are already
+        imported at the top of this file.  ``load_module`` deliberately does not
+        register what it loads in ``sys.modules``, which ``@dataclass`` needs to
+        resolve annotations, so re-loading those two by path fails outright.
+        """
+        if relative == "scripts/finalization_manifest.py":
+            return manifest
+        if relative == "scripts/validate_panel_inputs.py":
+            return panel_inputs
+        return self.load_module(relative)
+
+    def drive_decoder(self, relative: str, module, helper_name: str, text: str):
+        """Call one module's sanctioned decoder the way its callers do."""
+        decoder = getattr(module, helper_name)
+        if relative == "scripts/finalization_manifest.py":
+            # The only one taking bytes and a label, and the only one raising
+            # PublicationError rather than NonConformingJSON.
+            return decoder(text.encode("utf-8"), "probe evidence")
+        return decoder(text)
+
+    @staticmethod
+    def decoder_refusal_type(relative: str, module):
+        if relative == "scripts/finalization_manifest.py":
+            return module.PublicationError
+        return module.NonConformingJSON
+
+    def test_every_trust_boundary_decoder_actually_refuses_each_ambiguity(
+        self,
+    ) -> None:
+        """The structural guard reads keyword NAMES; this one reads BEHAVIOUR.
+
+        The reviewer demonstrated the gap by replacing both refusal hooks in
+        score_trigger_coverage.py with silent ones: every keyword was still
+        spelled correctly, so the AST test above stayed green while the decoder
+        resolved the ambiguity instead of refusing it.  Only three of the nine
+        modules were driven anywhere, and those three through their callers.
+
+        This drives the sanctioned decoder of all nine directly, with one probe
+        per ambiguity, and then requires an ordinary document to survive -- a
+        decoder that refuses everything is not a decoder.
+        """
+        for relative, helper_name in sorted(JSON_TRUST_BOUNDARY_MODULES.items()):
+            module = self.sweep_module(relative)
+            refusal = self.decoder_refusal_type(relative, module)
+            for label, probe, expected in self.JSON_AMBIGUITY_PROBES:
+                with self.subTest(module=relative, ambiguity=label):
+                    with self.assertRaisesRegex(refusal, expected):
+                        self.drive_decoder(relative, module, helper_name, probe)
+            with self.subTest(module=relative, ambiguity="none"):
+                decoded = self.drive_decoder(
+                    relative, module, helper_name, self.JSON_UNAMBIGUOUS_DOCUMENT
+                )
+                self.assertEqual(
+                    {
+                        "emoji": "\U0001f600",
+                        "underflow": 0.0,
+                        "big_int": 123456789012345678901234567890,
+                        "plain": "ok",
+                    },
+                    decoded,
                 )
 
     def test_no_other_tracked_module_decodes_json_with_a_plain_loader(self) -> None:
-        """The completeness half: a NEW plain decode anywhere goes red here."""
+        """The completeness half: a NEW plain decode anywhere goes red here.
+
+        Two halves, because the AST sweep sees only one spelling.  Every tracked
+        file is refused if it contains a spelling the sweep cannot follow, so
+        "no plain decode" below is a statement about the file rather than about
+        what this test happens to be able to parse.
+        """
         listed = subprocess.run(
             ["git", "ls-files", "-z", "*.py"],
             cwd=REPO_ROOT,
@@ -5355,6 +5535,21 @@ class NonConformingJSONSweepTests(unittest.TestCase):
         ).stdout
         tracked = [name for name in listed.decode("utf-8").split("\0") if name]
         self.assertGreater(len(tracked), 10, tracked)
+        invisible: list[str] = []
+        for relative in tracked:
+            path = REPO_ROOT / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            invisible.extend(
+                f"{relative}: {spelling}"
+                for spelling in _module_invisible_json_decoders(tree)
+            )
+        self.assertEqual(
+            [],
+            invisible,
+            "these reach a JSON decoder in a spelling the sweep below cannot "
+            "follow; route them through the module's sanctioned decoder, or "
+            "widen the sweep and this check together",
+        )
         unguarded: list[str] = []
         for relative in tracked:
             if relative in JSON_TRUST_BOUNDARY_MODULES:

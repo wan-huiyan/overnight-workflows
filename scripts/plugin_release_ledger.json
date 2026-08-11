@@ -135,9 +135,9 @@
           "version": "1.0.3",
           "content_version": "1.0.3",
           "source_commit": "working-tree-release",
-          "payload_sha256": "0d564686224e463f81f4c4696fe35f17ef2687ab82f806a0476494765fb33a9b",
+          "payload_sha256": "f8a138a16ff4724e576df28ef0fefbfa9e92a13bd6221bc7b79f21e014e1d3c2",
           "file_count": 4,
-          "total_bytes": 95792
+          "total_bytes": 99406
         }
       ]
     },
@@ -195,9 +195,9 @@
           "version": "1.0.4",
           "content_version": "1.0.4",
           "source_commit": "working-tree-release",
-          "payload_sha256": "b9b94ba03eac1b854b445b8a73c465c20bbf50fd98999a485ffe3bf651c5e627",
+          "payload_sha256": "8178c9a9b46ed3bf9af1b73966167ab0e9a39ff005496f7e4f5852f09eaf512c",
           "file_count": 3,
-          "total_bytes": 110075
+          "total_bytes": 111882
         }
       ]
     },

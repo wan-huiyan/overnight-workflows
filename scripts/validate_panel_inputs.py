@@ -383,10 +383,15 @@ def regular_bytes(path: Path, label: str, errors: list[str]) -> Optional[bytes]:
 class NonConformingJSON(ValueError):
     """These bytes do not have one meaning, so no gate may act on them.
 
-    Two ways ``json.loads`` will hand back a confident answer where another
+    Four ways ``json.loads`` will hand back a confident answer where another
     conforming parser would hand back a different one, or none: a repeated key
-    (RFC 8259 leaves the outcome undefined and Python keeps the last), and
-    ``NaN`` / ``Infinity`` / ``-Infinity`` (a Python extension, not JSON).
+    (RFC 8259 leaves the outcome undefined and Python keeps the last);
+    ``NaN`` / ``Infinity`` / ``-Infinity`` (a Python extension, not JSON); a
+    number too large for a float such as ``1e400`` (ordinary JSON syntax that
+    Python resolves to the same infinity and then re-encodes as the literal
+    ``Infinity`` this decoder refuses); and an unpaired surrogate escape such
+    as ``\\ud800`` (Python keeps the lone code point, Go's encoding/json
+    substitutes U+FFFD, so one document decodes to two different strings).
     """
 
 
@@ -404,11 +409,35 @@ def strict_json_loads(text: str) -> Any:
     def reject_non_json_constant(constant: str):
         raise NonConformingJSON(f"non-JSON constant {constant!r}")
 
-    return json.loads(
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
         text,
         object_pairs_hook=reject_duplicate_keys,
         parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
     )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
 
 
 def json_object(data: Optional[bytes], label: str, errors: list[str]) -> Optional[dict[str, Any]]:

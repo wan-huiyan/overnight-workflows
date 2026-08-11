@@ -1279,11 +1279,20 @@ def _verify_publication_receipt(record: Mapping[str, Any], label: str) -> Mappin
 def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
     """Decode one JSON document, refusing anything with two readings.
 
-    The name says duplicate keys because that is what it was written for, and it
-    now refuses a second ambiguity of the same kind: ``NaN`` / ``Infinity`` /
-    ``-Infinity`` are a Python extension that a conforming parser rejects, so
-    accepting them would leave the same "two parsers, two answers" hole one step
-    to the side of the one this function closes.
+    The name says duplicate keys because that is what it was written for.  It
+    now refuses three more ambiguities of the same kind, each a way ``json``
+    hands back a confident answer another conforming parser would not:
+
+    * ``NaN`` / ``Infinity`` / ``-Infinity``, a Python extension a conforming
+      parser rejects;
+    * a number too large for a float, such as ``1e400`` -- ordinary JSON number
+      syntax, so ``parse_constant`` is never called for it, which is exactly
+      why refusing the spelled-out constant alone left it accepted.  Python
+      resolves it to the same infinity and canonically re-encodes it as the
+      literal ``Infinity`` this function refuses;
+    * an unpaired surrogate escape such as ``\\ud800``: Python keeps the lone
+      code point, Go's encoding/json substitutes U+FFFD, so one document
+      decodes to two different strings and a digest over them disagrees.
     """
 
     def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
@@ -1297,14 +1306,39 @@ def _decode_json_without_duplicate_keys(data: bytes, label: str) -> Any:
     def reject_non_json_constant(constant: str) -> Any:
         raise PublicationError(f"{label} contains a non-JSON constant {constant!r}")
 
+    def reject_non_finite_number(number: str) -> float:
+        # Integer tokens cannot overflow -- Python's ints are arbitrary
+        # precision -- so every number that can reach infinity arrives here.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise PublicationError(
+                f"{label} contains an out-of-range JSON number {number!r}"
+            )
+        return value
+
     try:
-        return json.loads(
+        value = json.loads(
             data.decode("utf-8"),
             object_pairs_hook=reject_duplicate_keys,
             parse_constant=reject_non_json_constant,
+            parse_float=reject_non_finite_number,
         )
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise PublicationError(f"{label} is invalid JSON") from exc
+    # Deliberately OUTSIDE the block above: UnicodeEncodeError is a UnicodeError,
+    # so folding this in would report an unpaired surrogate as "invalid JSON"
+    # and lose which of the four ambiguities was found.  Encoding refuses a lone
+    # surrogate anywhere -- key, value, or inside an array -- and accepts the
+    # character a surrogate PAIR decodes to, so ordinary non-BMP text written as
+    # an escape pair still passes.  Raw surrogate bytes never get this far:
+    # data.decode("utf-8") above rejects them.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PublicationError(
+            f"{label} contains an unpaired surrogate in a JSON string"
+        ) from exc
+    return value
 
 
 def _verify_required_pre_dispatch_validation(

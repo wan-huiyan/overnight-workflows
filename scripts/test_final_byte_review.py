@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import unittest
 
@@ -17,10 +18,22 @@ HELPER = (
     ROOT
     / "plugins/overnight-review-client-delivery/scripts/final_byte_review.py"
 )
-SPEC = importlib.util.spec_from_file_location("final_byte_review", HELPER)
-assert SPEC is not None and SPEC.loader is not None
-gate = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(gate)
+# The plugin payload is identified BY ITS BYTES: validate_plugins.py walks this
+# directory and compares file_count / total_bytes / payload_sha256 against
+# scripts/plugin_release_ledger.json. A .pyc written beside
+# final_byte_review.py is a new file in that payload, so importing it
+# carelessly here makes a different gate fail -- 6 errors, in a run that had
+# nothing to do with this suite. CI was green only because it happens to run
+# validate_plugins.py before this suite.
+_BYTECODE = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    SPEC = importlib.util.spec_from_file_location("final_byte_review", HELPER)
+    assert SPEC is not None and SPEC.loader is not None
+    gate = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(gate)
+finally:
+    sys.dont_write_bytecode = _BYTECODE
 
 
 class FinalByteReviewTests(unittest.TestCase):
