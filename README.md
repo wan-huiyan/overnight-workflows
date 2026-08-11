@@ -226,8 +226,8 @@ Generic-v2 `raw_input_registered` rows are restricted to the
 `prepublication-source-and-staged-snapshot` dispatch must use
 `source_review_input_registered`, so it cannot select the generic raw-input row
 to evade a declared source-validation artifact. The validation artifact JSON
-is decoded through the strict decoder before its review ID and configured PASS
-field are checked.
+is decoded with duplicate-key rejection, and with the three further refusals
+below, before its review ID and configured PASS field are checked.
 
 Nine modules that decode JSON someone else produced route it through one
 sanctioned decoder each, and each refuses four ways `json.loads` returns a

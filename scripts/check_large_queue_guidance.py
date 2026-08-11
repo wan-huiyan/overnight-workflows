@@ -210,6 +210,15 @@ SOURCE_REVIEW_BOUNDARY_README_MARKERS = (
     "A `prepublication-source-and-staged-snapshot` dispatch must use "
     "`source_review_input_registered`",
     "decoded with duplicate-key rejection",
+    # The other three refusals, pinned the same way, so the README cannot go
+    # back to describing only the first of the four.  Markers are matched
+    # against whitespace-normalized text, so they carry single spaces wherever
+    # the README happens to wrap.  This file and README.md are not
+    # install-manifest entries, so adding markers here regenerates no install
+    # digest.
+    "the Python constants `NaN` / `Infinity` / `-Infinity`",
+    "a number too large for a float such as `1e400`",
+    "an unpaired surrogate escape such as `\\ud800`",
 )
 # README-only markers: README.md and this checker are not install-manifest
 # entries, so stating the reservation gate here regenerates no install digest.
