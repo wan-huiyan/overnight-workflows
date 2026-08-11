@@ -832,6 +832,12 @@ class FinalizationManifestTests(unittest.TestCase):
                 record["sha256"] = hashlib.sha256(judge_path.read_bytes()).hexdigest()
             if record["record_type"] != "manifest_prefix_registered":
                 continue
+            # An archived v1 manifest predates review_contract, so the reframed
+            # seal must not carry it -- and the hand-built receipt below omits
+            # it, so leaving it on the row would make the row disagree with its
+            # own receipt.  That disagreement is the anti-downgrade check doing
+            # its job; the fixture is what was wrong.
+            record.pop("review_contract", None)
             phase = str(record["phase"])
             prefix_data = b"".join(
                 (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -2654,13 +2660,32 @@ class FinalizationManifestTests(unittest.TestCase):
         rejected: list[str] | None = None,
         register_rationale: bool = True,
         register_payload: bool = True,
+        pre_contract: bool = False,
     ) -> tuple[Path, str]:
         """Build one generic-v2 source-review manifest that is judgment-ready.
 
         Everything is published through ``publish_review_artifact`` exactly as
         production must, the dispatch phase is sealed, and the judgment phase is
         deliberately left unsealed so a control can drive ``seal``.
+
+        ``pre_contract`` builds the evidence in the shape it had before
+        ``review_contract`` existed: no finding inventory, no publication
+        receipts, no judge rationale or controller payload, and a judge receipt
+        carrying only the eleven fields of that era.  It is one switch rather
+        than five because the era is one thing -- a manifest half in each era
+        never existed and would not be a control for anything.
         """
+        if pre_contract:
+            publish_finding_inventory = False
+            register_rationale = False
+            register_payload = False
+
+        def publish(*args: object, **kwargs: object) -> dict[str, object]:
+            identity = self.publish_review_file(*args, **kwargs)
+            if pre_contract:
+                identity.pop("publication_receipt")
+            return identity
+
         path = self.make_manifest(root)
         raw_inventory = root / "control-raw-input.inventory"
         raw_root = root / "raw-inputs"
@@ -2762,7 +2787,7 @@ class FinalizationManifestTests(unittest.TestCase):
             if publish_finding_inventory:
                 extra["finding_ids"] = list(report_findings[index])
             reports.append(
-                self.publish_review_file(
+                publish(
                     root,
                     f"reports/report-{index}.md",
                     f"review artifact {index}\n".encode("utf-8"),
@@ -2775,7 +2800,7 @@ class FinalizationManifestTests(unittest.TestCase):
             if publish_finding_inventory:
                 extra["answered_finding_ids"] = list(answered_findings[index])
             challenges.append(
-                self.publish_review_file(
+                publish(
                     root,
                     f"challenges/challenge-{index}.md",
                     f"challenge artifact {index}\n".encode("utf-8"),
@@ -2881,13 +2906,14 @@ class FinalizationManifestTests(unittest.TestCase):
             "merged_findings": dict(
                 {"G-004": "G-003"} if merged is None else merged
             ),
-            "rejected_findings": list([] if rejected is None else rejected),
             "live_installation_status": "UNCHANGED_PREDECESSOR",
             "source_guidance_status": "SOURCE_GUIDANCE_ACCEPTED",
             "state": "SOURCE_ACCEPTED",
             "next_action": "prepare postpublication review",
         }
-        rationale = self.publish_review_file(
+        if not pre_contract:
+            verdict_row["rejected_findings"] = list([] if rejected is None else rejected)
+        rationale = publish(
             root, "judge/rationale.md", b"judge rationale\n"
         )
         if register_rationale:
@@ -2903,7 +2929,8 @@ class FinalizationManifestTests(unittest.TestCase):
                     "next_action": "judge",
                 },
             )
-        verdict_row["judge_rationale"] = rationale
+        if not pre_contract:
+            verdict_row["judge_rationale"] = rationale
         judge_body = {
             "schema_version": 1,
             "record_type": manifest.JUDGE_RECEIPT_TYPE,
@@ -2917,11 +2944,15 @@ class FinalizationManifestTests(unittest.TestCase):
             "verdict": "ACCEPT",
             "recorded_at": "2026-08-09T00:00:03Z",
             "findings_unresolved": 0,
-            **self.source_resolution_or_placeholder(
-                report_row, challenge_row, verdict_row
+            **(
+                {}
+                if pre_contract
+                else self.source_resolution_or_placeholder(
+                    report_row, challenge_row, verdict_row
+                )
             ),
         }
-        verdict_row["judge"] = self.publish_review_file(
+        verdict_row["judge"] = publish(
             root,
             "judge/source-judge.json",
             (
@@ -2942,7 +2973,7 @@ class FinalizationManifestTests(unittest.TestCase):
                 for record in self.records(path)
                 if record["record_type"] == "source_review_judge_verdict_received"
             )
-            payload_identity = self.publish_review_file(
+            payload_identity = publish(
                 root,
                 "judge/payload.json",
                 self.controller_payload_bytes(appended),
@@ -3798,6 +3829,121 @@ class FinalizationManifestTests(unittest.TestCase):
             )
 
     @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_a_judgment_seal_minted_before_the_review_contract_still_validates(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """A seal from the older era is re-validated by the older era's rules.
+
+        Every accept-layer rule is re-run over the sealed prefix on every read,
+        so a rule added after a seal was minted would refuse evidence that was
+        validly sealed -- and the seal, its snapshot and its receipt are all
+        create-once, so there is no repair.  The seal records its era and
+        re-validation reads it.
+
+        The manifest here breaks a rule that only the CURRENT era has -- the
+        challenger did not report -- so a control that has stopped exercising
+        the older path fails instead of passing for the wrong reason.
+        """
+        with mock.patch.object(manifest, "CURRENT_REVIEW_CONTRACT", None):
+            root, path, raw_digest = self.source_review_case(
+                "finalization-pre-contract-",
+                pre_contract=True,
+                challenge_roles=("reviewer-2",),
+            )
+            self.seal(path, "judgment", raw_digest)
+        seal_row = self.find_row(
+            self.records(path), "manifest_prefix_registered", phase="judgment"
+        )
+        receipt = json.loads(
+            (root / "manifest-prefix.judgment.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("review_contract", seal_row)
+        self.assertNotIn("review_contract", receipt)
+
+        identity = manifest.validate_manifest(path)
+        self.assertEqual(len(self.records(path)), identity["record_count"])
+
+        # The same evidence cannot be sealed under the current contract, so the
+        # compatibility is confined to re-reading what is already sealed.
+        current_root, current_path, current_digest = self.source_review_case(
+            "finalization-pre-contract-now-",
+            pre_contract=True,
+            challenge_roles=("reviewer-2",),
+        )
+        self.assert_judgment_refused(
+            current_root,
+            current_path,
+            current_digest,
+            "challenges must come from exactly the reporting reviewers",
+        )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_a_pre_contract_seal_cannot_be_downgraded_by_editing_the_row(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Deleting the marker from a current seal contradicts its own receipt.
+
+        Without this the compatibility path would be a downgrade switch: strip
+        one field and the older, weaker rules apply.  The receipt is create-once
+        and carries the same marker, so the row and the receipt disagree.
+
+        The proof is driven on the DISPATCH seal deliberately.  No accept-layer
+        rule runs for that phase, so the receipt comparison is the ONLY thing
+        that can refuse it -- on a judgment seal the era-mismatched judge
+        receipt refuses first and the control would pass without ever exercising
+        the mechanism it is named after.  Both refusals are then shown.
+        """
+        root, path, raw_digest = self.source_review_case(
+            "finalization-contract-downgrade-"
+        )
+        records = self.records(path)
+        seal_row = self.find_row(
+            records, "manifest_prefix_registered", phase="dispatch"
+        )
+        self.assertEqual(
+            manifest.REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1,
+            seal_row["review_contract"],
+        )
+        del seal_row["review_contract"]
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError, "receipt does not match registration"
+        ):
+            manifest.validate_manifest(path)
+
+        # An unrecognised contract is refused outright rather than falling
+        # through into the older rules, and this one is refused at parse time,
+        # before any receipt is read.
+        records = self.records(path)
+        self.find_row(records, "manifest_prefix_registered", phase="dispatch")[
+            "review_contract"
+        ] = "source-review-findings-and-publication-v2"
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError, "unsupported review contract"
+        ):
+            manifest.validate_manifest(path)
+
+        # And a downgraded JUDGMENT seal buys nothing either: the judge receipt
+        # this era mints carries five fields the older era refuses.
+        records = self.records(path)
+        self.find_row(records, "manifest_prefix_registered", phase="dispatch")[
+            "review_contract"
+        ] = manifest.REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1
+        self.write_records(path, records)
+        self.seal(path, "judgment", raw_digest)
+        records = self.records(path)
+        del self.find_row(
+            records, "manifest_prefix_registered", phase="judgment"
+        )["review_contract"]
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError,
+            "source-review judge verdict does not bind an accepted judge decision",
+        ):
+            manifest.validate_manifest(path)
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
     def test_source_review_rows_without_the_new_evidence_stay_readable(
         self, panel_validator: mock.Mock
     ) -> None:
@@ -3808,6 +3954,14 @@ class FinalizationManifestTests(unittest.TestCase):
         this, an in-flight manifest whose reports row predates the change would
         become permanently unreadable and unappendable, not merely unable to
         seal judgment.
+
+        SCOPE, because this test used to be read as covering more than it does:
+        the manifest here has sealed DISPATCH only, so no accept-layer rule ever
+        runs over it and the optional-to-parse decision is the whole of what is
+        being proved.  A manifest that has already sealed JUDGMENT is a
+        different case entirely -- every accept-layer rule is re-run over its
+        prefix on each read -- and it is covered by
+        ``test_a_judgment_seal_minted_before_the_review_contract_still_validates``.
         """
         root, path, raw_digest = self.source_review_case(
             "finalization-compatibility-",

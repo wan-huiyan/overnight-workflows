@@ -248,6 +248,22 @@ seal `judgment`. The receipt proves the publication method, the continuity of
 the published inode, and the current bytes; it is not a signature and does not
 authenticate the publisher, which remains the launcher's job.
 
+Every rule in the paragraph above is re-run over the sealed prefix each time the
+manifest is read, so a rule added later would refuse evidence that was validly
+sealed earlier — and the seal, its snapshot and its receipt are all create-once,
+so there would be no way to repair it. Each phase seal therefore records the
+contract it was minted under, in `review_contract`, and re-validation applies
+that contract's rules: a seal written before the finding-resolution and
+publication joins existed keeps validating under the rules that gated it.
+Minting a new seal always applies the current contract, so nothing weakens going
+forward. The marker cannot be deleted to buy the older rules, because the
+create-once prefix receipt carries the same value and the two are compared; a
+seal naming any other contract string is refused outright rather than treated as
+an older one. The one exception, stated plainly: a review whose `judgment` seal
+predates the contract has its judge receipt checked against that era's eleven
+fields rather than the sixteen, because a create-once receipt cannot grow the
+five resolution fields. Every other reservation check runs in both eras.
+
 A prepared generation that a `source_review_input_registered` row names —
 joined by both its `prepared_generation_id` and its `prepare_receipt_sha256` —
 cannot be reserved until that same review accepted it. Reservation requires the

@@ -57,6 +57,29 @@ LEGACY_SOURCE_REVIEW_ACCEPTED_STATES = frozenset(
 LEGACY_SOURCE_REVIEW_ACCEPTED_STATUSES = frozenset(
     {SOURCE_REVIEW_ACCEPTED_STATUS, "REVIEWED"}
 )
+# WHICH ERA A PREFIX SEAL WAS MINTED IN.
+#
+# Every accept-layer rule below is re-run over the sealed prefix on every later
+# read, so a rule added today would otherwise reach backwards and refuse
+# evidence that was validly sealed yesterday -- the seal, its snapshot and its
+# receipt are all create-once, so there is no way to repair such a manifest and
+# the evidence would be stranded.  A seal therefore records the contract it was
+# minted under, and re-validation applies THAT contract's rules.  Minting a new
+# seal always applies the current contract, so nothing weakens going forward.
+#
+# The marker cannot be stripped to buy the weaker rules: `_receipt_value` copies
+# it into the create-once receipt file, so deleting it from the row makes the
+# row disagree with its own receipt.  A seal that names any OTHER string is
+# refused outright rather than treated as pre-contract -- permissive only on
+# ABSENT, never on unrecognised, which is the same fail-closed shape as
+# `_accepting_source_review_states_are_current` below.
+REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1 = (
+    "source-review-findings-and-publication-v1"
+)
+# `None` is not a shipped configuration.  It exists so the control that proves a
+# pre-contract seal still validates can mint one with this module's own sealing
+# code instead of hand-forging the old bytes.
+CURRENT_REVIEW_CONTRACT: Optional[str] = REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1
 JUDGE_RECEIPT_FIELDS = {
     "schema_version",
     "record_type",
@@ -317,6 +340,10 @@ RECORD_SCHEMAS: Dict[str, RecordSchema] = {
             "manifest_prefix_last_sequence receipt_path receipt_sha256 "
             "raw_input_inventory_sha256"
         ),
+        # Optional to PARSE so a seal minted before the field existed stays
+        # readable.  Absent means the pre-contract era; a present value must be
+        # the current literal, checked in _validate_record_payload.
+        optional=_fields("review_contract"),
         identity_fields=("review_id", "phase"),
     ),
     "external_dispatch_note": RecordSchema(
@@ -733,6 +760,17 @@ def _validate_record_payload(
             "manifest_prefix_last_sequence",
         ):
             _require_positive_int(record[field], field)
+        # Absent is the pre-contract era and readable.  Any string other than
+        # the one literal this module mints is refused, so an unrecognised
+        # contract can never fall through into the older, weaker rules.
+        if (
+            "review_contract" in record
+            and record["review_contract"]
+            != REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1
+        ):
+            raise PublicationError(
+                f"finalization row {row} names an unsupported review contract"
+            )
     if record_type == "source_review_input_registered":
         if manifest_schema == MANIFEST_SCHEMA:
             _validate_repository_heads(
@@ -830,6 +868,14 @@ def _validate_record_payload(
             not isinstance(value, str) or not value for value in accepted
         ):
             raise PublicationError("source review accepted_findings must be an array of IDs")
+        # accepted_findings and merged_findings PRE-DATE this contract, so
+        # tightening their shape here reaches backwards in a layer that has no
+        # seal to read an era from.  Kept anyway, on two facts: the strict form
+        # is re-derived at accept time by source_findings_resolution regardless,
+        # and every finding ID in the sealed evidence on disk already satisfies
+        # it (checked 2026-08-10 against the archived v1 manifest, whose IDs are
+        # of the form G3-001).  The exposure that remains is a historical row
+        # whose IDs carry characters IDENTITY_RE forbids; there is no such row.
         _finding_id_list(accepted, "source review accepted_findings")
         merged = record.get("merged_findings")
         if not isinstance(merged, dict) or any(
@@ -1967,21 +2013,62 @@ def _verify_source_raw_input(record: Mapping[str, Any]) -> None:
         raise PublicationError("source-review raw-input seal does not bind its inputs")
 
 
+def _is_current_review_contract(review_contract: Optional[str]) -> bool:
+    """Whether a seal declares the contract whose rules this module enforces.
+
+    The comparison is against the LITERAL, never against
+    ``CURRENT_REVIEW_CONTRACT``: the latter says what a fresh seal is minted
+    with, and a control that mints a pre-contract seal moves it.  Reading the
+    era from the mint setting would make that control silently grade every old
+    seal as current.
+    """
+    return review_contract == REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1
+
+
+def _seal_review_contract(
+    records: Sequence[Mapping[str, Any]], review_id: Any
+) -> Optional[str]:
+    """Return the contract this review's ``judgment`` seal was minted under.
+
+    A review's era is fixed by the seal that gated its evidence, so every later
+    check about that review -- the reservation gate, the acceptance-phase
+    prerequisites -- reads the era from the same place instead of each deciding
+    for itself.  Absent (no seal, or a seal from before the field existed) means
+    the pre-contract era.
+    """
+    for record in records:
+        if (
+            record.get("record_type") == "manifest_prefix_registered"
+            and record.get("review_id") == review_id
+            and record.get("phase") == "judgment"
+        ):
+            return record.get("review_contract")
+    return None
+
+
 def _accepting_source_review_states_are_current(
     *,
     manifest_schema: Any,
+    review_contract: Optional[str],
     report: Mapping[str, Any],
     challenge: Mapping[str, Any],
     verdict: Mapping[str, Any],
 ) -> bool:
-    """Only the archived v1 grammar may still read the obsolete aliases.
+    """Only the archived v1 grammar and pre-contract seals read the aliases.
 
     The test is deliberately "permissive ONLY on the exact legacy literal".
     Written the other way round -- strict on the known v2 literal, permissive
     otherwise -- any unrecognised schema string would fall into the permissive
     branch, which is the same fail-open gate this check exists to close.
+
+    The same reasoning gives the alias tolerance back to a seal minted before
+    the contract existed: refusing an alias a v2 manifest was validly sealed
+    with would strand that evidence, and the marker is checked against one
+    exact literal, so an unrecognised contract never reaches this branch.
     """
-    if manifest_schema == LEGACY_MANIFEST_SCHEMA:
+    if manifest_schema == LEGACY_MANIFEST_SCHEMA or not _is_current_review_contract(
+        review_contract
+    ):
         return (
             report.get("state") in LEGACY_SOURCE_REVIEW_REPORTS_STATES
             and challenge.get("state") in LEGACY_SOURCE_REVIEW_CHALLENGES_STATES
@@ -2013,15 +2100,95 @@ def _uses_obsolete_source_review_aliases(
     )
 
 
+def _require_pre_contract_source_review_join(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    review_id: str,
+    raw_input_inventory_sha256: str,
+    report: Mapping[str, Any],
+    challenge: Mapping[str, Any],
+    verdict: Mapping[str, Any],
+    judge_artifact: Mapping[str, Any],
+) -> None:
+    """The accept-layer join exactly as it stood before ``review_contract``.
+
+    Lifted verbatim from the version of ``_require_review_phase_prerequisites``
+    that minted these seals, so a seal from that era is re-validated by the
+    rules it was actually gated on -- including the details that read as
+    sloppiness next to the current path and are load-bearing here: the roles are
+    read with ``.get`` because their shape is checked AFTER the judge receipt
+    rather than before it, and the judge itself is not in that shape check.
+    Tightening any of it would refuse evidence that was validly sealed.
+
+    Nothing new may be added here.  A rule that should apply to old seals is a
+    rule that strands old evidence; a rule that should apply to new ones belongs
+    in the current-contract path.
+    """
+    report_identities = {
+        (artifact.get("path"), artifact.get("sha256"))
+        for artifact in report["reports"]
+    }
+    challenge_identities = {
+        (artifact.get("path"), artifact.get("sha256"))
+        for artifact in challenge["challenges"]
+    }
+    report_roles = [artifact.get("role") for artifact in report["reports"]]
+    challenge_roles = [artifact.get("role") for artifact in challenge["challenges"]]
+    if (
+        report_identities & challenge_identities
+        or len(report_identities) != len(report["reports"])
+        or len(challenge_identities) != len(challenge["challenges"])
+        or len(set(report_roles)) != len(report_roles)
+        or len(set(challenge_roles)) != len(challenge_roles)
+    ):
+        raise PublicationError(
+            "source-review reports and challenges must be distinct independent artifacts"
+        )
+    for index, artifact in enumerate(report["reports"]):
+        _verify_artifact_record(artifact, f"source-review report {index}")
+    for index, artifact in enumerate(challenge["challenges"]):
+        _verify_artifact_record(artifact, f"source-review challenge {index}")
+    judge_receipt = _verify_judge_receipt(
+        judge_artifact,
+        records=records,
+        review_id=review_id,
+        raw_input_inventory_sha256=raw_input_inventory_sha256,
+        expected_role=judge_artifact.get("role"),
+        expected_verdict="ACCEPT",
+        verdict_record=verdict,
+        label="source-review judge verdict",
+    )
+    participants = [*report["reports"], *challenge["challenges"]]
+    if any(
+        not isinstance(artifact.get("role"), str)
+        or not IDENTITY_RE.fullmatch(artifact["role"])
+        for artifact in participants
+    ):
+        raise PublicationError("source-review participant roles are malformed")
+    participant_roles = {artifact["role"] for artifact in participants}
+    if judge_receipt["judge_role"] in participant_roles:
+        raise PublicationError("source-review judge must be independent")
+
+
 def _require_review_phase_prerequisites(
     records: Sequence[Mapping[str, Any]],
     *,
     review_id: str,
     raw_input_inventory_sha256: str,
     phase: str,
+    review_contract: Optional[str],
 ) -> None:
+    """Refuse a phase seal whose review lifecycle has not joined up.
+
+    ``review_contract`` selects which era's accept-layer rules apply.  Minting a
+    new seal always passes ``CURRENT_REVIEW_CONTRACT``; re-validating one passes
+    what that seal itself recorded, so a seal minted before a rule existed is
+    never retroactively refused by it.  There is no third behaviour: an
+    unrecognised literal is refused at parse time.
+    """
     manifest_schema = records[0].get("manifest_schema") if records else None
     generic_v2 = manifest_schema == MANIFEST_SCHEMA
+    current_contract = _is_current_review_contract(review_contract)
     historical_input = _matching_record(
         records,
         "source_review_input_registered",
@@ -2105,6 +2272,7 @@ def _require_review_phase_prerequisites(
             and challenge.get("findings_received") == challenge.get("findings_answered")
             and _accepting_source_review_states_are_current(
                 manifest_schema=manifest_schema,
+                review_contract=review_contract,
                 report=report,
                 challenge=challenge,
                 verdict=verdict,
@@ -2112,7 +2280,17 @@ def _require_review_phase_prerequisites(
             and isinstance(judge_artifact, dict)
             and judge_artifact.get("verdict") == "ACCEPT"
         )
-        if historical_complete:
+        if historical_complete and not current_contract:
+            _require_pre_contract_source_review_join(
+                records,
+                review_id=review_id,
+                raw_input_inventory_sha256=raw_input_inventory_sha256,
+                report=report,
+                challenge=challenge,
+                verdict=verdict,
+                judge_artifact=judge_artifact,
+            )
+        elif historical_complete:
             report_artifacts = report["reports"]
             challenge_artifacts = challenge["challenges"]
             # Roles are validated before any set is built from them: comparing
@@ -2256,22 +2434,27 @@ def _require_review_phase_prerequisites(
         for index, artifact in enumerate(generic_challenges):
             _verify_artifact_record(artifact, f"challenge response {index}")
         # The same join as the source-review branch above: a uniqueness test
-        # inside each list never compares the two lists to each other.
+        # inside each list never compares the two lists to each other.  Both
+        # tests are era-gated for the same reason the source-review ones are: a
+        # seal minted before them may name a challenger who did not report, and
+        # refusing it now would strand evidence nobody can re-seal.
         reviewer_roles = {record["reviewer_role"] for record in generic_reports}
         challenger_roles = {record["participant_role"] for record in generic_challenges}
-        if reviewer_roles != challenger_roles or len(generic_reports) != len(
-            generic_challenges
-        ):
-            raise PublicationError(
-                "postpublication challenges must come from exactly the reporting reviewers"
-            )
-        if {
-            (record.get("path"), record.get("sha256")) for record in generic_verdicts
-        } & (report_identities | challenge_identities):
-            raise PublicationError(
-                "postpublication judge artifact must be distinct from every report "
-                "and challenge"
-            )
+        if current_contract:
+            if reviewer_roles != challenger_roles or len(generic_reports) != len(
+                generic_challenges
+            ):
+                raise PublicationError(
+                    "postpublication challenges must come from exactly the reporting reviewers"
+                )
+            if {
+                (record.get("path"), record.get("sha256"))
+                for record in generic_verdicts
+            } & (report_identities | challenge_identities):
+                raise PublicationError(
+                    "postpublication judge artifact must be distinct from every report "
+                    "and challenge"
+                )
         participant_roles = reviewer_roles | challenger_roles
         for index, artifact in enumerate(generic_verdicts):
             _verify_judge_receipt(
@@ -2290,8 +2473,10 @@ def _require_review_phase_prerequisites(
         # A refinement on a path that already raises: without it an aliased
         # manifest is told that a report, challenge, or judge row is missing
         # while all three are present and otherwise valid.
-        if generic_v2 and _uses_obsolete_source_review_aliases(
-            report, challenge, verdict
+        if (
+            generic_v2
+            and current_contract
+            and _uses_obsolete_source_review_aliases(report, challenge, verdict)
         ):
             raise PublicationError(
                 "generic v2 source-review judgment requires the literal "
@@ -2365,6 +2550,16 @@ def require_reservation_source_review(
     on ``review_boundary``: that field carries no value constraint on this row
     type, so a boundary filter could be dodged by typing a different string.
     Matching one join field and not the other is a refusal, not a miss.
+
+    This runs on every PARSE of a manifest that already carries the reservation
+    row, so it also re-validates old rows.  Exactly ONE step is era-dependent:
+    which field set the judge receipt must carry, because a receipt minted
+    before the finding-resolution fields existed cannot grow them and the
+    artifact is create-once.  Every other step runs on every era.  Skipping the
+    whole gate for a pre-contract review was tried and is wrong: a review with
+    NO judgment seal reads as pre-contract, so the skip would have turned the
+    "you must seal judgment before you reserve" rule off for exactly the
+    manifests it exists to refuse -- including new ones.
     """
     # The archived v1 grammar is skipped by its exact literal, never by "not
     # v2".  Written the other way round, an unrecognised schema string would
@@ -2449,6 +2644,7 @@ def require_reservation_source_review(
                 "publication reservation source-review judge role is malformed"
             )
         seal_index = -1
+        seal_contract: Optional[str] = None
         for index, item in enumerate(records):
             if (
                 item.get("record_type") == "manifest_prefix_registered"
@@ -2457,6 +2653,7 @@ def require_reservation_source_review(
                 and item.get("raw_input_inventory_sha256") == raw_digest
             ):
                 seal_index = index
+                seal_contract = item.get("review_contract")
                 break
         if seal_index < 0:
             raise PublicationError(
@@ -2478,7 +2675,14 @@ def require_reservation_source_review(
             expected_verdict="ACCEPT",
             verdict_record=verdict,
             label="publication reservation source-review judge verdict",
-            expected_fields=SOURCE_JUDGE_RECEIPT_FIELDS,
+            # The one era-dependent step.  The field set is compared with exact
+            # equality, so a receipt minted before the resolution fields existed
+            # can never satisfy the wider set, and the receipt is create-once.
+            expected_fields=(
+                SOURCE_JUDGE_RECEIPT_FIELDS
+                if _is_current_review_contract(seal_contract)
+                else JUDGE_RECEIPT_FIELDS
+            ),
         )
 
 
@@ -2637,11 +2841,15 @@ def _validate_record_lifecycle(
         raw_digest = inventory.get("raw_input_inventory_sha256")
         if not isinstance(review_id, str) or not isinstance(raw_digest, str):
             raise PublicationError("publication acceptance inventory lacks review identity")
+        # This runs on every PARSE of a manifest that already carries the row,
+        # so it is a re-validation and takes the era from the review's judgment
+        # seal, not from what a fresh seal would be minted with.
         _require_review_phase_prerequisites(
             records,
             review_id=review_id,
             raw_input_inventory_sha256=raw_digest,
             phase="acceptance",
+            review_contract=_seal_review_contract(records, review_id),
         )
         phases = [
             item.get("phase")
@@ -2805,7 +3013,7 @@ def _prefix_identity(
 
 
 def _receipt_value(record: Mapping[str, Any]) -> Dict[str, Any]:
-    return {
+    value = {
         "schema_version": record["schema_version"],
         "record_type": PREFIX_RECEIPT_TYPE,
         "phase": record["phase"],
@@ -2819,6 +3027,14 @@ def _receipt_value(record: Mapping[str, Any]) -> Dict[str, Any]:
         "review_id": record["review_id"],
         "raw_input_inventory_sha256": record["raw_input_inventory_sha256"],
     }
+    # Present only when the row carries it, so a pre-contract row still matches
+    # its pre-contract receipt byte for byte.  The consequence that matters is
+    # the other direction: a seal minted under the current contract cannot have
+    # the marker deleted, because the create-once receipt on disk still has it
+    # and `_validate_registrations` compares the two.
+    if "review_contract" in record:
+        value["review_contract"] = record["review_contract"]
+    return value
 
 
 def _validate_registrations(
@@ -2837,11 +3053,18 @@ def _validate_registrations(
         observed_order.append(phase)
         prefix_data = b"".join(lines[:index])
         prefix_records = records[:index]
+        # THE RETROACTIVITY SEAM.  This re-runs the accept-layer prerequisites
+        # over the prefix of a seal that already exists, every time the manifest
+        # is read.  The era comes from the seal ITSELF, so a rule added after it
+        # was minted cannot reach back and refuse it.  The seal's own receipt
+        # carries the same marker and is compared below, so the era cannot be
+        # downgraded by editing the row.
         _require_review_phase_prerequisites(
             prefix_records,
             review_id=review_id,
             raw_input_inventory_sha256=str(record["raw_input_inventory_sha256"]),
             phase=phase,
+            review_contract=record.get("review_contract"),
         )
         if not prefix_records:
             raise PublicationError("manifest-prefix registration cannot precede the header")
@@ -3392,11 +3615,14 @@ def seal_manifest_prefix(
             }
         if phase != PHASE_ORDER[len(prior_phases)]:
             raise PublicationError("manifest-prefix phase is skipped or out of order")
+        # MINTING a seal always applies the current contract, whatever any
+        # earlier seal in this manifest recorded.  Nothing gets weaker forward.
         _require_review_phase_prerequisites(
             records,
             review_id=review_id,
             raw_input_inventory_sha256=raw_input_inventory_sha256,
             phase=phase,
+            review_contract=CURRENT_REVIEW_CONTRACT,
         )
         current = _prefix_identity(manifest_path, original, records)
         registration_payload: Dict[str, Any] = {
@@ -3411,6 +3637,8 @@ def seal_manifest_prefix(
             "receipt_sha256": "0" * 64,
             "raw_input_inventory_sha256": raw_input_inventory_sha256,
         }
+        if CURRENT_REVIEW_CONTRACT is not None:
+            registration_payload["review_contract"] = CURRENT_REVIEW_CONTRACT
         provisional = {
             "schema_version": SCHEMA_VERSION,
             "manifest_schema": MANIFEST_SCHEMA,
