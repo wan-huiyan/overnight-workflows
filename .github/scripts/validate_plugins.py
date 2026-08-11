@@ -9,7 +9,8 @@ Checks (stdlib only, no external deps):
      and that name matches the marketplace entry.
   5. Every plugin exposes a skill: either plugins/<name>/SKILL.md, or a nested
      plugins/<name>/skills/<skill>/SKILL.md set (multi-skill plugin).
-  6. Every SKILL.md frontmatter `name:` equals its containing directory name.
+  6. Every SKILL.md frontmatter `name:` is valid (at most 64 characters,
+     lowercase letters/digits/single hyphens) and equals its containing directory name.
   7. If a VERSION file exists: it is non-empty; and for a single-plugin repo it must
      equal that plugin's plugin.json version (drift guard).
 
@@ -144,6 +145,11 @@ def main():
 def check_skill(skill_md):
     n = frontmatter_name(skill_md)
     if n is not None:
+        if len(n) > 64:
+            err(f"{skill_md}: frontmatter name `{n}` exceeds 64 characters ({len(n)})")
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", n):
+            err(f"{skill_md}: frontmatter name `{n}` must use lowercase letters, "
+                "digits, and single hyphens only")
         dirname = os.path.basename(os.path.dirname(skill_md))
         if n != dirname:
             err(f"{skill_md}: frontmatter name `{n}` != dir `{dirname}`")

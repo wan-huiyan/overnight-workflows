@@ -1,5 +1,5 @@
 ---
-name: snapshot-feature-pit-leak-rate-measure-history-change-after-target
+name: measure-snapshot-feature-pit-leak-rate-from-history
 description: |
   Measure — don't assert — whether a snapshot-sourced TRAINING feature leaks point-in-time (PIT)
   information, and turn "this field is static, the snapshot is fine" into a per-field GO/FIX/INVESTIGATE

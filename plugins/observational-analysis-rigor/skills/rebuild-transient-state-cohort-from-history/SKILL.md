@@ -1,5 +1,5 @@
 ---
-name: snapshot-transient-state-cohort-censors-outcome-use-ever-entered-from-history
+name: rebuild-transient-state-cohort-from-history
 description: |
   Use when you build a "records CURRENTLY in transient/pending state X → did they advance to the next
   state?" cohort by filtering a SNAPSHOT on status = X, and the outcome rate comes back implausibly near

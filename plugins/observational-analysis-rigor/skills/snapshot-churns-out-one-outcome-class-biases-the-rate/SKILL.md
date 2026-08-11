@@ -77,7 +77,7 @@ Per-segment **accept rate** for a competitiveness ranking, first cut from a curr
   confirming the bias understated the headline.
 
 ## Notes
-- Distinct from **PIT feature leakage** ([[snapshot-feature-pit-leak-rate-measure-history-change-after-target]],
+- Distinct from **PIT feature leakage** ([[measure-snapshot-feature-pit-leak-rate-from-history]],
   [[null-bucket-hides-progressors-in-snapshot-training]]): those are about a *feature/label* on a
   *training* row being back-stamped from current state. This is present-tense **selection bias in a
   rate's denominator** on an *analytics* read — no target date involved.

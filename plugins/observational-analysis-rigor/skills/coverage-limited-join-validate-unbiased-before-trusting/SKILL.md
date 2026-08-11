@@ -106,5 +106,5 @@ the prior-cycle number would be reported as bounded/unverified instead.
 
 ## References / See also
 
-- `snapshot-transient-state-cohort-censors-outcome-use-ever-entered-from-history` — related snapshot-vs-history censoring trap.
+- `rebuild-transient-state-cohort-from-history` — related snapshot-vs-history censoring trap.
 - Missing-data taxonomy: MCAR / MAR / MNAR (Rubin 1976) — the check above distinguishes MAR-enough from MNAR empirically.

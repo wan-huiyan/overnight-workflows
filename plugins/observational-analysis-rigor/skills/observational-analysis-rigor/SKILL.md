@@ -158,8 +158,8 @@ gave 40, agreeing on only 19 — and both returned the same headline (17% and 18
 Each step generalizes into a focused skill in this bundle; load the matching one when a step gets hard.
 
 - **Step 1 — leak-free PIT cohort:** `pit-history-reconstruction-needs-canonical-code-source-of-truth`,
-  `snapshot-feature-pit-leak-rate-measure-history-change-after-target`,
-  `snapshot-transient-state-cohort-censors-outcome-use-ever-entered-from-history`,
+  `measure-snapshot-feature-pit-leak-rate-from-history`,
+  `rebuild-transient-state-cohort-from-history`,
   `snapshot-churns-out-one-outcome-class-biases-the-rate`,
   `null-bucket-hides-progressors-in-snapshot-training`,
   `near-absorbing-state-rate-deflated-by-snapshot-residue`,

@@ -101,8 +101,8 @@
         "profile this function's memory usage"
       ]
     },
-    "snapshot-feature-pit-leak-rate-measure-history-change-after-target": {
-      "path": "plugins/observational-analysis-rigor/skills/snapshot-feature-pit-leak-rate-measure-history-change-after-target/SKILL.md",
+    "measure-snapshot-feature-pit-leak-rate-from-history": {
+      "path": "plugins/observational-analysis-rigor/skills/measure-snapshot-feature-pit-leak-rate-from-history/SKILL.md",
       "positive": [
         "does our snapshot-sourced training feature leak point-in-time information?",
         "the pipeline reads the crm_account current-state table for a feature evaluated at a historical target date",
