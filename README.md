@@ -229,15 +229,26 @@ to evade a declared source-validation artifact. The validation artifact JSON
 is decoded through the strict decoder before its review ID and configured PASS
 field are checked.
 
-Every module that decodes JSON someone else produced routes it through one
-sanctioned decoder, and each refuses four ways `json.loads` returns a confident
-answer another conforming parser would not: a repeated key, the Python
+Nine modules that decode JSON someone else produced route it through one
+sanctioned decoder each, and each refuses four ways `json.loads` returns a
+confident answer another conforming parser would not: a repeated key, the Python
 constants `NaN` / `Infinity` / `-Infinity`, a number too large for a float such
 as `1e400` (ordinary JSON number syntax, which Python resolves to the same
 infinity and re-encodes as the literal `Infinity` the decoder refuses), and an
 unpaired surrogate escape such as `\ud800` (Python keeps the lone code point,
 Go's encoding/json substitutes U+FFFD, so one document decodes to two different
 strings). A surrogate pair is ordinary non-BMP text and stays accepted.
+
+Nine, not every module: one further trust boundary was found and deliberately
+not repaired. `plugins/overnight-insight-discovery/scripts/bq_budget.py` reads a
+shared spend ledger other processes write and gates a real spend decision on it,
+so it is a boundary — but its ledger row names a released `source_commit`, and
+repairing it changes a released plugin's payload bytes and forces a version bump
+through `plugin.json`, the marketplace manifest, the SKILL banner and the README.
+That is a publishing act, left for the owner. It is recorded, with that reasoning,
+in `PLAIN_JSON_DECODE_DEFERRED` in `scripts/test_finalization_manifest.py`, and a
+test requires the entry to name a file that still decodes JSON, so the deferral
+cannot go quiet.
 
 A generic-v2 source review can seal `judgment` only when its lifecycle joins up.
 Challenge responses must come from exactly the roles that reported, one per
