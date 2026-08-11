@@ -1,7 +1,7 @@
 {
   "name": "observational-analysis-rigor",
-  "description": "A validity toolkit for observational data analysis (no randomization): 31 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, downstream-capacity checks, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface \u2014 the deep-dives behind overnight-insight-discovery's analytical validity gate. One flagship 9-step protocol skill + 30 focused deep-dive skills.",
-  "version": "1.3.0",
+  "description": "A validity toolkit for observational data analysis (no randomization): 33 skills covering leak-free point-in-time cohorts, composition/Simpson decomposition, event-anchor timing inversion, marker-vs-lever discipline, downstream-capacity checks, coverage-limited-join bias, provenance/re-derivation, and de-stale delivery to every rendered surface \u2014 the deep-dives behind overnight-insight-discovery's analytical validity gate. One flagship 9-step protocol skill + 32 focused deep-dive skills.",
+  "version": "1.3.2",
   "author": {
     "name": "wan-huiyan"
   },

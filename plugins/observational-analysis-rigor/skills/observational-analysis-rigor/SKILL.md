@@ -120,6 +120,16 @@ naming no coordinates, so whole blocks were skipped. The totals looked plausible
 unchecked it would have thinned the exposed group and made an already-null result look
 even cleaner.
 
+**A second way to manufacture a null, and it needs no bug at all.** Under-extraction
+is one route; a POST-HOC FILTER is the other. When a measurement depends on a nuisance
+parameter that is only known to a range, it is tempting to restrict to the units whose
+answer is the same across that range — "conservative", "only what survives the
+uncertainty". It is not conservative. With a binary verdict, a unit that never fires is
+stable BY CONSTRUCTION, so the filter can delete only the units that DO fire, and it
+deletes them differentially by arm. One real instance took a 59%-against-20% association
+(p = 0.00002) to 27%-against-13% (p = 0.12) and published the null.
+See `stability-across-a-nuisance-sweep-selects-on-the-outcome`.
+
 **And step 7 earns the most on a null.** Build the second construction with the OPPOSITE
 bias — deliberately over-inclusive. If a construction that over-attributes exposure still
 lands on the same answer, the null is not an artifact of under-extraction in either. In
@@ -138,7 +148,9 @@ gave 40, agreeing on only 19 — and both returned the same headline (17% and 18
 | "N% of the matched rows show…" | Is the unmatched fraction missing-at-random? Validate the bridge (step 6). |
 | "We should get them to do X so they advance" | Associational → marker; needs an A/B to be a lever (step 5). |
 | "X turned out NOT to predict Y" (a clean null) | Did your extraction drop exposed rows? Assert parsed counts against the raw source, and re-probe with an over-inclusive construction. |
+| "Restricted to the units whose answer is stable across the sweep" | Selection on the outcome. If the verdict is binary, one class is stable by construction, so the filter deletes only the other — and unevenly by arm. Report every parameter value unfiltered (`stability-across-a-nuisance-sweep-selects-on-the-outcome`). |
 | A raw effect is negative/null but "should" be positive | Simpson — control the axis, it may flip (steps 3–4). |
+| "The error/movement is bigger than the object" (a thin margin) | Are both numbers in the same frame? A correction applies to sizes as well as positions; publish the ratio (`two-quantities-compared-must-share-a-frame`). |
 | "I fixed the number" (edited the text) | Did the baked chart / twin doc / cached payload update too? A caption edit doesn't regenerate the chart (step 9). |
 
 ## How to apply
@@ -178,8 +190,10 @@ Each step generalizes into a focused skill in this bundle; load the matching one
   `cohort-broadening-event-source-scope-leak`
 - **Step 5 — marker vs lever:** `differentiator-scoping-by-provenance-not-signal`,
   `funnel-stage-lift-needs-downstream-capacity-check`
-- **Step 6 — coverage-limited joins:** `coverage-limited-join-validate-unbiased-before-trusting`
-- **Step 7 — triple-probe / re-derive:** `verifier-rederive-from-raw-not-the-checked-artifact`,
+- **Step 6 — coverage-limited joins:** `coverage-limited-join-validate-unbiased-before-trusting`,
+  `stability-across-a-nuisance-sweep-selects-on-the-outcome`
+- **Step 7 — triple-probe / re-derive:** `two-quantities-compared-must-share-a-frame`,
+  `verifier-rederive-from-raw-not-the-checked-artifact`,
   `finding-verification-live-bq-triple-probe`,
   `numeric-rederive-confirms-value-not-label-or-cohort`,
   `blind-rederive-pass-when-orchestrator-already-read-the-answer`,
