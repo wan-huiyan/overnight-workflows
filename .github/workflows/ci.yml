@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # --self-test reads history: it reproduces each plugin's published base
+          # identity with `git show <sha>:<path>`. A shallow clone does not carry
+          # those commits, and the failure is `exit status 128` — the commit is
+          # absent from the checkout, not the file wrong. `main`'s validate step
+          # runs without --self-test, which is why main is green and this is not.
+          fetch-depth: 0
       - name: Validate marketplace + plugin structure
         run: python3 .github/scripts/validate_plugins.py --self-test
       - name: Leak gate (client/PII identifiers)
