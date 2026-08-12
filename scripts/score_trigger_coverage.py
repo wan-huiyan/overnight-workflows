@@ -58,6 +58,68 @@ CAP = 1536
 DEFAULT_SUITE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "eval", "description-trigger-suite.json")
 
+
+class NonConformingJSON(ValueError):
+    """One JSON document in the eval suite has more than one reading.
+
+    This script reports and does not gate, so the harm here is not a bad
+    publication: it is a QUIET one. ``json.loads`` keeps the last of a repeated
+    key, so a suite that names the same skill twice would silently score one of
+    them and drop the other, and the coverage figures quoted from the run would
+    be right-looking and wrong. Refuse the ambiguity instead.
+
+    The same argument covers the other three spellings the decoder refuses --
+    ``NaN`` / ``Infinity`` / ``-Infinity``, a number too large for a float such
+    as ``1e400``, and an unpaired surrogate escape. Each makes two readers score
+    the same suite differently, which is the defect above with a different
+    cause.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
+    )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
+
 # Deliberately small and explicit: a large stopword list is a free parameter that can be
 # tuned until the numbers look good. Keep it to function words only, and keep it here in
 # the repo so a reviewer can see exactly what was excluded.
@@ -148,7 +210,8 @@ def main() -> int:
     ap.add_argument("--markdown", action="store_true", help="emit the PR table")
     a = ap.parse_args()
 
-    suite = json.load(open(a.suite, encoding="utf-8"))["skills"]
+    with open(a.suite, encoding="utf-8") as handle:
+        suite = _strict_json_loads(handle.read())["skills"]
     names = [a.skill] if a.skill else list(suite)
     for n in names:
         if n not in suite:

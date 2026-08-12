@@ -36,6 +36,7 @@ if __package__:
         finalization_manifest_prefix as _finalization_manifest_prefix,
         latest_phase_registration as _latest_phase_registration,
         parse_finalization_jsonl as _parse_finalization_jsonl,
+        require_reservation_source_review as _require_reservation_source_review,
         validate_manifest as _validate_finalization_manifest,
     )
     from .install_inventory import (
@@ -56,6 +57,7 @@ else:
         finalization_manifest_prefix as _finalization_manifest_prefix,
         latest_phase_registration as _latest_phase_registration,
         parse_finalization_jsonl as _parse_finalization_jsonl,
+        require_reservation_source_review as _require_reservation_source_review,
         validate_manifest as _validate_finalization_manifest,
     )
     from install_inventory import (
@@ -218,11 +220,78 @@ def _atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     _atomic_write_bytes(path, data)
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Four ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright;
+    * a number too large for a float, such as ``1e400`` -- ordinary JSON number
+      syntax, which Python resolves to the same infinity as the line above and
+      then re-encodes as the literal ``Infinity`` this decoder refuses;
+    * an unpaired surrogate escape such as ``\\ud800`` -- Python keeps the lone
+      code point and Go's encoding/json substitutes U+FFFD, so one document
+      decodes to two different strings and a digest over them disagrees.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so all four
+    are refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text: str) -> Any:
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
+    )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
+
 def _read_json_file(path: Path, *, label: str) -> Dict[str, Any]:
     raw = _read_regular_bytes(path, label=label)
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"cannot read {label}: {exc}") from exc
     if not isinstance(value, dict):
         raise PublicationError(f"{label} must contain one JSON object")
@@ -372,8 +441,8 @@ def _load_manifest(source_snapshot: Path, manifest_path: str) -> Tuple[Dict[str,
         raise PublicationError(f"immutable commit has no regular manifest: {manifest_path}")
     raw = _read_regular_bytes(path, label="immutable install manifest")
     try:
-        manifest = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        manifest = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"invalid install manifest: {exc}") from exc
     if not isinstance(manifest, dict) or not isinstance(manifest.get("mappings"), list):
         raise PublicationError("install manifest must be an object with a mappings array")
@@ -719,8 +788,8 @@ def _verify_prepare_evidence(state: Mapping[str, Any]) -> None:
     if hashlib.sha256(raw).hexdigest() != receipt_digest:
         raise PublicationError("prepare receipt drifted after it became durable")
     try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        receipt = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"prepare receipt is invalid JSON: {exc}") from exc
     if not isinstance(receipt, dict):
         raise PublicationError("prepare receipt is not an object")
@@ -855,10 +924,10 @@ def run_installed_checker(
     stdout = completed.stdout.decode("utf-8", "replace")
     parsed: Optional[Dict[str, Any]] = None
     try:
-        value = json.loads(stdout)
+        value = _strict_json_loads(stdout)
         if isinstance(value, dict):
             parsed = value
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, NonConformingJSON):
         parsed = None
     receipt = {
         "argv": argv,
@@ -1209,8 +1278,8 @@ def _validate_maintenance_receipt(
     ):
         raise PublicationError("reader-quiescence record changed during validation")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"reader-quiescence record is invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise PublicationError("reader-quiescence record must contain one JSON object")
@@ -1402,8 +1471,8 @@ def _validate_prepare_receipt_argument(
     if hashlib.sha256(raw).hexdigest() != expected.get("sha256"):
         raise PublicationError("--prepare-receipt digest differs from prepared state")
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"prepare receipt is invalid: {exc}") from exc
     if not isinstance(value, dict):
         raise PublicationError("prepare receipt is not an object")
@@ -1443,6 +1512,27 @@ def reserve_operation(
         if prepare_receipt is None:
             raise PublicationError(
                 "--prepare-receipt is required with --finalization-manifest"
+            )
+        # The same gate the manifest enforces under its own flock, called
+        # earlier so a pending source review never contends for the package
+        # writer lock.  The authoritative enforcement stays in the manifest
+        # lifecycle; this is not a second copy of the rule.  The isinstance
+        # guards exist so a malformed state still produces the canonical
+        # in-lock error instead of a KeyError or a confusing one here.
+        prepared = state.get("prepare_receipt")
+        if (
+            isinstance(prepared, dict)
+            and isinstance(prepared.get("sha256"), str)
+            and isinstance(state.get("generation_id"), str)
+        ):
+            _require_reservation_source_review(
+                _parse_finalization_jsonl(
+                    _read_regular_bytes(manifest_path, label="finalization manifest"),
+                    manifest_path,
+                ),
+                generation_id=state["generation_id"],
+                prepare_receipt_sha256=prepared["sha256"],
+                source_commit=state.get("source_commit"),
             )
     with WriterLock(paths["writer_lock"]):
         paths, state = _load_state(state_root, operation)
@@ -3620,8 +3710,8 @@ def _reservation_identity(
 ) -> Dict[str, Any]:
     raw = _read_regular_bytes(paths["reservation"], label="active package reservation")
     try:
-        observed = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        observed = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"active package reservation is invalid JSON: {exc}") from exc
     if observed != reservation:
         raise PublicationError("active package reservation changed during identity capture")
@@ -3649,8 +3739,8 @@ def _terminal_receipt(
     if hashlib.sha256(raw).hexdigest() != identity["sha256"]:
         raise PublicationError("terminal publication receipt drifted")
     try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        receipt = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"terminal publication receipt is invalid: {exc}") from exc
     if (
         not isinstance(receipt, dict)
@@ -3784,8 +3874,8 @@ def _validate_live_inventory_receipt(
             raise PublicationError(f"{label} must be a single-link regular file")
     raw = _read_regular_bytes(receipt_path, label=f"{phase} live inventory receipt")
     try:
-        receipt = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        receipt = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"{phase} live inventory receipt is invalid: {exc}") from exc
     if not isinstance(receipt, dict):
         raise PublicationError(f"{phase} live inventory receipt is not an object")
@@ -4415,8 +4505,8 @@ def _load_bound_release_record(
 ) -> Dict[str, Any]:
     raw = _read_regular_bytes(paths["released"], label="package release record")
     try:
-        release = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        release = _strict_json_loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"package release record is invalid: {exc}") from exc
     if not isinstance(release, dict):
         raise PublicationError("package release record is not an object")
@@ -4488,8 +4578,8 @@ def _release_after_verified_acceptance(
     if hashlib.sha256(inventory_raw).hexdigest() != inventory_identity.get("sha256"):
         raise PublicationError("release acceptance inventory receipt drifted")
     try:
-        inventory_receipt = json.loads(inventory_raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        inventory_receipt = _strict_json_loads(inventory_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"release acceptance inventory receipt is invalid: {exc}") from exc
     if not isinstance(inventory_receipt, dict):
         raise PublicationError("release acceptance inventory receipt is not an object")
@@ -4612,8 +4702,8 @@ def _verify_completed_release_with_missing_reservation(
     if hashlib.sha256(inventory_raw).hexdigest() != inventory_identity.get("sha256"):
         raise PublicationError("durable release inventory receipt drifted")
     try:
-        inventory_receipt = json.loads(inventory_raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        inventory_receipt = _strict_json_loads(inventory_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise PublicationError(f"durable release inventory receipt is invalid: {exc}") from exc
     if not isinstance(inventory_receipt, dict):
         raise PublicationError("durable release inventory receipt is not an object")

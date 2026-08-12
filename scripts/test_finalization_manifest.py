@@ -6,6 +6,8 @@ from __future__ import annotations
 import ast
 import copy
 import hashlib
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -218,6 +220,48 @@ class FinalizationManifestTests(unittest.TestCase):
 
     def records(self, path: Path) -> list[dict[str, object]]:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def publish_review_file(
+        self,
+        review_root: Path,
+        relative_output: str,
+        data: bytes,
+        **extra: object,
+    ) -> dict[str, object]:
+        """Publish one review artifact create-once and return its row identity."""
+        receipt_directory = review_root / "receipts"
+        receipt_directory.mkdir(exist_ok=True)
+        receipt_output = receipt_directory / (
+            relative_output.replace("/", "__") + ".receipt.json"
+        )
+        receipt = manifest.publish_review_artifact(
+            review_root,
+            relative_output=relative_output,
+            expected_sha256=hashlib.sha256(data).hexdigest(),
+            expected_byte_count=len(data),
+            data=data,
+            receipt_output=receipt_output,
+        )
+        identity: dict[str, object] = {
+            "path": receipt["artifact_path"],
+            "sha256": receipt["artifact_sha256"],
+            "bytes": receipt["artifact_byte_count"],
+            "lines": len(data.splitlines()),
+            "publication_receipt": {
+                "path": str(receipt_output),
+                "sha256": hashlib.sha256(receipt_output.read_bytes()).hexdigest(),
+                **receipt,
+            },
+        }
+        identity.update(extra)
+        return identity
+
+    @staticmethod
+    def rewrite_published(path: Path, data: bytes) -> None:
+        """Overwrite a published (read-only) artifact for a mutation control."""
+        path.chmod(0o600)
+        path.write_bytes(data)
+        path.chmod(0o400)
 
     def write_records(self, path: Path, records: list[dict[str, object]]) -> None:
         path.write_text(
@@ -788,6 +832,12 @@ class FinalizationManifestTests(unittest.TestCase):
                 record["sha256"] = hashlib.sha256(judge_path.read_bytes()).hexdigest()
             if record["record_type"] != "manifest_prefix_registered":
                 continue
+            # An archived v1 manifest predates review_contract, so the reframed
+            # seal must not carry it -- and the hand-built receipt below omits
+            # it, so leaving it on the row would make the row disagree with its
+            # own receipt.  That disagreement is the anti-downgrade check doing
+            # its job; the fixture is what was wrong.
+            record.pop("review_contract", None)
             phase = str(record["phase"])
             prefix_data = b"".join(
                 (json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -956,9 +1006,103 @@ class FinalizationManifestTests(unittest.TestCase):
         self.assertLessEqual(helper.lineno, call.lineno)
         self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
         self.assertEqual(
-            ["object_pairs_hook"],
+            ["object_pairs_hook", "parse_constant", "parse_float"],
             [keyword.arg for keyword in call.keywords],
         )
+
+    def test_panel_validator_module_has_one_guarded_json_load(self) -> None:
+        source_path = SCRIPT_DIR / "validate_panel_inputs.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+        helper = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "strict_json_loads"
+        )
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "json"
+            and node.func.attr == "loads"
+        ]
+        self.assertEqual(1, len(calls), [(call.lineno, call.col_offset) for call in calls])
+        call = calls[0]
+        self.assertLessEqual(helper.lineno, call.lineno)
+        self.assertLessEqual(call.end_lineno or call.lineno, helper.end_lineno or helper.lineno)
+        self.assertEqual(
+            ["object_pairs_hook", "parse_constant", "parse_float"],
+            [keyword.arg for keyword in call.keywords],
+        )
+
+    def test_panel_json_object_and_jsonl_reject_duplicate_keys(self) -> None:
+        row = {
+            "record_type": "panel_input",
+            "schema_version": 3,
+            "status": "PREPARED",
+        }
+        duplicated = self.duplicate_json_key_bytes(row, "status", "RESERVED")
+        errors: list[str] = []
+        self.assertIsNone(panel_inputs.json_object(duplicated, "prepare state", errors))
+        self.assertEqual(
+            [
+                "prepare state must contain one UTF-8 JSON object: "
+                "duplicate JSON key 'status'"
+            ],
+            errors,
+        )
+        with tempfile.TemporaryDirectory(prefix="panel-duplicate-jsonl-") as raw:
+            path = Path(raw).resolve() / "panel-manifest.jsonl"
+            path.write_bytes(
+                self.duplicate_json_key_bytes(row, "record_type", "reviewer_instruction")
+            )
+            records, found = panel_inputs.load_jsonl(path)
+            self.assertEqual([], records)
+            self.assertIn(
+                "panel manifest line 1 is invalid JSON: "
+                "duplicate JSON key 'record_type'",
+                found,
+            )
+
+    def test_panel_duplicate_key_encoder_refuses_an_unusable_control_target(self) -> None:
+        document = {
+            "outer": {"kept": 1, "twin": {"same": True}},
+            "other": {"same": True},
+        }
+        encoded = panel_inputs.duplicate_key_text(document, ["outer"], "twin", 9)
+        self.assertEqual(
+            '{"other":{"same":true},'
+            '"outer":{"twin":9,"kept":1,"twin":{"same":true}}}',
+            encoded,
+        )
+        self.assertEqual(document, json.loads(encoded))
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key 'twin'"):
+            panel_inputs.strict_json_loads(encoded)
+        with self.assertRaisesRegex(RuntimeError, "control target is absent"):
+            panel_inputs.duplicate_key_text(document, ["outer"], "absent", 9)
+        with self.assertRaisesRegex(RuntimeError, "not uniquely locatable"):
+            panel_inputs.duplicate_key_text(document, ["other"], "same", False)
+
+    def test_panel_fixture_file_with_a_duplicate_key_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="panel-duplicate-fixtures-") as raw:
+            fixtures_path = Path(raw).resolve() / "panel_input_fixtures.json"
+            value = panel_inputs.strict_json_loads(
+                panel_inputs.FIXTURES.read_text(encoding="utf-8")
+            )
+            fixtures_path.write_bytes(
+                self.duplicate_json_key_bytes(value, "prepare_cases", [])
+            )
+            argv = [str(panel_inputs.FIXTURES.parent / "validate_panel_inputs.py"), "--self-test"]
+            with mock.patch.object(panel_inputs, "FIXTURES", fixtures_path), mock.patch.object(
+                sys, "argv", argv
+            ), mock.patch("sys.stdout", new_callable=io.StringIO) as printed:
+                status = panel_inputs.main()
+            self.assertEqual(1, status, printed.getvalue())
+            self.assertIn(
+                "ERROR: cannot read panel fixtures: duplicate JSON key 'prepare_cases'",
+                printed.getvalue(),
+            )
 
     def test_new_manifest_is_generic_and_rejects_project_specific_head_fields(self) -> None:
         with tempfile.TemporaryDirectory(prefix="finalization-generic-") as raw:
@@ -2089,24 +2233,25 @@ class FinalizationManifestTests(unittest.TestCase):
                 json.dumps(seal_value, sort_keys=True) + "\n", encoding="utf-8"
             )
             seal_digest = hashlib.sha256(raw_seal.read_bytes()).hexdigest()
-            artifact_path = root / "artifact.md"
-            artifact_path.write_bytes(b"review artifact\n")
-            artifact = {
-                "path": str(artifact_path),
-                "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
-                "bytes": len(artifact_path.read_bytes()),
-                "lines": 1,
-                "role": "reviewer-1",
-            }
-            challenge_path = root / "challenge.md"
-            challenge_path.write_bytes(b"challenge artifact\n")
-            challenge_artifact = {
-                "path": str(challenge_path),
-                "sha256": hashlib.sha256(challenge_path.read_bytes()).hexdigest(),
-                "bytes": len(challenge_path.read_bytes()),
-                "lines": 1,
-                "role": "challenger-1",
-            }
+            for review_directory in ("reports", "challenges", "judge"):
+                (root / review_directory).mkdir()
+            finding_ids = ["G3-001", "G3-002", "G3-003", "G3-004"]
+            artifact = self.publish_review_file(
+                root,
+                "reports/report-1.md",
+                b"review artifact\n",
+                role="reviewer-1",
+                finding_ids=list(finding_ids),
+            )
+            # The challenger is the reviewer: the panel brief gives every report
+            # to every reviewer and requires one challenge response per reviewer.
+            challenge_artifact = self.publish_review_file(
+                root,
+                "challenges/challenge-1.md",
+                b"challenge artifact\n",
+                role="reviewer-1",
+                answered_finding_ids=list(finding_ids),
+            )
             source_rows: list[tuple[str, dict[str, object]]] = [
                 (
                     "source_review_input_registered",
@@ -2197,6 +2342,7 @@ class FinalizationManifestTests(unittest.TestCase):
                         "judge": {**artifact, "verdict": "ACCEPT"},
                         "accepted_findings": ["G3-001", "G3-002", "G3-003"],
                         "merged_findings": {"G3-004": "G3-003"},
+                        "rejected_findings": [],
                         "live_installation_status": "UNCHANGED_PREDECESSOR",
                         "source_guidance_status": "SOURCE_GUIDANCE_ACCEPTED",
                         "state": "SOURCE_ACCEPTED",
@@ -2305,9 +2451,27 @@ class FinalizationManifestTests(unittest.TestCase):
                     writer_controller_id="controller-test",
                     payload=payload,
                 )
+            rationale = self.publish_review_file(
+                root, "judge/rationale.md", b"judge rationale\n"
+            )
+            manifest.append_finalization_record(
+                path,
+                record_type="artifact_registered",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+                    **rationale,
+                    "state": "PUBLISHED",
+                    "next_action": "judge",
+                },
+            )
+            source_rows[3][1]["judge_rationale"] = rationale
             adjudicated = manifest.judgment_input_identity(self.records(path))
-            judge_path = root / "source-judge.json"
-            judge_path.write_text(
+            resolution = manifest.source_findings_resolution(
+                source_rows[1][1], source_rows[2][1], source_rows[3][1]
+            )
+            judge_bytes = (
                 json.dumps(
                     {
                         "schema_version": 1,
@@ -2322,26 +2486,62 @@ class FinalizationManifestTests(unittest.TestCase):
                         "verdict": "ACCEPT",
                         "recorded_at": "2026-08-09T00:00:03Z",
                         "findings_unresolved": 0,
+                        **resolution,
                     },
                     sort_keys=True,
                     separators=(",", ":"),
                 )
-                + "\n",
-                encoding="utf-8",
+                + "\n"
+            ).encode("utf-8")
+            source_rows[3][1]["judge"] = self.publish_review_file(
+                root,
+                "judge/source-judge.json",
+                judge_bytes,
+                role="judge-1",
+                verdict="ACCEPT",
             )
-            source_rows[3][1]["judge"] = {
-                "path": str(judge_path),
-                "sha256": hashlib.sha256(judge_path.read_bytes()).hexdigest(),
-                "bytes": len(judge_path.read_bytes()),
-                "lines": 1,
-                "role": "judge-1",
-                "verdict": "ACCEPT",
-            }
+            judge_path = Path(str(source_rows[3][1]["judge"]["path"]))
             manifest.append_finalization_record(
                 path,
                 record_type=source_rows[3][0],
                 writer_controller_id="controller-test",
                 payload=source_rows[3][1],
+            )
+            # The controller payload can only be published AFTER the verdict
+            # row: its content is that row, and the row names the judge receipt
+            # whose digest covers every record before it.
+            appended_verdict = next(
+                record
+                for record in self.records(path)
+                if record["record_type"] == "source_review_judge_verdict_received"
+            )
+            payload_identity = self.publish_review_file(
+                root,
+                "judge/payload.json",
+                (
+                    json.dumps(
+                        {
+                            field: value
+                            for field, value in appended_verdict.items()
+                            if field not in manifest.ENVELOPE_FIELDS
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            )
+            manifest.append_finalization_record(
+                path,
+                record_type="artifact_registered",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": manifest.JUDGE_PAYLOAD_ARTIFACT_KIND,
+                    **payload_identity,
+                    "state": "PUBLISHED",
+                    "next_action": "seal judgment",
+                },
             )
             valid_before_count_mutation = path.read_bytes()
             accepted_source_judge_bytes = judge_path.read_bytes()
@@ -2349,7 +2549,7 @@ class FinalizationManifestTests(unittest.TestCase):
             duplicate_source_judge_bytes = self.duplicate_json_key_bytes(
                 accepted_source_judge, "verdict", "REQUEST_CHANGES"
             )
-            judge_path.write_bytes(duplicate_source_judge_bytes)
+            self.rewrite_published(judge_path, duplicate_source_judge_bytes)
             duplicate_source_judge_records = self.records(path)
             duplicate_source_verdict = next(
                 record
@@ -2372,7 +2572,7 @@ class FinalizationManifestTests(unittest.TestCase):
             self.assertEqual(duplicate_source_judge_manifest, path.read_bytes())
             self.assertFalse((root / "manifest-prefix.judgment.jsonl").exists())
             self.assertFalse((root / "manifest-prefix.judgment.json").exists())
-            judge_path.write_bytes(accepted_source_judge_bytes)
+            self.rewrite_published(judge_path, accepted_source_judge_bytes)
             path.write_bytes(valid_before_count_mutation)
             artifact_count_mutation = self.records(path)
             historical_report = next(
@@ -2431,13 +2631,2310 @@ class FinalizationManifestTests(unittest.TestCase):
             self.assertEqual(before_acceptance, path.read_bytes())
             identity = manifest.validate_manifest(path)
             self.assertEqual("manifest_prefix_registered", identity["last_record_type"])
-            self.assertEqual(7, identity["record_count"])
+            self.assertEqual(9, identity["record_count"])
             self.assertTrue(panel_validator.called)
             self.assertTrue(
                 all(
                     call.kwargs.get("verify") is True
                     for call in panel_validator.call_args_list
                 )
+            )
+
+    SOURCE_CONTROL_FINDINGS = ["G-001", "G-002", "G-003", "G-004"]
+
+    def make_source_review_manifest(
+        self,
+        root: Path,
+        *,
+        report_roles: tuple[str, ...] = ("reviewer-1",),
+        challenge_roles: tuple[str, ...] = ("reviewer-1",),
+        judge_role: str = "judge-1",
+        report_findings: tuple[list[str], ...] | None = None,
+        answered_findings: tuple[list[str], ...] | None = None,
+        publish_finding_inventory: bool = True,
+        findings_received: int = 4,
+        findings_answered: int = 4,
+        dedup: tuple[int, int] = (3, 4),
+        accepted: list[str] | None = None,
+        merged: dict[str, str] | None = None,
+        rejected: list[str] | None = None,
+        register_rationale: bool = True,
+        register_payload: bool = True,
+        pre_contract: bool = False,
+    ) -> tuple[Path, str]:
+        """Build one generic-v2 source-review manifest that is judgment-ready.
+
+        Everything is published through ``publish_review_artifact`` exactly as
+        production must, the dispatch phase is sealed, and the judgment phase is
+        deliberately left unsealed so a control can drive ``seal``.
+
+        ``pre_contract`` builds the evidence in the shape it had before
+        ``review_contract`` existed: no finding inventory, no publication
+        receipts, no judge rationale or controller payload, and a judge receipt
+        carrying only the eleven fields of that era.  It is one switch rather
+        than five because the era is one thing -- a manifest half in each era
+        never existed and would not be a control for anything.
+        """
+        if pre_contract:
+            publish_finding_inventory = False
+            register_rationale = False
+            register_payload = False
+
+        def publish(*args: object, **kwargs: object) -> dict[str, object]:
+            identity = self.publish_review_file(*args, **kwargs)
+            if pre_contract:
+                identity.pop("publication_receipt")
+            return identity
+
+        path = self.make_manifest(root)
+        raw_inventory = root / "control-raw-input.inventory"
+        raw_root = root / "raw-inputs"
+        raw_root.mkdir()
+        raw_file = raw_root / "input.txt"
+        raw_file.write_bytes(b"control raw input\n")
+        panel_input = root / "panel-input.jsonl"
+        panel_input.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "repository_roles": {
+                        "installed_source": "package-source",
+                        "consumer": "sample-consumer",
+                    },
+                    "repositories": {
+                        "package-source": {"head_sha": "1" * 40},
+                        "sample-consumer": {"head_sha": "2" * 40},
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        reviewer_panel_input = raw_root / "panel-input.jsonl"
+        reviewer_panel_input.write_bytes(panel_input.read_bytes())
+        raw_inventory.write_text(
+            f"{hashlib.sha256(raw_file.read_bytes()).hexdigest()}\t"
+            f"{len(raw_file.read_bytes())}\tinput.txt\n"
+            f"{hashlib.sha256(reviewer_panel_input.read_bytes()).hexdigest()}\t"
+            f"{len(reviewer_panel_input.read_bytes())}\tpanel-input.jsonl\n",
+            encoding="utf-8",
+        )
+        raw_digest = hashlib.sha256(raw_inventory.read_bytes()).hexdigest()
+        panel_digest = hashlib.sha256(panel_input.read_bytes()).hexdigest()
+        actual_bytes = len(raw_file.read_bytes()) + len(
+            reviewer_panel_input.read_bytes()
+        )
+        validation = root / "panel-input-validation-canonical.json"
+        validation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "PASS",
+                    "named_mutation_outcomes": {"panel.contract": "PASS"},
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raw_seal = root / "raw-input-seal.json"
+        raw_seal.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": "raw_input_seal",
+                    "review_id": "review-test",
+                    "sealed_at": "2026-08-09T00:00:00Z",
+                    "inventory_format": "sha256-size-path-v1",
+                    "inventory_path": str(raw_inventory),
+                    "inventory_sha256": raw_digest,
+                    "raw_input_max_files": 200,
+                    "raw_input_max_total_bytes": 10000000,
+                    "raw_input_actual_files": 2,
+                    "raw_input_actual_total_bytes": actual_bytes,
+                    "panel_input_path": str(panel_input),
+                    "panel_input_sha256": panel_digest,
+                    "panel_input_validation_sha256": hashlib.sha256(
+                        validation.read_bytes()
+                    ).hexdigest(),
+                    "source_guidance_status_before_review": "NOT_REVIEWED",
+                    "live_installation_status": "UNCHANGED_PREDECESSOR",
+                    "live_publication_status": "NOT_RUN",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        for review_directory in ("reports", "challenges", "judge"):
+            (root / review_directory).mkdir()
+        if report_findings is None:
+            report_findings = tuple(
+                list(self.SOURCE_CONTROL_FINDINGS) if index == 0 else []
+                for index in range(len(report_roles))
+            )
+        if answered_findings is None:
+            answered_findings = tuple(
+                list(self.SOURCE_CONTROL_FINDINGS) if index == 0 else []
+                for index in range(len(challenge_roles))
+            )
+        reports: list[dict[str, object]] = []
+        for index, role in enumerate(report_roles):
+            extra: dict[str, object] = {"role": role}
+            if publish_finding_inventory:
+                extra["finding_ids"] = list(report_findings[index])
+            reports.append(
+                publish(
+                    root,
+                    f"reports/report-{index}.md",
+                    f"review artifact {index}\n".encode("utf-8"),
+                    **extra,
+                )
+            )
+        challenges: list[dict[str, object]] = []
+        for index, role in enumerate(challenge_roles):
+            extra = {"role": role}
+            if publish_finding_inventory:
+                extra["answered_finding_ids"] = list(answered_findings[index])
+            challenges.append(
+                publish(
+                    root,
+                    f"challenges/challenge-{index}.md",
+                    f"challenge artifact {index}\n".encode("utf-8"),
+                    **extra,
+                )
+            )
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_input_registered",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "panel_id": "panel-test",
+                "review_boundary": "prepublication-source-and-staged-snapshot",
+                "repository_heads": {
+                    "installed_source": {
+                        "repository_key": "package-source",
+                        "head_sha": "1" * 40,
+                    },
+                    "consumer": {
+                        "repository_key": "sample-consumer",
+                        "head_sha": "2" * 40,
+                    },
+                },
+                "prepared_generation_id": "3" * 64,
+                "prepare_receipt_sha256": "4" * 64,
+                "panel_input_path": str(panel_input),
+                "panel_input_sha256": panel_digest,
+                "raw_input_inventory_path": str(raw_inventory),
+                "raw_input_inventory_sha256": raw_digest,
+                "raw_input_seal_path": str(raw_seal),
+                "raw_input_seal_sha256": hashlib.sha256(
+                    raw_seal.read_bytes()
+                ).hexdigest(),
+                "raw_input_max_files": 200,
+                "raw_input_max_total_bytes": 10000000,
+                "raw_input_actual_files": 2,
+                "raw_input_actual_total_bytes": actual_bytes,
+                "expected_reports": len(report_roles),
+                "received_reports": 0,
+                "expected_challenge_responses": len(challenge_roles),
+                "received_challenge_responses": 0,
+                "expected_judges": 1,
+                "received_judges": 0,
+                "live_installation_status": "UNCHANGED_PREDECESSOR",
+                "source_guidance_status": "NOT_REVIEWED",
+                "state": "SOURCE_REVIEW_REGISTERED",
+                "next_action": "dispatch reviewers",
+            },
+        )
+        dispatch = self.seal(path, "dispatch", raw_digest)
+        report_row: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "expected_reports": len(report_roles),
+            "received_reports": len(report_roles),
+            "expected_challenge_responses": len(challenge_roles),
+            "received_challenge_responses": 0,
+            "findings_received": findings_received,
+            "p0_received": 0,
+            "p1_received": 2,
+            "p2_received": findings_received - 2,
+            "p3_received": 0,
+            "reports": reports,
+            "source_guidance_status": "REVIEW_PENDING_CHALLENGE",
+            "state": "CHALLENGE_PENDING",
+            "next_action": "challenge",
+        }
+        challenge_row: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "expected_challenge_responses": len(challenge_roles),
+            "received_challenge_responses": len(challenge_roles),
+            "findings_received": findings_received,
+            "findings_answered": findings_answered,
+            "deduplicated_findings_reported_min": dedup[0],
+            "deduplicated_findings_reported_max": dedup[1],
+            "challenges": challenges,
+            "source_guidance_status": "REVIEW_PENDING_JUDGE",
+            "state": "JUDGE_PENDING",
+            "next_action": "judge",
+        }
+        for record_type, payload in (
+            ("source_review_independent_reports_received", report_row),
+            ("source_review_challenges_received", challenge_row),
+        ):
+            manifest.append_finalization_record(
+                path,
+                record_type=record_type,
+                writer_controller_id="controller-test",
+                payload=payload,
+            )
+        verdict_row: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "judge": {},
+            "accepted_findings": list(
+                self.SOURCE_CONTROL_FINDINGS[:3] if accepted is None else accepted
+            ),
+            "merged_findings": dict(
+                {"G-004": "G-003"} if merged is None else merged
+            ),
+            "live_installation_status": "UNCHANGED_PREDECESSOR",
+            "source_guidance_status": "SOURCE_GUIDANCE_ACCEPTED",
+            "state": "SOURCE_ACCEPTED",
+            "next_action": "prepare postpublication review",
+        }
+        if not pre_contract:
+            verdict_row["rejected_findings"] = list([] if rejected is None else rejected)
+        rationale = publish(
+            root, "judge/rationale.md", b"judge rationale\n"
+        )
+        if register_rationale:
+            manifest.append_finalization_record(
+                path,
+                record_type="artifact_registered",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+                    **rationale,
+                    "state": "PUBLISHED",
+                    "next_action": "judge",
+                },
+            )
+        if not pre_contract:
+            verdict_row["judge_rationale"] = rationale
+        judge_body = {
+            "schema_version": 1,
+            "record_type": manifest.JUDGE_RECEIPT_TYPE,
+            "review_id": "review-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "dispatch_manifest_prefix_sha256": dispatch["record"][
+                "manifest_prefix_sha256"
+            ],
+            **manifest.judgment_input_identity(self.records(path)),
+            "judge_role": judge_role,
+            "verdict": "ACCEPT",
+            "recorded_at": "2026-08-09T00:00:03Z",
+            "findings_unresolved": 0,
+            **(
+                {}
+                if pre_contract
+                else self.source_resolution_or_placeholder(
+                    report_row, challenge_row, verdict_row
+                )
+            ),
+        }
+        verdict_row["judge"] = publish(
+            root,
+            "judge/source-judge.json",
+            (
+                json.dumps(judge_body, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8"),
+            role=judge_role,
+            verdict="ACCEPT",
+        )
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_judge_verdict_received",
+            writer_controller_id="controller-test",
+            payload=verdict_row,
+        )
+        if register_payload:
+            appended = next(
+                record
+                for record in self.records(path)
+                if record["record_type"] == "source_review_judge_verdict_received"
+            )
+            payload_identity = publish(
+                root,
+                "judge/payload.json",
+                self.controller_payload_bytes(appended),
+            )
+            manifest.append_finalization_record(
+                path,
+                record_type="artifact_registered",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": manifest.JUDGE_PAYLOAD_ARTIFACT_KIND,
+                    **payload_identity,
+                    "state": "PUBLISHED",
+                    "next_action": "seal judgment",
+                },
+            )
+        return path, raw_digest
+
+    @staticmethod
+    def source_resolution_or_placeholder(
+        report_row: dict[str, object],
+        challenge_row: dict[str, object],
+        verdict_row: dict[str, object],
+    ) -> dict[str, object]:
+        """Resolution values for the judge receipt, or a placeholder.
+
+        A control that deliberately breaks the finding join has no resolution
+        to bind, and the join refuses at seal time before the receipt is read,
+        so the placeholder is never what the control is measuring.
+        """
+        try:
+            return manifest.source_findings_resolution(
+                report_row, challenge_row, verdict_row
+            )
+        except manifest.PublicationError:
+            return {
+                "findings_reported": 0,
+                "findings_accepted": 0,
+                "findings_merged": 0,
+                "findings_rejected": 0,
+                "findings_resolution_sha256": "0" * 64,
+            }
+
+    @staticmethod
+    def controller_payload_bytes(verdict_record: dict[str, object]) -> bytes:
+        return (
+            json.dumps(
+                {
+                    field: value
+                    for field, value in verdict_record.items()
+                    if field not in manifest.ENVELOPE_FIELDS
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def republish_in_place(self, registration: dict[str, object], data: bytes) -> None:
+        """Rewrite one published artifact and re-derive its receipt and row.
+
+        Used only to rebuild a manifest that a control has deliberately mutated
+        elsewhere, so the control isolates the rule it is aimed at instead of
+        tripping an unrelated digest.
+        """
+        self.rewrite_published(Path(str(registration["path"])), data)
+        registration["sha256"] = hashlib.sha256(data).hexdigest()
+        registration["bytes"] = len(data)
+        registration["lines"] = len(data.splitlines())
+        receipt_registration = registration.get("publication_receipt")
+        if receipt_registration is None:
+            return
+        receipt = {
+            field: value
+            for field, value in receipt_registration.items()
+            if field not in {"path", "sha256"}
+        }
+        receipt["artifact_sha256"] = registration["sha256"]
+        receipt["artifact_byte_count"] = len(data)
+        receipt_bytes = (
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        self.rewrite_published(Path(str(receipt_registration["path"])), receipt_bytes)
+        receipt_registration.update(receipt)
+        receipt_registration["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+
+    def resync_source_review(self, path: Path) -> None:
+        """Re-derive the judge receipt and controller payload after a mutation."""
+        records = self.records(path)
+        verdict_index = next(
+            index
+            for index, record in enumerate(records)
+            if record["record_type"] == "source_review_judge_verdict_received"
+        )
+        verdict = records[verdict_index]
+        report_row = next(
+            record
+            for record in records
+            if record["record_type"] == "source_review_independent_reports_received"
+        )
+        challenge_row = next(
+            record
+            for record in records
+            if record["record_type"] == "source_review_challenges_received"
+        )
+        judge = verdict["judge"]
+        body = json.loads(Path(str(judge["path"])).read_bytes())
+        body.update(manifest.judgment_input_identity(records[:verdict_index]))
+        body.update(
+            self.source_resolution_or_placeholder(report_row, challenge_row, verdict)
+        )
+        self.republish_in_place(
+            judge,
+            (
+                json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode("utf-8"),
+        )
+        payload_registration = next(
+            (
+                record
+                for record in records
+                if record["record_type"] == "artifact_registered"
+                and record["artifact_kind"] == manifest.JUDGE_PAYLOAD_ARTIFACT_KIND
+            ),
+            None,
+        )
+        if payload_registration is not None:
+            self.republish_in_place(
+                payload_registration, self.controller_payload_bytes(verdict)
+            )
+        self.write_records(path, records)
+
+    def source_review_case(
+        self, prefix: str, **options: object
+    ) -> tuple[Path, Path, str]:
+        """Build one judgment-ready manifest in its own temporary directory."""
+        directory = tempfile.TemporaryDirectory(prefix=prefix)
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name).resolve()
+        path, raw_digest = self.make_source_review_manifest(root, **options)
+        return root, path, raw_digest
+
+    def mutate_and_resync(self, path: Path, mutate) -> None:
+        records = self.records(path)
+        mutate(records)
+        self.write_records(path, records)
+        self.resync_source_review(path)
+
+    @staticmethod
+    def find_row(records: list[dict[str, object]], record_type: str, **fields: object):
+        return next(
+            record
+            for record in records
+            if record["record_type"] == record_type
+            and all(record.get(field) == value for field, value in fields.items())
+        )
+
+    def assert_judgment_refused(
+        self, root: Path, path: Path, raw_digest: str, pattern: str
+    ) -> None:
+        before = path.read_bytes()
+        with self.assertRaisesRegex(manifest.PublicationError, pattern):
+            self.seal(path, "judgment", raw_digest)
+        self.assertEqual(before, path.read_bytes())
+        self.assertFalse((root / "manifest-prefix.judgment.jsonl").exists())
+        self.assertFalse((root / "manifest-prefix.judgment.json").exists())
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_source_review_judgment_requires_every_finding_to_resolve_once(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Every reported finding ID must reach exactly one judged disposition."""
+        cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            (
+                "missing disposition",
+                {"accepted": ["G-001", "G-003"]},
+                "resolve exactly once",
+            ),
+            (
+                "one id carries two dispositions",
+                {"accepted": ["G-001", "G-002", "G-003", "G-004"]},
+                "resolve exactly once",
+            ),
+            (
+                "unknown merge target",
+                {"merged": {"G-004": "G-999"}},
+                "merge target must be an accepted finding",
+            ),
+            (
+                "cyclic merge",
+                {
+                    "accepted": ["G-001", "G-002"],
+                    "merged": {"G-003": "G-004", "G-004": "G-003"},
+                },
+                "merge target must be an accepted finding",
+            ),
+            (
+                "report inventory short of its own count",
+                {"report_findings": (["G-001", "G-002", "G-003"],)},
+                "does not match findings_received",
+            ),
+            (
+                "two reports claim one stable id",
+                {
+                    "report_roles": ("reviewer-1", "reviewer-2"),
+                    "challenge_roles": ("reviewer-1", "reviewer-2"),
+                    "report_findings": (["G-001", "G-002"], ["G-002", "G-003"]),
+                },
+                "reuse the same finding ID",
+            ),
+            (
+                "challenge answers an unreported finding",
+                {
+                    "answered_findings": (
+                        ["G-001", "G-002", "G-003", "G-004", "G-777"],
+                    )
+                },
+                "answer an unreported finding",
+            ),
+            (
+                "challenge coverage gap",
+                {"answered_findings": (["G-001", "G-002", "G-003"],)},
+                "leave a reported finding unanswered",
+            ),
+            (
+                "accepted count outside the deduplicated range",
+                {"dedup": (4, 4)},
+                "deduplicated finding range",
+            ),
+            (
+                # The compatibility seam itself.  The inventory is optional to
+                # PARSE so archived and in-flight manifests stay readable; this
+                # proves that decision did not create a bypass at ACCEPT.
+                "absent finding inventory cannot be accepted",
+                {"publish_finding_inventory": False},
+                "does not publish its finding inventory",
+            ),
+        )
+        for label, options, pattern in cases:
+            with self.subTest(control=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="finalization-findings-control-"
+                ) as raw:
+                    root = Path(raw).resolve()
+                    path, raw_digest = self.make_source_review_manifest(root, **options)
+                    self.assert_judgment_refused(root, path, raw_digest, pattern)
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_duplicate_finding_ids_are_refused_when_the_verdict_row_is_written(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """A repeated ID inside one disposition list never reaches the manifest.
+
+        The seal-time join catches an ID that carries two DIFFERENT dispositions
+        (covered above); a list that repeats an ID inside itself is refused one
+        layer earlier, when the row is appended and again whenever it is parsed.
+        """
+        with tempfile.TemporaryDirectory(prefix="finalization-dup-finding-") as raw:
+            root = Path(raw).resolve()
+            with self.assertRaisesRegex(
+                manifest.PublicationError,
+                "accepted_findings repeats a finding ID",
+            ):
+                self.make_source_review_manifest(
+                    root, accepted=["G-001", "G-002", "G-002", "G-003"]
+                )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_source_review_judgment_requires_the_reporting_reviewers(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Challenges must come from exactly the reviewers who reported."""
+        cases: tuple[tuple[str, dict[str, object], str], ...] = (
+            (
+                "substituted challenger",
+                {"challenge_roles": ("challenger-1",)},
+                "exactly the reporting reviewers",
+            ),
+            (
+                # Equal cardinality, unequal sets: every pre-existing check
+                # passes, so only set equality can catch this.
+                "one reviewer never challenged",
+                {
+                    "report_roles": ("reviewer-1", "reviewer-2"),
+                    "challenge_roles": ("reviewer-1", "reviewer-3"),
+                },
+                "exactly the reporting reviewers",
+            ),
+            (
+                # A message control, not an independent protection: the state it
+                # catches is also caught by the set-equality rule above.
+                "extra challenger beyond the reviewers",
+                {
+                    "report_roles": ("reviewer-1",),
+                    "challenge_roles": ("reviewer-1", "reviewer-2"),
+                },
+                "one challenge response per registered reviewer",
+            ),
+            (
+                "duplicated challenger",
+                {
+                    "report_roles": ("reviewer-1", "reviewer-2"),
+                    "challenge_roles": ("reviewer-1", "reviewer-1"),
+                },
+                "distinct independent artifacts",
+            ),
+            (
+                "judge claims a reviewer's role",
+                {"judge_role": "reviewer-1"},
+                "judge must be independent",
+            ),
+        )
+        for label, options, pattern in cases:
+            with self.subTest(control=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="finalization-independence-control-"
+                ) as raw:
+                    root = Path(raw).resolve()
+                    path, raw_digest = self.make_source_review_manifest(root, **options)
+                    self.assert_judgment_refused(root, path, raw_digest, pattern)
+
+        with self.subTest(control="judge artifact row omits its role"):
+            with tempfile.TemporaryDirectory(
+                prefix="finalization-independence-control-"
+            ) as raw:
+                root = Path(raw).resolve()
+                path, raw_digest = self.make_source_review_manifest(root)
+                records = self.records(path)
+                verdict = next(
+                    record
+                    for record in records
+                    if record["record_type"] == "source_review_judge_verdict_received"
+                )
+                del verdict["judge"]["role"]
+                self.write_records(path, records)
+                self.resync_source_review(path)
+                self.assert_judgment_refused(
+                    root, path, raw_digest, "participant roles are malformed"
+                )
+
+        with self.subTest(control="reordered but equal role sets still seal"):
+            with tempfile.TemporaryDirectory(
+                prefix="finalization-independence-positive-"
+            ) as raw:
+                root = Path(raw).resolve()
+                path, raw_digest = self.make_source_review_manifest(
+                    root,
+                    report_roles=("reviewer-1", "reviewer-2"),
+                    challenge_roles=("reviewer-2", "reviewer-1"),
+                )
+                self.seal(path, "judgment", raw_digest)
+                self.assertTrue((root / "manifest-prefix.judgment.jsonl").exists())
+                self.assertTrue((root / "manifest-prefix.judgment.json").exists())
+
+        with self.subTest(control="judge receipt double-registered as a report"):
+            # HONEST LABEL: this pins the message and the earlier, clearer
+            # refusal.  It is NOT revert-verified, because the manifest is
+            # refused with the fix removed too: the judge receipt's
+            # adjudicated_records_sha256 covers the reports row, so a reports
+            # row naming the judge file can never also carry its digest.  The
+            # guard exists because that reasoning must not be the only thing
+            # standing between a reused artifact and a judgment seal.
+            with tempfile.TemporaryDirectory(
+                prefix="finalization-independence-reuse-"
+            ) as raw:
+                root = Path(raw).resolve()
+                path, raw_digest = self.make_source_review_manifest(root)
+                records = self.records(path)
+                verdict = next(
+                    record
+                    for record in records
+                    if record["record_type"] == "source_review_judge_verdict_received"
+                )
+                report_row = next(
+                    record
+                    for record in records
+                    if record["record_type"]
+                    == "source_review_independent_reports_received"
+                )
+                for field in ("path", "sha256", "bytes", "lines", "publication_receipt"):
+                    report_row["reports"][0][field] = verdict["judge"][field]
+                self.write_records(path, records)
+                self.assert_judgment_refused(
+                    root,
+                    path,
+                    raw_digest,
+                    "judge artifact must be distinct from every report and challenge",
+                )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_generic_v2_judgment_refuses_obsolete_source_review_aliases(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Only the literal modern accepting vocabulary may seal a v2 judgment."""
+        cases: tuple[tuple[str, str, dict[str, str]], ...] = (
+            (
+                "verdict state alias",
+                "source_review_judge_verdict_received",
+                {"state": "JUDGED"},
+            ),
+            (
+                "verdict status alias",
+                "source_review_judge_verdict_received",
+                {"source_guidance_status": "REVIEWED"},
+            ),
+            (
+                "both verdict aliases",
+                "source_review_judge_verdict_received",
+                {"state": "JUDGED", "source_guidance_status": "REVIEWED"},
+            ),
+            (
+                "report state alias",
+                "source_review_independent_reports_received",
+                {"state": "REPORTS_RECEIVED"},
+            ),
+            (
+                "challenge state alias",
+                "source_review_challenges_received",
+                {"state": "CHALLENGES_RECEIVED"},
+            ),
+        )
+        for label, record_type, changes in cases:
+            with self.subTest(control=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="finalization-alias-control-"
+                ) as raw:
+                    root = Path(raw).resolve()
+                    path, raw_digest = self.make_source_review_manifest(root)
+                    records = self.records(path)
+                    next(
+                        record
+                        for record in records
+                        if record["record_type"] == record_type
+                    ).update(changes)
+                    self.write_records(path, records)
+                    self.resync_source_review(path)
+                    self.assert_judgment_refused(
+                        root, path, raw_digest, "obsolete aliases are readable only"
+                    )
+
+        with self.subTest(control="every alias at once"):
+            with tempfile.TemporaryDirectory(prefix="finalization-alias-control-") as raw:
+                root = Path(raw).resolve()
+                path, raw_digest = self.make_source_review_manifest(root)
+                records = self.records(path)
+                for record_type, changes in (
+                    (
+                        "source_review_independent_reports_received",
+                        {"state": "REPORTS_RECEIVED"},
+                    ),
+                    (
+                        "source_review_challenges_received",
+                        {"state": "CHALLENGES_RECEIVED"},
+                    ),
+                    (
+                        "source_review_judge_verdict_received",
+                        {"state": "JUDGED", "source_guidance_status": "REVIEWED"},
+                    ),
+                ):
+                    next(
+                        record
+                        for record in records
+                        if record["record_type"] == record_type
+                    ).update(changes)
+                self.write_records(path, records)
+                self.resync_source_review(path)
+                self.assert_judgment_refused(
+                    root, path, raw_digest, "obsolete aliases are readable only"
+                )
+
+        with self.subTest(control="unrecognised value"):
+            # NOT a negative control: this is refused before and after the fix,
+            # so it does not fail on revert.  It is here to stop the fix being
+            # written as a deny-list of the two known aliases, which would pass
+            # every control above and still accept anything nobody banned.
+            with tempfile.TemporaryDirectory(prefix="finalization-alias-unknown-") as raw:
+                root = Path(raw).resolve()
+                path, raw_digest = self.make_source_review_manifest(root)
+                records = self.records(path)
+                next(
+                    record
+                    for record in records
+                    if record["record_type"] == "source_review_judge_verdict_received"
+                )["state"] = "ACCEPTED"
+                self.write_records(path, records)
+                self.resync_source_review(path)
+                self.assert_judgment_refused(
+                    root, path, raw_digest, "report, challenge, and judge"
+                )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_source_review_judgment_requires_create_once_publication_receipts(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Every judged artifact must carry a live create-once publication receipt.
+
+        This proves the publication METHOD, that the public name still resolves
+        to the inode the publisher created, and that the current bytes still
+        hash to the registered digest.  It is not a signature and does not
+        authenticate the publisher.
+        """
+        prefix = "finalization-publication-control-"
+
+        with self.subTest(control="report published without a receipt"):
+            root, path, digest = self.source_review_case(prefix)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records, "source_review_independent_reports_received"
+                )["reports"][0].pop("publication_receipt"),
+            )
+            self.assert_judgment_refused(
+                root, path, digest, "lacks its create-once publication receipt"
+            )
+
+        with self.subTest(control="judge receipt published without a receipt"):
+            root, path, digest = self.source_review_case(prefix)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records, "source_review_judge_verdict_received"
+                )["judge"].pop("publication_receipt"),
+            )
+            self.assert_judgment_refused(
+                root, path, digest, "lacks its create-once publication receipt"
+            )
+
+        with self.subTest(control="receipt file was removed"):
+            root, path, digest = self.source_review_case(prefix)
+            receipt = self.find_row(
+                self.records(path), "source_review_independent_reports_received"
+            )["reports"][0]["publication_receipt"]
+            Path(str(receipt["path"])).unlink()
+            self.assert_judgment_refused(
+                root, path, digest, "publication receipt does not exist"
+            )
+
+        with self.subTest(control="receipt bytes drifted"):
+            root, path, digest = self.source_review_case(prefix)
+            receipt = self.find_row(
+                self.records(path), "source_review_independent_reports_received"
+            )["reports"][0]["publication_receipt"]
+            receipt_path = Path(str(receipt["path"]))
+            self.rewrite_published(receipt_path, receipt_path.read_bytes() + b"drift")
+            self.assert_judgment_refused(
+                root, path, digest, "publication receipt digest drifted"
+            )
+
+        for label, field, replacement in (
+            ("method is not create-once", "publication_method", "direct-write-v1"),
+            ("state is not PUBLISHED", "receipt_state", "STAGED"),
+        ):
+            with self.subTest(control=f"receipt file {label}"):
+                root, path, digest = self.source_review_case(prefix)
+
+                def rewrite(records: list[dict[str, object]]) -> None:
+                    registration = self.find_row(
+                        records, "source_review_independent_reports_received"
+                    )["reports"][0]["publication_receipt"]
+                    receipt_path = Path(str(registration["path"]))
+                    body = json.loads(receipt_path.read_bytes())
+                    body[field] = replacement
+                    data = (
+                        json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("utf-8")
+                    self.rewrite_published(receipt_path, data)
+                    # Only the receipt file changes; the row keeps the contract
+                    # literal, so the row-versus-file comparison is what fires.
+                    registration["sha256"] = hashlib.sha256(data).hexdigest()
+
+                self.mutate_and_resync(path, rewrite)
+                self.assert_judgment_refused(
+                    root,
+                    path,
+                    digest,
+                    "publication receipt differs from its registered identity",
+                )
+
+        with self.subTest(control="row rewrites one receipt field"):
+            root, path, digest = self.source_review_case(prefix)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records, "source_review_independent_reports_received"
+                )["reports"][0]["publication_receipt"].__setitem__(
+                    "artifact_inode",
+                    self.find_row(
+                        records, "source_review_independent_reports_received"
+                    )["reports"][0]["publication_receipt"]["artifact_inode"]
+                    + 1,
+                ),
+            )
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "publication receipt differs from its registered identity",
+            )
+
+        with self.subTest(control="receipt was minted for another artifact"):
+            root, path, digest = self.source_review_case(prefix)
+            other = self.publish_review_file(root, "reports/other.md", b"another\n")
+
+            def borrow(records: list[dict[str, object]]) -> None:
+                self.find_row(records, "source_review_independent_reports_received")[
+                    "reports"
+                ][0]["publication_receipt"] = other["publication_receipt"]
+
+            self.mutate_and_resync(path, borrow)
+            self.assert_judgment_refused(
+                root, path, digest, "publication receipt is for another artifact"
+            )
+
+        with self.subTest(control="artifact republished with identical bytes"):
+            root, path, digest = self.source_review_case(prefix)
+            artifact = self.find_row(
+                self.records(path), "source_review_independent_reports_received"
+            )["reports"][0]
+            artifact_path = Path(str(artifact["path"]))
+            original = artifact_path.read_bytes()
+            artifact_path.unlink()
+            artifact_path.write_bytes(original)
+            artifact_path.chmod(0o400)
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "no longer resolves to the published create-once inode",
+            )
+
+        with self.subTest(control="a valid receipt does not authorize drifted bytes"):
+            root, path, digest = self.source_review_case(prefix)
+
+            def drift(records: list[dict[str, object]]) -> None:
+                artifact = self.find_row(
+                    records, "source_review_independent_reports_received"
+                )["reports"][0]
+                artifact_path = Path(str(artifact["path"]))
+                replacement = artifact_path.read_bytes().upper()
+                artifact_path.chmod(0o600)
+                with artifact_path.open("r+b") as handle:
+                    handle.write(replacement)
+                artifact_path.chmod(0o400)
+                # The row is made consistent with the new bytes, so only the
+                # receipt still carries the published digest.
+                artifact["sha256"] = hashlib.sha256(replacement).hexdigest()
+
+            self.mutate_and_resync(path, drift)
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "publication receipt does not cover the registered artifact bytes",
+            )
+            # Retention check, NOT a control: this also fails today, and it is
+            # here so the receipt can never become an authorization that lets
+            # the final byte re-open be skipped.
+            root, path, digest = self.source_review_case(prefix)
+            artifact_path = Path(
+                str(
+                    self.find_row(
+                        self.records(path), "source_review_independent_reports_received"
+                    )["reports"][0]["path"]
+                )
+            )
+            self.rewrite_published(artifact_path, b"tampered artifact\n")
+            self.assert_judgment_refused(root, path, digest, "digest drifted")
+
+        with self.subTest(control="judge rationale is not registered"):
+            root, path, digest = self.source_review_case(prefix, register_rationale=False)
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "judge rationale lacks its PUBLISHED artifact registration",
+            )
+
+        with self.subTest(control="judge rationale registration was invalidated"):
+            root, path, digest = self.source_review_case(prefix)
+            rationale = self.find_row(
+                self.records(path),
+                "artifact_registered",
+                artifact_kind=manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+            )
+            manifest.append_finalization_record(
+                path,
+                record_type="artifact_invalidation",
+                writer_controller_id="controller-test",
+                payload={
+                    "review_id": "review-test",
+                    "artifact_kind": manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+                    "path": rationale["path"],
+                    "prior_sha256": rationale["sha256"],
+                    "reason": "superseded",
+                    "state": "INVALIDATED",
+                    "next_action": "republish",
+                },
+            )
+            self.assert_judgment_refused(
+                root, path, digest, "judge rationale registration was invalidated"
+            )
+
+        with self.subTest(control="judge rationale registration is not PUBLISHED"):
+            root, path, digest = self.source_review_case(prefix)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records,
+                    "artifact_registered",
+                    artifact_kind=manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+                ).__setitem__("state", "REGISTERED"),
+            )
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "judge rationale lacks its PUBLISHED artifact registration",
+            )
+
+        with self.subTest(control="verdict row carries no rationale identity"):
+            root, path, digest = self.source_review_case(prefix)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records, "source_review_judge_verdict_received"
+                ).pop("judge_rationale"),
+            )
+            self.assert_judgment_refused(
+                root, path, digest, "requires the registered judge rationale"
+            )
+
+        with self.subTest(control="controller payload is not registered"):
+            root, path, digest = self.source_review_case(prefix, register_payload=False)
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "verdict payload lacks its PUBLISHED artifact registration",
+            )
+
+        with self.subTest(control="controller payload differs from the appended row"):
+            root, path, digest = self.source_review_case(prefix)
+            records = self.records(path)
+            registration = self.find_row(
+                records,
+                "artifact_registered",
+                artifact_kind=manifest.JUDGE_PAYLOAD_ARTIFACT_KIND,
+            )
+            verdict = self.find_row(records, "source_review_judge_verdict_received")
+            drifted = dict(verdict)
+            drifted["next_action"] = "something else"
+            self.republish_in_place(
+                registration, self.controller_payload_bytes(drifted)
+            )
+            self.write_records(path, records)
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "payload differs from the appended verdict row",
+            )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_publication_receipt_registrations_are_refused_when_malformed(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """A malformed receipt object never reaches the manifest."""
+        prefix = "finalization-receipt-shape-"
+        root, path, digest = self.source_review_case(prefix)
+        records = self.records(path)
+        verdict = self.find_row(records, "source_review_judge_verdict_received")
+        registration = verdict["judge"]["publication_receipt"]
+        rationale = self.find_row(
+            records,
+            "artifact_registered",
+            artifact_kind=manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+        )
+        for label, mutate, pattern in (
+            (
+                "unknown key",
+                lambda value: value.__setitem__("extra", "field"),
+                "exact receipt identity and publication fields",
+            ),
+            (
+                "missing key",
+                lambda value: value.pop("artifact_device"),
+                "exact receipt identity and publication fields",
+            ),
+            (
+                "boolean where an integer is required",
+                lambda value: value.__setitem__("artifact_required_nlink", True),
+                "artifact_required_nlink must equal 1",
+            ),
+            (
+                "relative artifact path",
+                lambda value: value.__setitem__("artifact_path", "reports/report-0.md"),
+                "artifact_path must be absolute",
+            ),
+            (
+                "artifact outside the review directories",
+                lambda value: value.__setitem__(
+                    "artifact_relative_path", "raw-inputs/report-0.md"
+                ),
+                "must name one file under",
+            ),
+        ):
+            with self.subTest(control=label):
+                candidate = copy.deepcopy(registration)
+                mutate(candidate)
+                payload = {
+                    field: value
+                    for field, value in copy.deepcopy(rationale).items()
+                    if field not in manifest.ENVELOPE_FIELDS
+                }
+                payload["artifact_kind"] = f"probe-{len(candidate)}-{label[:8]}".replace(
+                    " ", "-"
+                )
+                payload["publication_receipt"] = candidate
+                before = path.read_bytes()
+                with self.assertRaisesRegex(manifest.PublicationError, pattern):
+                    manifest.append_finalization_record(
+                        path,
+                        record_type="artifact_registered",
+                        writer_controller_id="controller-test",
+                        payload=payload,
+                    )
+                self.assertEqual(before, path.read_bytes())
+
+        with self.subTest(control="duplicate JSON key inside the receipt file"):
+            root, path, digest = self.source_review_case(prefix)
+            registration = self.find_row(
+                self.records(path), "source_review_independent_reports_received"
+            )["reports"][0]["publication_receipt"]
+            receipt_path = Path(str(registration["path"]))
+            body = json.loads(receipt_path.read_bytes())
+            duplicate = self.duplicate_json_key_bytes(
+                body, "publication_method", "direct-write-v1"
+            )
+            self.rewrite_published(receipt_path, duplicate)
+            self.mutate_and_resync(
+                path,
+                lambda records: self.find_row(
+                    records, "source_review_independent_reports_received"
+                )["reports"][0]["publication_receipt"].__setitem__(
+                    "sha256", hashlib.sha256(duplicate).hexdigest()
+                ),
+            )
+            self.assert_judgment_refused(
+                root,
+                path,
+                digest,
+                "contains duplicate JSON key 'publication_method'",
+            )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_the_judge_receipt_must_carry_the_re_derived_finding_resolution(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """The five resolution fields were enforced in production, untested.
+
+        The reviewer disabled the clause in ``_verify_judge_receipt`` that
+        compares the receipt against the re-derived join and the whole suite
+        still passed, so the rule that binds a judge's receipt to the finding
+        IDs rather than to a count was resting on nothing.
+
+        ``findings_resolution_sha256`` is the sharpest of the five: it is read
+        in that clause and nowhere else, so a control that forges it is
+        measuring exactly the clause and cannot be satisfied by some other
+        comparison happening to catch the change.  The receipt file and its
+        publication receipt are re-derived after the forgery so the byte and
+        digest checks stay green and the refusal has only one possible cause.
+        """
+        for field, forged in (
+            ("findings_resolution_sha256", "a" * 64),
+            ("findings_reported", 3),
+            ("findings_accepted", 2),
+            ("findings_merged", 0),
+            ("findings_rejected", 1),
+        ):
+            with self.subTest(forged=field):
+                root, path, raw_digest = self.source_review_case(
+                    "finalization-resolution-receipt-"
+                )
+                records = self.records(path)
+                verdict = self.find_row(
+                    records, "source_review_judge_verdict_received"
+                )
+                judge = verdict["judge"]
+                body = json.loads(
+                    Path(str(judge["path"])).read_text(encoding="utf-8")
+                )
+                self.assertNotEqual(forged, body[field])
+                body[field] = forged
+                self.republish_in_place(
+                    judge,
+                    (
+                        json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n"
+                    ).encode("utf-8"),
+                )
+                self.write_records(path, records)
+                self.assert_judgment_refused(
+                    root,
+                    path,
+                    raw_digest,
+                    "source-review judge verdict does not bind an accepted judge "
+                    "decision",
+                )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_a_judgment_seal_minted_before_the_review_contract_still_validates(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """A seal from the older era is re-validated by the older era's rules.
+
+        Every accept-layer rule is re-run over the sealed prefix on every read,
+        so a rule added after a seal was minted would refuse evidence that was
+        validly sealed -- and the seal, its snapshot and its receipt are all
+        create-once, so there is no repair.  The seal records its era and
+        re-validation reads it.
+
+        The manifest here breaks a rule that only the CURRENT era has -- the
+        challenger did not report -- so a control that has stopped exercising
+        the older path fails instead of passing for the wrong reason.
+        """
+        with mock.patch.object(manifest, "CURRENT_REVIEW_CONTRACT", None):
+            root, path, raw_digest = self.source_review_case(
+                "finalization-pre-contract-",
+                pre_contract=True,
+                challenge_roles=("reviewer-2",),
+            )
+            self.seal(path, "judgment", raw_digest)
+        seal_row = self.find_row(
+            self.records(path), "manifest_prefix_registered", phase="judgment"
+        )
+        receipt = json.loads(
+            (root / "manifest-prefix.judgment.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("review_contract", seal_row)
+        self.assertNotIn("review_contract", receipt)
+
+        identity = manifest.validate_manifest(path)
+        self.assertEqual(len(self.records(path)), identity["record_count"])
+
+        # The same evidence cannot be sealed under the current contract, so the
+        # compatibility is confined to re-reading what is already sealed.
+        current_root, current_path, current_digest = self.source_review_case(
+            "finalization-pre-contract-now-",
+            pre_contract=True,
+            challenge_roles=("reviewer-2",),
+        )
+        self.assert_judgment_refused(
+            current_root,
+            current_path,
+            current_digest,
+            "challenges must come from exactly the reporting reviewers",
+        )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_a_pre_contract_seal_cannot_be_downgraded_by_editing_the_row(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """Deleting the marker from a current seal contradicts its own receipt.
+
+        Without this the compatibility path would be a downgrade switch: strip
+        one field and the older, weaker rules apply.  The receipt is create-once
+        and carries the same marker, so the row and the receipt disagree.
+
+        The proof is driven on the DISPATCH seal deliberately.  No accept-layer
+        rule runs for that phase, so the receipt comparison is the ONLY thing
+        that can refuse it -- on a judgment seal the era-mismatched judge
+        receipt refuses first and the control would pass without ever exercising
+        the mechanism it is named after.  Both refusals are then shown.
+        """
+        root, path, raw_digest = self.source_review_case(
+            "finalization-contract-downgrade-"
+        )
+        records = self.records(path)
+        seal_row = self.find_row(
+            records, "manifest_prefix_registered", phase="dispatch"
+        )
+        self.assertEqual(
+            manifest.REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1,
+            seal_row["review_contract"],
+        )
+        del seal_row["review_contract"]
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError, "receipt does not match registration"
+        ):
+            manifest.validate_manifest(path)
+
+        # An unrecognised contract is refused outright rather than falling
+        # through into the older rules, and this one is refused at parse time,
+        # before any receipt is read.
+        records = self.records(path)
+        self.find_row(records, "manifest_prefix_registered", phase="dispatch")[
+            "review_contract"
+        ] = "source-review-findings-and-publication-v2"
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError, "unsupported review contract"
+        ):
+            manifest.validate_manifest(path)
+
+        # And a downgraded JUDGMENT seal buys nothing either: the judge receipt
+        # this era mints carries five fields the older era refuses.
+        records = self.records(path)
+        self.find_row(records, "manifest_prefix_registered", phase="dispatch")[
+            "review_contract"
+        ] = manifest.REVIEW_CONTRACT_FINDINGS_AND_PUBLICATION_V1
+        self.write_records(path, records)
+        self.seal(path, "judgment", raw_digest)
+        records = self.records(path)
+        del self.find_row(
+            records, "manifest_prefix_registered", phase="judgment"
+        )["review_contract"]
+        self.write_records(path, records)
+        with self.assertRaisesRegex(
+            manifest.PublicationError,
+            "source-review judge verdict does not bind an accepted judge decision",
+        ):
+            manifest.validate_manifest(path)
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_source_review_rows_without_the_new_evidence_stay_readable(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        """A manifest written before these joins must still parse and validate.
+
+        The finding inventory, the publication receipts, the rationale and the
+        payload are optional to PARSE and mandatory only to ACCEPT.  Without
+        this, an in-flight manifest whose reports row predates the change would
+        become permanently unreadable and unappendable, not merely unable to
+        seal judgment.
+
+        SCOPE, because this test used to be read as covering more than it does:
+        the manifest here has sealed DISPATCH only, so no accept-layer rule ever
+        runs over it and the optional-to-parse decision is the whole of what is
+        being proved.  A manifest that has already sealed JUDGMENT is a
+        different case entirely -- every accept-layer rule is re-run over its
+        prefix on each read -- and it is covered by
+        ``test_a_judgment_seal_minted_before_the_review_contract_still_validates``.
+        """
+        root, path, raw_digest = self.source_review_case(
+            "finalization-compatibility-",
+            publish_finding_inventory=False,
+            register_rationale=False,
+            register_payload=False,
+        )
+        records = self.records(path)
+        for record in records:
+            for artifact in (
+                *record.get("reports", []),
+                *record.get("challenges", []),
+            ):
+                artifact.pop("publication_receipt", None)
+            if record["record_type"] == "source_review_judge_verdict_received":
+                record["judge"].pop("publication_receipt", None)
+                record.pop("rejected_findings", None)
+                record.pop("judge_rationale", None)
+        self.write_records(path, records)
+        identity = manifest.validate_manifest(path)
+        self.assertEqual(len(records), identity["record_count"])
+        self.assertEqual(
+            ["dispatch"],
+            [
+                record["phase"]
+                for record in self.records(path)
+                if record["record_type"] == "manifest_prefix_registered"
+            ],
+        )
+        # A non-accepting verdict in the same pre-change shape is readable too.
+        records = self.records(path)
+        verdict = self.find_row(records, "source_review_judge_verdict_received")
+        verdict["state"] = "SOURCE_REPAIR_REQUIRED"
+        verdict["source_guidance_status"] = "MUST_NOT_USE_SOURCE_GUIDANCE"
+        verdict["judge"]["verdict"] = "REQUEST_CHANGES"
+        self.write_records(path, records)
+        manifest.validate_manifest(path)
+        # ... and it still cannot seal judgment.
+        self.assert_judgment_refused(
+            root, path, raw_digest, "report, challenge, and judge"
+        )
+
+    def test_publish_review_artifact_publishes_exactly_once(self) -> None:
+        """The publisher creates a public name once and never repairs one."""
+        with tempfile.TemporaryDirectory(prefix="finalization-publisher-") as raw:
+            root = Path(raw).resolve()
+            for directory in ("reports", "challenges", "judge", "receipts"):
+                (root / directory).mkdir()
+            data = b"published report\n"
+            receipt_output = root / "receipts" / "report.receipt.json"
+            receipt = manifest.publish_review_artifact(
+                root,
+                relative_output="reports/report.md",
+                expected_sha256=hashlib.sha256(data).hexdigest(),
+                expected_byte_count=len(data),
+                data=data,
+                receipt_output=receipt_output,
+            )
+            published = root / "reports" / "report.md"
+            self.assertEqual(data, published.read_bytes())
+            self.assertEqual(1, os.stat(published).st_nlink)
+            self.assertEqual(0o400, os.stat(published).st_mode & 0o777)
+            self.assertEqual(0o400, os.stat(receipt_output).st_mode & 0o777)
+            self.assertEqual(
+                (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n"),
+                receipt_output.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                manifest.REVIEW_ARTIFACT_PUBLICATION_METHOD,
+                receipt["publication_method"],
+            )
+            self.assertEqual([], [item for item in (root / "reports").glob(".stage-*")])
+
+            # An existing public name is REFUSED, never verified and accepted.
+            # Reusing the write-once-or-verify helper here would hand a
+            # hand-written file a genuine-looking create-once receipt.
+            hand_written = root / "challenges" / "challenge.md"
+            hand_written.write_bytes(b"hand written\n")
+            second_receipt = root / "receipts" / "challenge.receipt.json"
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "already published"
+            ):
+                manifest.publish_review_artifact(
+                    root,
+                    relative_output="challenges/challenge.md",
+                    expected_sha256=hashlib.sha256(b"hand written\n").hexdigest(),
+                    expected_byte_count=len(b"hand written\n"),
+                    data=b"hand written\n",
+                    receipt_output=second_receipt,
+                )
+            self.assertEqual(b"hand written\n", hand_written.read_bytes())
+            self.assertFalse(second_receipt.exists())
+            self.assertEqual(
+                [], [item for item in (root / "challenges").glob(".stage-*")]
+            )
+
+            # A receipt path is create-once too, and it is refused before
+            # anything is published so no artifact is left without a receipt.
+            with self.assertRaisesRegex(
+                manifest.PublicationError, "publication receipt path already exists"
+            ):
+                manifest.publish_review_artifact(
+                    root,
+                    relative_output="judge/verdict.json",
+                    expected_sha256=hashlib.sha256(data).hexdigest(),
+                    expected_byte_count=len(data),
+                    data=data,
+                    receipt_output=receipt_output,
+                )
+            self.assertFalse((root / "judge" / "verdict.json").exists())
+
+            for index, (label, arguments) in enumerate(
+                (
+                    (
+                        "digest does not match the bytes",
+                        {"expected_sha256": "0" * 64, "expected_byte_count": len(data)},
+                    ),
+                    (
+                        "byte count does not match the bytes",
+                        {
+                            "expected_sha256": hashlib.sha256(data).hexdigest(),
+                            "expected_byte_count": len(data) + 1,
+                        },
+                    ),
+                )
+            ):
+                with self.subTest(control=label):
+                    target = root / "judge" / f"verdict-{index}.json"
+                    with self.assertRaises(manifest.PublicationError):
+                        manifest.publish_review_artifact(
+                            root,
+                            relative_output=f"judge/verdict-{index}.json",
+                            data=data,
+                            receipt_output=root / "receipts" / f"probe-{index}.json",
+                            **arguments,
+                        )
+                    self.assertFalse(target.exists())
+                    self.assertEqual(
+                        [], [item for item in (root / "judge").glob(".stage-*")]
+                    )
+
+            for relative in (
+                "../escape.md",
+                "reports/nested/deep.md",
+                "loose.md",
+                "/absolute/report.md",
+                "reports/",
+                "reports/.hidden",
+                "reports/bad\nname.md",
+                "receipts/report.md",
+            ):
+                with self.subTest(relative_output=relative):
+                    with self.assertRaises(manifest.PublicationError):
+                        manifest.publish_review_artifact(
+                            root,
+                            relative_output=relative,
+                            expected_sha256=hashlib.sha256(data).hexdigest(),
+                            expected_byte_count=len(data),
+                            data=data,
+                            receipt_output=root / "receipts" / "unused.json",
+                        )
+                    self.assertFalse((root / "receipts" / "unused.json").exists())
+
+    def test_postpublication_judgment_requires_the_reporting_challengers(self) -> None:
+        """The generic branch carries the same join as the source-review branch."""
+        with tempfile.TemporaryDirectory(prefix="finalization-generic-roles-") as raw:
+            root = Path(raw).resolve()
+            path = self.make_manifest(root)
+            digest = self.append_raw_input(path)
+            self.seal(path, "dispatch", digest)
+            self.append_generic_review(path)
+            records = self.records(path)
+            self.find_row(records, "challenge_response_registered")[
+                "participant_role"
+            ] = "challenger-1"
+            verdict_index = next(
+                index
+                for index, record in enumerate(records)
+                if record["record_type"] == "judge_verdict_registered"
+            )
+            judge_path = Path(str(records[verdict_index]["path"]))
+            body = json.loads(judge_path.read_bytes())
+            body.update(manifest.judgment_input_identity(records[:verdict_index]))
+            judge_path.write_bytes(
+                (json.dumps(body, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                    "utf-8"
+                )
+            )
+            records[verdict_index]["sha256"] = hashlib.sha256(
+                judge_path.read_bytes()
+            ).hexdigest()
+            self.write_records(path, records)
+            self.assert_judgment_refused(
+                root, path, digest, "exactly the reporting reviewers"
+            )
+
+    # ------------------------------------------------------------------
+    # A publication reservation requires the source review that named this
+    # prepared candidate to have accepted it.  A dispatch-only prefix
+    # reserves nothing.
+    # ------------------------------------------------------------------
+
+    def make_reservation_fixture(
+        self, root: Path, *, source_commit: str = "5" * 40
+    ) -> dict[str, object]:
+        """A generic-v2 manifest whose prepare receipt is registered and ready.
+
+        The returned reservation-intent payload appends cleanly while no source
+        review names this candidate; each control below adds exactly one
+        source-review mutation on top of it.
+        """
+        path = self.make_manifest(root)
+        operation = "operation-reserve"
+        generation = "generation-reserve"
+        preflight_inventory = {
+            "format": "sha256-size-path-v1",
+            "sha256": "1" * 64,
+            "file_count": 1,
+            "total_bytes": 1,
+            "path": str(root / "preflight.inventory"),
+            "identity_kind": "exact-installed-paths-and-file-bytes",
+            "installed_paths": ["SKILL.md"],
+        }
+        candidate_inventory = {
+            **preflight_inventory,
+            "sha256": "2" * 64,
+            "path": str(root / "candidate.inventory"),
+        }
+        prepare_receipt = {
+            "schema_version": 3,
+            "operation_id": operation,
+            "generation_id": generation,
+            "source": {"commit": source_commit},
+            "immutable_source": {},
+            "expected_live_source": {},
+            "predecessor_source": {},
+            "candidate_inventory": candidate_inventory,
+            "preflight_live_inventory": preflight_inventory,
+            "evidence_snapshot": {},
+            "staged_validation": {},
+            "named_mutation_outcomes": {"staged": {"control": "PASS"}},
+            "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+            "prepared_at": "2026-08-09T00:00:00Z",
+        }
+        prepare_path = root / "prepare.json"
+        prepare_path.write_text(
+            json.dumps(prepare_receipt, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        prepare_digest = hashlib.sha256(prepare_path.read_bytes()).hexdigest()
+        reader_receipt = {
+            "schema_version": 2,
+            "record_type": "external_reader_quiescence_attestation",
+            "operation_id": operation,
+            "authorized_by": "operator-test",
+            "maintenance_window": {
+                "id": "window-test",
+                "starts_at": "2026-08-09T00:00:00Z",
+                "ends_at": "2026-08-09T00:10:00Z",
+            },
+            "known_reader_inventory": {
+                "scope": "test",
+                "method": "test",
+                "evidence_reference": "test",
+                "inventory_complete": True,
+                "known_reader_count": 0,
+                "known_active_reader_count": 0,
+                "unknown_reader_policy": "STOP_IF_UNKNOWN",
+                "unknown_reader_status": "CLEAR",
+                "checked_at": "2026-08-09T00:00:00Z",
+                "expires_at": "2026-08-09T00:10:00Z",
+            },
+            "publisher_validation_scope": "recorded-claim-only",
+            "controller": {
+                "id": "controller-test",
+                "state": "ACTIVE",
+                "owner": {
+                    "host": "host-test",
+                    "pid": 1,
+                    "process_start_identity": "start-test",
+                },
+            },
+        }
+        reader_path = root / "reader.json"
+        reader_path.write_text(
+            json.dumps(reader_receipt, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        reader_digest = hashlib.sha256(reader_path.read_bytes()).hexdigest()
+        manifest.append_finalization_record(
+            path,
+            record_type="prepare_receipt_registered",
+            writer_controller_id="controller-test",
+            payload={
+                "operation_id": operation,
+                "generation_id": generation,
+                "receipt_path": str(prepare_path),
+                "receipt_sha256": prepare_digest,
+                "mutation_outcome": "NO_LIVE_MUTATION_PREPARED",
+                "state": "PREPARED",
+                "next_action": "reserve",
+            },
+        )
+        return {
+            "path": path,
+            "generation": generation,
+            "prepare_sha256": prepare_digest,
+            "source_commit": source_commit,
+            "payload": {
+                "operation_id": operation,
+                "generation_id": generation,
+                "installer": "controller-test",
+                "installed_root": str(root / "installed"),
+                "lock_path": str(root / "package.lock"),
+                "prepare_receipt_path": str(prepare_path),
+                "prepare_receipt_sha256": prepare_digest,
+                "prepare_receipt": prepare_receipt,
+                "reader_quiescence_record_path": str(reader_path),
+                "reader_quiescence_record_sha256": reader_digest,
+                "reader_quiescence_record": reader_receipt,
+                "preflight_inventory": preflight_inventory,
+                "candidate_inventory": candidate_inventory,
+                "expected_live_source_commit": "3" * 40,
+                "reservation_state": "INTENT_RECORDED",
+                "atomic_operation": "darwin-rename-swap",
+                "mandatory_recovery_condition": "inspect before recovery",
+            },
+        }
+
+    def append_source_review_input(
+        self,
+        path: Path,
+        *,
+        prepared_generation_id: object,
+        prepare_receipt_sha256: str,
+        head_sha: str = "5" * 40,
+        raw_digest: str = "7" * 64,
+        **overrides: object,
+    ) -> None:
+        """Register one prepublication source review over the prepared candidate."""
+        payload: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "review_boundary": "prepublication-source-and-staged-snapshot",
+            "repository_heads": {
+                "installed_source": {
+                    "repository_key": "package-source",
+                    "head_sha": head_sha,
+                }
+            },
+            "prepared_generation_id": prepared_generation_id,
+            "prepare_receipt_sha256": prepare_receipt_sha256,
+            "panel_input_path": str(path.parent / "panel-input.jsonl"),
+            "panel_input_sha256": "a" * 64,
+            "raw_input_inventory_path": str(path.parent / "raw-input.inventory"),
+            "raw_input_inventory_sha256": raw_digest,
+            "raw_input_seal_path": str(path.parent / "raw-input-seal.json"),
+            "raw_input_seal_sha256": "b" * 64,
+            "raw_input_max_files": 200,
+            "raw_input_max_total_bytes": 10000000,
+            "raw_input_actual_files": 1,
+            "raw_input_actual_total_bytes": 1,
+            "expected_reports": 1,
+            "received_reports": 0,
+            "expected_challenge_responses": 1,
+            "received_challenge_responses": 0,
+            "expected_judges": 1,
+            "received_judges": 0,
+            "live_installation_status": "UNCHANGED_PREDECESSOR",
+            "source_guidance_status": "NOT_REVIEWED",
+            "state": "SOURCE_REVIEW_REGISTERED",
+            "next_action": "dispatch reviewers",
+        }
+        payload.update(overrides)
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_input_registered",
+            writer_controller_id="controller-test",
+            payload=payload,
+        )
+
+    def append_unopened_source_verdict(
+        self,
+        path: Path,
+        *,
+        state: str = "SOURCE_ACCEPTED",
+        source_guidance_status: str = "SOURCE_GUIDANCE_ACCEPTED",
+        judge_verdict: str = "ACCEPT",
+        judge_role: object = "judge-1",
+        raw_digest: str = "7" * 64,
+    ) -> None:
+        """Append reports, challenges and a judge verdict whose files are never read.
+
+        The gate refuses on manifest rows alone before it opens the judge
+        receipt, so these controls need no raw-input tree, no seal, and no real
+        artifact bytes.
+        """
+
+        def identity(name: str, **extra: object) -> dict[str, object]:
+            value: dict[str, object] = {
+                "path": str(path.parent / name),
+                "sha256": hashlib.sha256(name.encode()).hexdigest(),
+                "bytes": 1,
+                "lines": 1,
+            }
+            value.update(extra)
+            return value
+
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_independent_reports_received",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "panel_id": "panel-test",
+                "raw_input_inventory_sha256": raw_digest,
+                "expected_reports": 1,
+                "received_reports": 1,
+                "expected_challenge_responses": 1,
+                "received_challenge_responses": 0,
+                "findings_received": 1,
+                "p0_received": 0,
+                "p1_received": 1,
+                "p2_received": 0,
+                "p3_received": 0,
+                "reports": [
+                    identity("report-1.md", role="reviewer-1", finding_ids=["F-001"])
+                ],
+                "source_guidance_status": "REVIEW_PENDING_CHALLENGE",
+                "state": "CHALLENGE_PENDING",
+                "next_action": "challenge",
+            },
+        )
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_challenges_received",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "panel_id": "panel-test",
+                "raw_input_inventory_sha256": raw_digest,
+                "expected_challenge_responses": 1,
+                "received_challenge_responses": 1,
+                "findings_received": 1,
+                "findings_answered": 1,
+                "deduplicated_findings_reported_min": 1,
+                "deduplicated_findings_reported_max": 1,
+                "challenges": [
+                    identity(
+                        "challenge-1.md",
+                        role="reviewer-1",
+                        answered_finding_ids=["F-001"],
+                    )
+                ],
+                "source_guidance_status": "REVIEW_PENDING_JUDGE",
+                "state": "JUDGE_PENDING",
+                "next_action": "judge",
+            },
+        )
+        judge = identity("source-judge.json", verdict=judge_verdict)
+        if judge_role is not None:
+            judge["role"] = judge_role
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_judge_verdict_received",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "panel_id": "panel-test",
+                "raw_input_inventory_sha256": raw_digest,
+                "judge": judge,
+                "accepted_findings": ["F-001"],
+                "merged_findings": {},
+                "rejected_findings": [],
+                "live_installation_status": "UNCHANGED_PREDECESSOR",
+                "source_guidance_status": source_guidance_status,
+                "state": state,
+                "next_action": "prepare postpublication review",
+            },
+        )
+
+    def build_accepted_source_review(
+        self,
+        root: Path,
+        path: Path,
+        *,
+        prepared_generation_id: object,
+        prepare_receipt_sha256: str,
+        head_sha: str = "5" * 40,
+    ) -> str:
+        """Register, dispatch-seal, report, challenge and ACCEPT one source review.
+
+        Everything up to but NOT including the ``judgment`` seal, so a caller can
+        assert what the dispatch-only prefix may and may not do.  Report and
+        challenge share the ``reviewer-1`` role, which the panel brief requires
+        and the judgment prerequisites enforce.  Returns the raw-input digest.
+        """
+        raw_inventory = root / "source-raw-input.inventory"
+        raw_root = root / "raw-inputs"
+        raw_root.mkdir()
+        raw_file = raw_root / "input.txt"
+        raw_file.write_bytes(b"source raw input\n")
+        panel_input = root / "panel-input.jsonl"
+        panel_input.write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "repository_roles": {"installed_source": "package-source"},
+                    "repositories": {"package-source": {"head_sha": head_sha}},
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        reviewer_panel_input = raw_root / "panel-input.jsonl"
+        reviewer_panel_input.write_bytes(panel_input.read_bytes())
+        raw_inventory.write_text(
+            f"{hashlib.sha256(raw_file.read_bytes()).hexdigest()}\t"
+            f"{len(raw_file.read_bytes())}\tinput.txt\n"
+            f"{hashlib.sha256(reviewer_panel_input.read_bytes()).hexdigest()}\t"
+            f"{len(reviewer_panel_input.read_bytes())}\tpanel-input.jsonl\n",
+            encoding="utf-8",
+        )
+        raw_digest = hashlib.sha256(raw_inventory.read_bytes()).hexdigest()
+        panel_digest = hashlib.sha256(panel_input.read_bytes()).hexdigest()
+        validation = root / "panel-input-validation-canonical.json"
+        validation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "PASS",
+                    "named_mutation_outcomes": {"panel.contract": "PASS"},
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        raw_seal = root / "raw-input-seal.json"
+        actual_bytes = len(raw_file.read_bytes()) + len(
+            reviewer_panel_input.read_bytes()
+        )
+        raw_seal.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": "raw_input_seal",
+                    "review_id": "review-test",
+                    "sealed_at": "2026-08-09T00:00:00Z",
+                    "inventory_format": "sha256-size-path-v1",
+                    "inventory_path": str(raw_inventory),
+                    "inventory_sha256": raw_digest,
+                    "raw_input_max_files": 200,
+                    "raw_input_max_total_bytes": 10000000,
+                    "raw_input_actual_files": 2,
+                    "raw_input_actual_total_bytes": actual_bytes,
+                    "panel_input_path": str(panel_input),
+                    "panel_input_sha256": panel_digest,
+                    "panel_input_validation_sha256": hashlib.sha256(
+                        validation.read_bytes()
+                    ).hexdigest(),
+                    "source_guidance_status_before_review": "NOT_REVIEWED",
+                    "live_installation_status": "UNCHANGED_PREDECESSOR",
+                    "live_publication_status": "NOT_RUN",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.append_source_review_input(
+            path,
+            prepared_generation_id=prepared_generation_id,
+            prepare_receipt_sha256=prepare_receipt_sha256,
+            head_sha=head_sha,
+            raw_digest=raw_digest,
+            panel_input_path=str(panel_input),
+            panel_input_sha256=panel_digest,
+            raw_input_inventory_path=str(raw_inventory),
+            raw_input_seal_path=str(raw_seal),
+            raw_input_seal_sha256=hashlib.sha256(raw_seal.read_bytes()).hexdigest(),
+            raw_input_actual_files=2,
+            raw_input_actual_total_bytes=actual_bytes,
+        )
+        dispatch = self.seal(path, "dispatch", raw_digest)
+        for review_directory in ("reports", "challenges", "judge"):
+            (root / review_directory).mkdir()
+        report_artifact = self.publish_review_file(
+            root,
+            "reports/report-1.md",
+            b"source report\n",
+            role="reviewer-1",
+            finding_ids=["F-001"],
+        )
+        challenge_artifact = self.publish_review_file(
+            root,
+            "challenges/challenge-1.md",
+            b"source challenge\n",
+            role="reviewer-1",
+            answered_finding_ids=["F-001"],
+        )
+        report_payload: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "expected_reports": 1,
+            "received_reports": 1,
+            "expected_challenge_responses": 1,
+            "received_challenge_responses": 0,
+            "findings_received": 1,
+            "p0_received": 0,
+            "p1_received": 1,
+            "p2_received": 0,
+            "p3_received": 0,
+            "reports": [report_artifact],
+            "source_guidance_status": "REVIEW_PENDING_CHALLENGE",
+            "state": "CHALLENGE_PENDING",
+            "next_action": "challenge",
+        }
+        challenge_payload: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "expected_challenge_responses": 1,
+            "received_challenge_responses": 1,
+            "findings_received": 1,
+            "findings_answered": 1,
+            "deduplicated_findings_reported_min": 1,
+            "deduplicated_findings_reported_max": 1,
+            "challenges": [challenge_artifact],
+            "source_guidance_status": "REVIEW_PENDING_JUDGE",
+            "state": "JUDGE_PENDING",
+            "next_action": "judge",
+        }
+        for record_type, payload in (
+            ("source_review_independent_reports_received", report_payload),
+            ("source_review_challenges_received", challenge_payload),
+        ):
+            manifest.append_finalization_record(
+                path,
+                record_type=record_type,
+                writer_controller_id="controller-test",
+                payload=payload,
+            )
+        rationale = self.publish_review_file(
+            root, "judge/rationale.md", b"judge rationale\n"
+        )
+        manifest.append_finalization_record(
+            path,
+            record_type="artifact_registered",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "artifact_kind": manifest.JUDGE_RATIONALE_ARTIFACT_KIND,
+                **rationale,
+                "state": "PUBLISHED",
+                "next_action": "judge",
+            },
+        )
+        verdict_payload: dict[str, object] = {
+            "review_id": "review-test",
+            "panel_id": "panel-test",
+            "raw_input_inventory_sha256": raw_digest,
+            "judge": {},
+            "accepted_findings": ["F-001"],
+            "merged_findings": {},
+            "rejected_findings": [],
+            "judge_rationale": rationale,
+            "live_installation_status": "UNCHANGED_PREDECESSOR",
+            "source_guidance_status": "SOURCE_GUIDANCE_ACCEPTED",
+            "state": "SOURCE_ACCEPTED",
+            "next_action": "prepare postpublication review",
+        }
+        resolution = manifest.source_findings_resolution(
+            report_payload, challenge_payload, verdict_payload
+        )
+        adjudicated = manifest.judgment_input_identity(self.records(path))
+        judge_bytes = (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": manifest.JUDGE_RECEIPT_TYPE,
+                    "review_id": "review-test",
+                    "raw_input_inventory_sha256": raw_digest,
+                    "dispatch_manifest_prefix_sha256": dispatch["record"][
+                        "manifest_prefix_sha256"
+                    ],
+                    **adjudicated,
+                    "judge_role": "judge-1",
+                    "verdict": "ACCEPT",
+                    "recorded_at": "2026-08-09T00:00:03Z",
+                    "findings_unresolved": 0,
+                    **resolution,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        verdict_payload["judge"] = self.publish_review_file(
+            root,
+            "judge/source-judge.json",
+            judge_bytes,
+            role="judge-1",
+            verdict="ACCEPT",
+        )
+        manifest.append_finalization_record(
+            path,
+            record_type="source_review_judge_verdict_received",
+            writer_controller_id="controller-test",
+            payload=verdict_payload,
+        )
+        appended_verdict = next(
+            record
+            for record in self.records(path)
+            if record["record_type"] == "source_review_judge_verdict_received"
+        )
+        payload_identity = self.publish_review_file(
+            root,
+            "judge/payload.json",
+            (
+                json.dumps(
+                    {
+                        field: value
+                        for field, value in appended_verdict.items()
+                        if field not in manifest.ENVELOPE_FIELDS
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8"),
+        )
+        manifest.append_finalization_record(
+            path,
+            record_type="artifact_registered",
+            writer_controller_id="controller-test",
+            payload={
+                "review_id": "review-test",
+                "artifact_kind": manifest.JUDGE_PAYLOAD_ARTIFACT_KIND,
+                **payload_identity,
+                "state": "PUBLISHED",
+                "next_action": "seal judgment",
+            },
+        )
+        return raw_digest
+
+    def assert_reservation_refused(
+        self, path: Path, payload: dict[str, object], pattern: str
+    ) -> None:
+        """The reservation intent is refused and not one byte was written."""
+        before = path.read_bytes()
+        with self.assertRaisesRegex(manifest.PublicationError, pattern):
+            manifest.append_finalization_record(
+                path,
+                record_type="installed_publication_reservation_intent",
+                writer_controller_id="controller-test",
+                payload=payload,
+            )
+        self.assertEqual(before, path.read_bytes())
+
+    def append_reservation(self, path: Path, payload: dict[str, object]) -> None:
+        appended = manifest.append_finalization_record(
+            path,
+            record_type="installed_publication_reservation_intent",
+            writer_controller_id="controller-test",
+            payload=payload,
+        )
+        self.assertTrue(appended["appended"])
+        self.assertIn(
+            "installed_publication_reservation_intent",
+            {record["record_type"] for record in self.records(path)},
+        )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_a_dispatch_only_source_review_cannot_reserve_the_publication(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-reserve-dispatch-") as raw:
+            root = Path(raw).resolve()
+            fixture = self.make_reservation_fixture(root)
+            path = Path(str(fixture["path"]))
+            payload = dict(fixture["payload"])  # type: ignore[arg-type]
+            raw_digest = self.build_accepted_source_review(
+                root,
+                path,
+                prepared_generation_id=fixture["generation"],
+                prepare_receipt_sha256=str(fixture["prepare_sha256"]),
+                head_sha=str(fixture["source_commit"]),
+            )
+            # MUTATION: the manifest stops at the dispatch seal.  Every release
+            # fact but the judgment prefix seal is present and accepted.
+            self.assert_reservation_refused(path, payload, "judgment prefix seal")
+            self.seal(path, "judgment", raw_digest)
+            self.append_reservation(path, payload)
+            self.assertGreater(panel_validator.call_count, 0)
+
+    def test_a_registered_but_unjudged_source_review_cannot_reserve(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-reserve-unjudged-") as raw:
+            root = Path(raw).resolve()
+            fixture = self.make_reservation_fixture(root)
+            path = Path(str(fixture["path"]))
+            # MUTATION: the review is registered and nothing has judged it.
+            self.append_source_review_input(
+                path,
+                prepared_generation_id=fixture["generation"],
+                prepare_receipt_sha256=str(fixture["prepare_sha256"]),
+                head_sha=str(fixture["source_commit"]),
+            )
+            self.assert_reservation_refused(
+                path,
+                dict(fixture["payload"]),  # type: ignore[arg-type]
+                "accepted source-review judgment",
+            )
+
+    def test_obsolete_source_review_aliases_do_not_authorize_a_reservation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-reserve-alias-") as raw:
+            root = Path(raw).resolve()
+            fixture = self.make_reservation_fixture(root)
+            path = Path(str(fixture["path"]))
+            self.append_source_review_input(
+                path,
+                prepared_generation_id=fixture["generation"],
+                prepare_receipt_sha256=str(fixture["prepare_sha256"]),
+                head_sha=str(fixture["source_commit"]),
+            )
+            # MUTATION: the verdict row carries the retired JUDGED / REVIEWED
+            # aliases while its judge artifact still says ACCEPT.  No judgment
+            # seal is built, so this control keeps its meaning whatever the
+            # separate alias repair does to the seal itself.
+            self.append_unopened_source_verdict(
+                path, state="JUDGED", source_guidance_status="REVIEWED"
+            )
+            self.assert_reservation_refused(
+                path,
+                dict(fixture["payload"]),  # type: ignore[arg-type]
+                "literal accepted pair",
+            )
+
+    def test_a_non_accepting_or_anonymous_judge_cannot_reserve(self) -> None:
+        for label, overrides, pattern in (
+            ("rejecting judge", {"judge_verdict": "REJECT"}, "judge did not ACCEPT"),
+            ("no declared role", {"judge_role": None}, "judge role is malformed"),
+        ):
+            with self.subTest(mutation=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="finalization-reserve-judge-"
+                ) as raw:
+                    root = Path(raw).resolve()
+                    fixture = self.make_reservation_fixture(root)
+                    path = Path(str(fixture["path"]))
+                    self.append_source_review_input(
+                        path,
+                        prepared_generation_id=fixture["generation"],
+                        prepare_receipt_sha256=str(fixture["prepare_sha256"]),
+                        head_sha=str(fixture["source_commit"]),
+                    )
+                    # MUTATION: the modern literal statuses are in place and the
+                    # judge object itself is the only thing that is wrong.
+                    self.append_unopened_source_verdict(path, **overrides)
+                    self.assert_reservation_refused(
+                        path,
+                        dict(fixture["payload"]),  # type: ignore[arg-type]
+                        pattern,
+                    )
+
+    @mock.patch.object(manifest, "validate_panel_input", return_value=[])
+    def test_one_reviews_judgment_seal_cannot_authorize_another_candidate(
+        self, panel_validator: mock.Mock
+    ) -> None:
+        for label, review_receipt, head, pattern in (
+            # MUTATION: the prepared generation matches and the prepare-receipt
+            # digest belongs to a different candidate.
+            ("half-matched join", "c" * 64, None, "partially matches"),
+            # MUTATION: both join fields match and the reviewed installed_source
+            # head is not the head the prepare receipt itself declares.
+            ("reviewed another head", None, "9" * 40, "source head differs"),
+        ):
+            with self.subTest(mutation=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="finalization-reserve-crosswire-"
+                ) as raw:
+                    root = Path(raw).resolve()
+                    fixture = self.make_reservation_fixture(root)
+                    path = Path(str(fixture["path"]))
+                    raw_digest = self.build_accepted_source_review(
+                        root,
+                        path,
+                        prepared_generation_id=fixture["generation"],
+                        prepare_receipt_sha256=review_receipt
+                        or str(fixture["prepare_sha256"]),
+                        head_sha=head or str(fixture["source_commit"]),
+                    )
+                    self.seal(path, "judgment", raw_digest)
+                    self.assert_reservation_refused(
+                        path,
+                        dict(fixture["payload"]),  # type: ignore[arg-type]
+                        pattern,
+                    )
+        self.assertGreater(panel_validator.call_count, 0)
+
+    def test_an_unrelated_source_review_leaves_the_reservation_alone(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="finalization-reserve-scope-") as raw:
+            root = Path(raw).resolve()
+            fixture = self.make_reservation_fixture(root)
+            path = Path(str(fixture["path"]))
+            # MUTATION: a prepublication review of a DIFFERENT candidate, with no
+            # verdict and no judgment seal.  A gate that fired on the mere
+            # presence of a source-review row would break every manifest that
+            # carries one, and would still pass every control above.
+            self.append_source_review_input(
+                path,
+                prepared_generation_id="generation-other",
+                prepare_receipt_sha256="c" * 64,
+                head_sha="6" * 40,
+            )
+            self.append_reservation(
+                path, dict(fixture["payload"])  # type: ignore[arg-type]
             )
 
     def test_publisher_rows_have_exact_schemas_types_and_prepare_lifecycle(self) -> None:
@@ -2761,6 +5258,532 @@ class FinalizationManifestTests(unittest.TestCase):
             identity = manifest.validate_manifest(path)
             self.assertEqual(7, identity["record_count"])
             self.assertEqual(list(range(1, 8)), [row["sequence"] for row in self.records(path)])
+
+
+REPO_ROOT = SCRIPT_DIR.parent
+
+# Every module that decodes JSON someone ELSE produced, mapped to the name of the
+# one sanctioned decoder inside it. The finding that started this named three call
+# sites in validate_panel_inputs.py; repairing only those would have left the same
+# ambiguity in every module below, which is the whole reason this list is a list.
+JSON_TRUST_BOUNDARY_MODULES = {
+    "scripts/finalization_manifest.py": "_decode_json_without_duplicate_keys",
+    "scripts/validate_panel_inputs.py": "strict_json_loads",
+    "scripts/publish_codex_install.py": "_strict_json_loads",
+    "scripts/check_large_queue_guidance.py": "_strict_json_loads",
+    "scripts/score_trigger_coverage.py": "_strict_json_loads",
+    ".github/scripts/validate_plugins.py": "_strict_json_loads",
+    "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py": (
+        "_strict_json_loads"
+    ),
+    "plugins/overnight-review-client-delivery/scripts/final_byte_review.py": (
+        "_strict_json_loads"
+    ),
+    "plugins/overnight-review-client-delivery/scripts/action_authority.py": (
+        "_strict_json_loads"
+    ),
+}
+
+# Trust boundaries the sweep FOUND and deliberately did not repair, with what it
+# would cost. This is separate from the allowlist below on purpose: an unrepaired
+# boundary filed as "not a boundary" is how the finding gets lost.
+PLAIN_JSON_DECODE_DEFERRED = {
+    "plugins/overnight-insight-discovery/scripts/bq_budget.py": (
+        "budget.jsonl is a SHARED ledger -- BQBudget.for_owner() gives every "
+        "overnight track its own owner key against one file, and summarize_log "
+        "aggregates across all of them, so cumulative_bytes reads rows other "
+        "processes wrote and check_before gates a real spend decision on them. "
+        "It is a boundary. Repairing it changes the payload bytes of a RELEASED "
+        "plugin (ledger entry 1.2.1, source_commit 40361a7f), which forces a "
+        "version bump through plugin.json, .claude-plugin/marketplace.json, the "
+        "SKILL banner and the README -- a publishing act this branch was not "
+        "asked to make. Left for the owner to release deliberately."
+    ),
+}
+
+# Modules allowed to call json.loads/json.load directly, each with the reason it is
+# not a trust boundary. A reason is required so that adding a file here is a
+# reviewed act rather than a way to make this test go quiet.
+PLAIN_JSON_DECODE_ALLOWED = {
+    "scripts/test_finalization_manifest.py": (
+        "test bodies decode artifacts the code under test just wrote, inside the "
+        "test process; they assert rather than gate, and the duplicate-key "
+        "controls in this file are what prove the production decoders refuse"
+    ),
+    "scripts/test_publish_codex_install.py": "test bodies, as above",
+    "scripts/test_schedule_poll_orchestrator.py": "test bodies, as above",
+    "scripts/test_client_delivery_action_authority.py": "test bodies, as above",
+    "scripts/test_final_byte_review.py": "test bodies, as above",
+}
+
+
+def _module_invisible_json_decoders(tree: ast.AST) -> list[str]:
+    """Ways to decode JSON that ``_module_json_decode_calls`` cannot follow.
+
+    ``from json import loads``, ``import json as j`` and
+    ``json.JSONDecoder().decode(...)`` all reach the same decoder while
+    presenting nothing the sweep below matches on.  Rather than widen that
+    sweep to chase aliases through a module -- which means tracking assignment
+    -- every tracked file is required to contain NONE of these, which turns the
+    blind spot into a hard error.
+
+    Detected structurally rather than by text.  A guard that greps for
+    ``"from json import"`` cannot tell a file DECODING that way from one
+    DESCRIBING it, and would refuse this very docstring.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "json":
+            names = ", ".join(alias.name for alias in node.names)
+            found.append(f"from json import {names}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "json" and alias.asname:
+                    found.append(f"import json as {alias.asname}")
+        elif isinstance(node, ast.Attribute) and node.attr == "JSONDecoder":
+            found.append("json.JSONDecoder")
+    return found
+
+
+def _module_json_decode_calls(tree: ast.AST) -> list[ast.Call]:
+    """Every ``json.load`` / ``json.loads`` reached through a bare ``json``.
+
+    That is the whole of what this sees, and the docstring says so because the
+    previous one did not: an aliased import or a ``JSONDecoder`` instance is
+    invisible here.  Those are covered by ``_module_invisible_json_decoders``
+    above, which the completeness test refuses outright, so a decode this
+    function cannot see cannot enter the tree unnoticed.
+    """
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "json"
+        and node.func.attr in {"load", "loads"}
+    ]
+
+
+class NonConformingJSONSweepTests(unittest.TestCase):
+    """The sweep behind G-006, held in place so it cannot rot back one layer down."""
+
+    @staticmethod
+    def duplicate_key_bytes(value: dict, key: str, first_value: object) -> bytes:
+        """Encode ``value`` with ``key`` repeated, the conflicting copy first."""
+        if key not in value:
+            raise AssertionError(f"fixture lacks duplicate target key {key!r}")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        token = f"{json.dumps(key)}:"
+        replacement = f"{token}{json.dumps(first_value, separators=(',', ':'))},{token}"
+        if encoded.count(token) != 1:
+            raise AssertionError(f"duplicate target key {key!r} is not uniquely placed")
+        return (encoded.replace(token, replacement, 1) + "\n").encode("utf-8")
+
+    @staticmethod
+    def load_module(relative: str):
+        """Import a module by path WITHOUT leaving __pycache__ beside it.
+
+        The plugin payloads are byte-identified: validate_plugins.py walks the
+        real directory and compares file_count/total_bytes/payload_sha256 against
+        scripts/plugin_release_ledger.json. A .pyc dropped next to a plugin
+        script is a new file in that payload, so importing carelessly here makes
+        a DIFFERENT gate fail somewhere else. Suppress bytecode for the load.
+        """
+        path = REPO_ROOT / relative
+        name = f"nonconformingjsonsweep_{path.stem}"
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        previous = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous
+        return module
+
+    def test_every_trust_boundary_module_routes_json_through_one_guarded_decoder(
+        self,
+    ) -> None:
+        for relative, helper_name in sorted(JSON_TRUST_BOUNDARY_MODULES.items()):
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                helpers = [
+                    node
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.FunctionDef) and node.name == helper_name
+                ]
+                self.assertEqual(1, len(helpers), f"{relative} lacks {helper_name}")
+                helper = helpers[0]
+                calls = _module_json_decode_calls(tree)
+                self.assertEqual(
+                    1,
+                    len(calls),
+                    f"{relative} has {len(calls)} raw json decodes: "
+                    + str([call.lineno for call in calls]),
+                )
+                call = calls[0]
+                self.assertLessEqual(helper.lineno, call.lineno)
+                self.assertLessEqual(
+                    call.end_lineno or call.lineno, helper.end_lineno or helper.lineno
+                )
+                self.assertEqual(
+                    ["object_pairs_hook", "parse_constant", "parse_float"],
+                    [keyword.arg for keyword in call.keywords],
+                    f"{relative} decodes without all three refusal hooks",
+                )
+
+    # One probe per ambiguity, with the words the refusal must say.  Driving
+    # only the spelled-out constant would stay green on the 1e400 hole, which
+    # is the shape this repo keeps re-shipping: the fix for a defect carrying a
+    # fresh instance of that same defect.
+    JSON_AMBIGUITY_PROBES = (
+        ("duplicate key", '{"kept": 1, "kept": 2}', "duplicate JSON key"),
+        ("python constant", '{"kept": Infinity}', "non-JSON constant"),
+        ("float overflow", '{"kept": 1e400}', "out-of-range JSON number"),
+        ("negative overflow", '{"kept": [-1e400]}', "out-of-range JSON number"),
+        ("unpaired surrogate", '{"kept": "\\ud800"}', "unpaired surrogate"),
+    )
+    # A document that exercises everything ADJACENT to the four refusals and is
+    # ordinary JSON.  Without it a decoder that refused every document would
+    # pass every probe above.
+    JSON_UNAMBIGUOUS_DOCUMENT = (
+        '{"emoji": "\\ud83d\\ude00", "underflow": 1e-400, '
+        '"big_int": 123456789012345678901234567890, "plain": "ok"}'
+    )
+
+    def sweep_module(self, relative: str):
+        """The module under test, without importing anything twice.
+
+        finalization_manifest.py and validate_panel_inputs.py are already
+        imported at the top of this file.  ``load_module`` deliberately does not
+        register what it loads in ``sys.modules``, which ``@dataclass`` needs to
+        resolve annotations, so re-loading those two by path fails outright.
+        """
+        if relative == "scripts/finalization_manifest.py":
+            return manifest
+        if relative == "scripts/validate_panel_inputs.py":
+            return panel_inputs
+        return self.load_module(relative)
+
+    def drive_decoder(self, relative: str, module, helper_name: str, text: str):
+        """Call one module's sanctioned decoder the way its callers do."""
+        decoder = getattr(module, helper_name)
+        if relative == "scripts/finalization_manifest.py":
+            # The only one taking bytes and a label, and the only one raising
+            # PublicationError rather than NonConformingJSON.
+            return decoder(text.encode("utf-8"), "probe evidence")
+        return decoder(text)
+
+    @staticmethod
+    def decoder_refusal_type(relative: str, module):
+        if relative == "scripts/finalization_manifest.py":
+            return module.PublicationError
+        return module.NonConformingJSON
+
+    def test_every_trust_boundary_decoder_actually_refuses_each_ambiguity(
+        self,
+    ) -> None:
+        """The structural guard reads keyword NAMES; this one reads BEHAVIOUR.
+
+        The reviewer demonstrated the gap by replacing both refusal hooks in
+        score_trigger_coverage.py with silent ones: every keyword was still
+        spelled correctly, so the AST test above stayed green while the decoder
+        resolved the ambiguity instead of refusing it.  Only three of the nine
+        modules were driven anywhere, and those three through their callers.
+
+        This drives the sanctioned decoder of all nine directly, with one probe
+        per ambiguity, and then requires an ordinary document to survive -- a
+        decoder that refuses everything is not a decoder.
+        """
+        for relative, helper_name in sorted(JSON_TRUST_BOUNDARY_MODULES.items()):
+            module = self.sweep_module(relative)
+            refusal = self.decoder_refusal_type(relative, module)
+            for label, probe, expected in self.JSON_AMBIGUITY_PROBES:
+                with self.subTest(module=relative, ambiguity=label):
+                    with self.assertRaisesRegex(refusal, expected):
+                        self.drive_decoder(relative, module, helper_name, probe)
+            with self.subTest(module=relative, ambiguity="none"):
+                decoded = self.drive_decoder(
+                    relative, module, helper_name, self.JSON_UNAMBIGUOUS_DOCUMENT
+                )
+                self.assertEqual(
+                    {
+                        "emoji": "\U0001f600",
+                        "underflow": 0.0,
+                        "big_int": 123456789012345678901234567890,
+                        "plain": "ok",
+                    },
+                    decoded,
+                )
+
+    def test_no_other_tracked_module_decodes_json_with_a_plain_loader(self) -> None:
+        """The completeness half: a NEW plain decode anywhere goes red here.
+
+        Two halves, because the AST sweep sees only one spelling.  Every tracked
+        file is refused if it contains a spelling the sweep cannot follow, so
+        "no plain decode" below is a statement about the file rather than about
+        what this test happens to be able to parse.
+        """
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "*.py"],
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        tracked = [name for name in listed.decode("utf-8").split("\0") if name]
+        self.assertGreater(len(tracked), 10, tracked)
+        invisible: list[str] = []
+        for relative in tracked:
+            path = REPO_ROOT / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            invisible.extend(
+                f"{relative}: {spelling}"
+                for spelling in _module_invisible_json_decoders(tree)
+            )
+        self.assertEqual(
+            [],
+            invisible,
+            "these reach a JSON decoder in a spelling the sweep below cannot "
+            "follow; route them through the module's sanctioned decoder, or "
+            "widen the sweep and this check together",
+        )
+        unguarded: list[str] = []
+        for relative in tracked:
+            if relative in JSON_TRUST_BOUNDARY_MODULES:
+                continue
+            path = REPO_ROOT / relative
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            if not _module_json_decode_calls(tree):
+                continue
+            if relative in PLAIN_JSON_DECODE_ALLOWED:
+                self.assertTrue(PLAIN_JSON_DECODE_ALLOWED[relative].strip())
+                continue
+            if relative in PLAIN_JSON_DECODE_DEFERRED:
+                self.assertTrue(PLAIN_JSON_DECODE_DEFERRED[relative].strip())
+                continue
+            unguarded.append(relative)
+        self.assertEqual([], unguarded)
+
+    def test_the_allowlist_names_only_files_that_still_decode_json(self) -> None:
+        """An allowlist entry that no longer applies is a licence nobody revoked."""
+        listed = {**PLAIN_JSON_DECODE_ALLOWED, **PLAIN_JSON_DECODE_DEFERRED}
+        self.assertEqual(
+            len(listed),
+            len(PLAIN_JSON_DECODE_ALLOWED) + len(PLAIN_JSON_DECODE_DEFERRED),
+            "a module cannot be both a non-boundary and a deferred boundary",
+        )
+        for relative, reason in sorted(listed.items()):
+            with self.subTest(module=relative):
+                path = REPO_ROOT / relative
+                self.assertTrue(path.is_file(), relative)
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                self.assertTrue(_module_json_decode_calls(tree), relative)
+                self.assertTrue(reason.strip())
+
+    def test_held_python_launcher_decodes_only_its_own_process_argv(self) -> None:
+        """install_inventory.py's one decode is genuinely not a trust boundary.
+
+        The decode lives inside a launcher template string, so the AST sweep above
+        cannot see it. It reads argv[4], which the SAME process builds two lines
+        earlier with json.dumps over a Python dict -- a dict cannot hold a repeated
+        key, so no producer can put one there. This test pins both halves: if the
+        template ever decodes something else, or the producer stops being a
+        json.dumps of a dict, the claim stops being true and this goes red.
+        """
+        source_path = SCRIPT_DIR / "install_inventory.py"
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(source_path))
+        self.assertEqual([], _module_json_decode_calls(tree))
+        template = next(
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_HELD_PYTHON_FD_LAUNCHER"
+            and isinstance(node.value, ast.Constant)
+        )
+        decodes = [
+            line.strip()
+            for line in template.split("\n")
+            if "json.load" in line
+        ]
+        self.assertEqual(
+            ["authenticated_source_sha256 = json.loads(sys.argv[4])"], decodes
+        )
+        producer = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "authenticated_context_json"
+        )
+        self.assertIsInstance(producer.value, ast.Call)
+        self.assertEqual("dumps", producer.value.func.attr)
+        self.assertEqual("json", producer.value.func.value.id)
+
+    def test_publisher_read_json_file_refuses_duplicate_keys(self) -> None:
+        publisher = self.load_module("scripts/publish_codex_install.py")
+        with tempfile.TemporaryDirectory(prefix="dupkey-publisher-") as raw:
+            path = Path(raw).resolve() / "receipt.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"operation": "publish", "status": "PREPARED"},
+                    "status",
+                    "RESERVED",
+                )
+            )
+            with self.assertRaisesRegex(
+                publisher.PublicationError, "duplicate JSON key 'status'"
+            ):
+                publisher._read_json_file(path, label="prepare receipt")
+
+    def test_large_queue_read_json_refuses_duplicate_keys_at_both_depths(self) -> None:
+        gate = self.load_module("scripts/check_large_queue_guidance.py")
+        for label, document, key, first in (
+            ("top level", {"schema_version": 1, "cases": []}, "schema_version", 2),
+            ("nested", {"outer": {"kept": 1, "state": "ACTIVE"}}, "state", "STALE"),
+        ):
+            with self.subTest(depth=label):
+                with tempfile.TemporaryDirectory(
+                    prefix="dupkey-largequeue-", dir=REPO_ROOT
+                ) as raw:
+                    path = Path(raw).resolve() / "fixture.json"
+                    if label == "nested":
+                        inner = self.duplicate_key_bytes(
+                            document["outer"], key, first
+                        ).decode("utf-8")
+                        path.write_bytes(
+                            ('{"outer":' + inner.strip() + "}\n").encode("utf-8")
+                        )
+                    else:
+                        path.write_bytes(
+                            self.duplicate_key_bytes(document, key, first)
+                        )
+                    errors: list[str] = []
+                    self.assertEqual({}, gate.read_json(path, errors))
+                    self.assertEqual(1, len(errors), errors)
+                    self.assertIn(f"duplicate JSON key {key!r}", errors[0])
+
+    def test_poll_orchestrator_state_and_journal_refuse_duplicate_keys(self) -> None:
+        poll = self.load_module(
+            "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-poll-") as raw:
+            root = Path(raw).resolve()
+            state = root / "status.json"
+            state.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 1, "run_id": "r-1", "tracks": {}},
+                    "run_id",
+                    "r-forged",
+                )
+            )
+            with self.assertRaisesRegex(poll.PollError, "poll status is invalid JSON"):
+                poll._load_state(state)
+            journal = root / "journal.jsonl"
+            journal.write_bytes(
+                self.duplicate_key_bytes(
+                    {"event_id": "e-1", "kind": "poll"}, "event_id", "e-forged"
+                )
+            )
+            with self.assertRaisesRegex(poll.PollError, "row 1 is invalid"):
+                poll._journal_records(journal)
+
+    def test_client_delivery_authority_refuses_duplicate_keys(self) -> None:
+        authority = self.load_module(
+            "plugins/overnight-review-client-delivery/scripts/action_authority.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-authority-") as raw:
+            path = Path(raw).resolve() / "authority.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 1, "review_id": "rv-1", "grants": []},
+                    "review_id",
+                    "rv-forged",
+                )
+            )
+            with self.assertRaisesRegex(
+                authority.AuthorityError, "authority receipt is invalid JSON"
+            ):
+                authority._load_authority(path, review_id="rv-1")
+
+    def test_final_byte_review_state_and_legacy_path_refuse_duplicate_keys(
+        self,
+    ) -> None:
+        """The compatibility path counts: the reviewer named it explicitly."""
+        review = self.load_module(
+            "plugins/overnight-review-client-delivery/scripts/final_byte_review.py"
+        )
+        with tempfile.TemporaryDirectory(prefix="dupkey-finalbyte-") as raw:
+            path = Path(raw).resolve() / "state.json"
+            path.write_bytes(
+                self.duplicate_key_bytes(
+                    {"schema_version": 2, "review_id": "rv-1", "cycle": 1},
+                    "review_id",
+                    "rv-forged",
+                )
+            )
+            with self.assertRaisesRegex(review.GateError, "must contain one UTF-8 JSON"):
+                review._load_state(path)
+            with self.assertRaisesRegex(
+                review.GateError, "legacy final-byte state is invalid JSON"
+            ):
+                review._legacy_state_invalidation(path, "rv-1")
+
+    def test_every_decoder_refuses_pythons_non_json_constants(self) -> None:
+        """The blind spot the duplicate-key repair left behind, closed and pinned.
+
+        ``json.loads`` accepts NaN/Infinity/-Infinity, which are a Python
+        extension rather than JSON. A conforming parser rejects those same
+        bytes -- the identical "two readings of one document" failure the
+        duplicate-key repair exists to prevent, so refusing one and not the
+        other would have shipped the class this fix repairs.
+        """
+        probes = (
+            b'{"total_bytes": NaN}\n',
+            b'{"nested": {"budget": Infinity}}\n',
+            b'{"drift": -Infinity}\n',
+        )
+        publisher = self.load_module("scripts/publish_codex_install.py")
+        for probe in probes:
+            with self.subTest(probe=probe.decode("utf-8").strip()):
+                with self.assertRaisesRegex(
+                    manifest.PublicationError, "non-JSON constant"
+                ):
+                    manifest._decode_json_without_duplicate_keys(probe, "state evidence")
+                errors: list[str] = []
+                self.assertIsNone(
+                    panel_inputs.json_object(probe, "prepare receipt", errors)
+                )
+                self.assertEqual(1, len(errors), errors)
+                self.assertIn("non-JSON constant", errors[0])
+                with tempfile.TemporaryDirectory(prefix="nonjson-const-") as raw:
+                    root = Path(raw).resolve()
+                    line = root / "panel-manifest.jsonl"
+                    line.write_bytes(probe)
+                    records, found = panel_inputs.load_jsonl(line)
+                    self.assertEqual([], records)
+                    self.assertTrue(
+                        any("non-JSON constant" in item for item in found), found
+                    )
+                    receipt = root / "receipt.json"
+                    receipt.write_bytes(probe)
+                    with self.assertRaisesRegex(
+                        publisher.PublicationError, "non-JSON constant"
+                    ):
+                        publisher._read_json_file(receipt, label="prepare receipt")
+
+    def test_release_identity_reproduction_refuses_duplicate_keys(self) -> None:
+        validator = self.load_module(".github/scripts/validate_plugins.py")
+        payload = self.duplicate_key_bytes(
+            {"name": "a-plugin", "version": "1.0.0"}, "version", "9.9.9"
+        )
+        with mock.patch.object(validator, "git_bytes", return_value=payload):
+            with self.assertRaisesRegex(ValueError, "duplicate JSON key 'version'"):
+                validator.release_identity_at_commit("a-plugin", "deadbeef")
 
 
 if __name__ == "__main__":

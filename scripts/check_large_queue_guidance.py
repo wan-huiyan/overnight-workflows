@@ -210,6 +210,24 @@ SOURCE_REVIEW_BOUNDARY_README_MARKERS = (
     "A `prepublication-source-and-staged-snapshot` dispatch must use "
     "`source_review_input_registered`",
     "decoded with duplicate-key rejection",
+    # The other three refusals, pinned the same way, so the README cannot go
+    # back to describing only the first of the four.  Markers are matched
+    # against whitespace-normalized text, so they carry single spaces wherever
+    # the README happens to wrap.  This file and README.md are not
+    # install-manifest entries, so adding markers here regenerates no install
+    # digest.
+    "the Python constants `NaN` / `Infinity` / `-Infinity`",
+    "a number too large for a float such as `1e400`",
+    "an unpaired surrogate escape such as `\\ud800`",
+)
+# README-only markers: README.md and this checker are not install-manifest
+# entries, so stating the reservation gate here regenerates no install digest.
+RESERVATION_SOURCE_REVIEW_README_MARKERS = (
+    "cannot be reserved until that same review accepted it",
+    "joined by both its `prepared_generation_id` and its "
+    "`prepare_receipt_sha256`",
+    "A dispatch-only prefix reserves nothing",
+    "one review's judgment seal cannot authorize another candidate",
 )
 UTC_TIMESTAMP = re.compile(
     r"^(?:[0-9]{4})-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
@@ -479,6 +497,11 @@ def check_panel_schema3_guidance(
     for marker in SOURCE_REVIEW_BOUNDARY_README_MARKERS:
         if marker not in normalized_readme:
             errors.append(f"source-review boundary README is missing {marker!r}")
+    for marker in RESERVATION_SOURCE_REVIEW_README_MARKERS:
+        if marker not in normalized_readme:
+            errors.append(
+                f"reservation source-review README is missing {marker!r}"
+            )
     for stale in (
         "Panel dispatches use exact schema-2 `panel_input` records",
         "Run that schema-2 validation before dispatch",
@@ -553,6 +576,98 @@ def run_source_review_boundary_guidance_negative_control(
         errors.append("source-review boundary negative control did not fail")
 
 
+def run_reservation_source_review_guidance_negative_control(
+    reference: str,
+    readme: str,
+    errors: list[str],
+) -> None:
+    """Prove a README that drops the reservation gate is observable."""
+    marker = RESERVATION_SOURCE_REVIEW_README_MARKERS[0]
+    normalized_readme = " ".join(readme.split())
+    if marker not in normalized_readme:
+        errors.append("reservation source-review control setup marker is absent")
+        return
+    mutated = normalized_readme.replace(
+        marker,
+        "can be reserved while its source review is still pending",
+        1,
+    )
+    observed: list[str] = []
+    check_panel_schema3_guidance(reference, mutated, observed)
+    if not any(
+        "reservation source-review README is missing" in item for item in observed
+    ):
+        errors.append("reservation source-review negative control did not fail")
+
+
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Four ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright;
+    * a number too large for a float, such as ``1e400`` -- ordinary JSON number
+      syntax, which Python resolves to the same infinity as the line above and
+      then re-encodes as the literal ``Infinity`` this decoder refuses;
+    * an unpaired surrogate escape such as ``\\ud800`` -- Python keeps the lone
+      code point and Go's encoding/json substitutes U+FFFD, so one document
+      decodes to two different strings and a digest over them disagrees.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so all four
+    are refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
+    )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
+
+
 def read_json(
     path: Path,
     errors: list[str],
@@ -565,8 +680,8 @@ def read_json(
             if authenticated_bytes is None
             else authenticated_bytes.decode("utf-8")
         )
-        value = json.loads(text)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(text)
+    except (OSError, UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         errors.append(f"{path.relative_to(ROOT)}: cannot read JSON: {exc}")
         return {}
     if not isinstance(value, dict):
@@ -740,8 +855,8 @@ def json_examples(markdown: str, errors: list[str]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for block in re.findall(r"```json\n(.*?)\n```", markdown, flags=re.DOTALL):
         try:
-            value = json.loads(block)
-        except json.JSONDecodeError as exc:
+            value = _strict_json_loads(block)
+        except (json.JSONDecodeError, NonConformingJSON) as exc:
             errors.append(f"large-queue reference has invalid JSON example: {exc}")
             continue
         if isinstance(value, dict) and isinstance(value.get("record_type"), str):
@@ -3189,7 +3304,7 @@ def _loader_skills_for_root(codex_bin: Path, codex_home: Path, root: Path) -> li
             line = process.stdout.readline()
             if not line:
                 break
-            parsed = json.loads(line)
+            parsed = _strict_json_loads(line)
             if parsed.get("id") == response_id:
                 return parsed
         raise RuntimeError(f"Codex app-server timed out waiting for response {response_id}")
@@ -4023,6 +4138,9 @@ def main() -> int:
             reference, readme, errors
         )
         run_source_review_boundary_guidance_negative_control(
+            reference, readme, errors
+        )
+        run_reservation_source_review_guidance_negative_control(
             reference, readme, errors
         )
         if nested_execution_is_authenticated:

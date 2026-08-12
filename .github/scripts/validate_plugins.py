@@ -26,6 +26,75 @@ import re
 import subprocess
 import sys
 
+
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Four ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright;
+    * a number too large for a float, such as ``1e400`` -- ordinary JSON number
+      syntax, which Python resolves to the same infinity as the line above and
+      then re-encodes as the literal ``Infinity`` this decoder refuses;
+    * an unpaired surrogate escape such as ``\\ud800`` -- Python keeps the lone
+      code point and Go's encoding/json substitutes U+FFFD, so one document
+      decodes to two different strings and a digest over them disagrees.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so all four
+    are refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
+    )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
+
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 errors = []
 warnings = []
@@ -72,8 +141,8 @@ def frontmatter_name(skill_md):
 def load_json(path):
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+            return _strict_json_loads(f.read())
+    except (OSError, json.JSONDecodeError, NonConformingJSON) as e:
         err(f"invalid JSON {path}: {e}")
         return None
 
@@ -183,7 +252,7 @@ def payload_identity_at_commit(plugin_name, commit):
 
 def release_identity_at_commit(plugin_name, commit):
     """Reproduce one complete plugin release identity from immutable Git bytes."""
-    manifest = json.loads(
+    manifest = _strict_json_loads(
         git_bytes(
             "show", f"{commit}:plugins/{plugin_name}/.claude-plugin/plugin.json"
         ).decode("utf-8")

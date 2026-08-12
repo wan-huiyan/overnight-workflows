@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 import unittest
@@ -18,10 +19,22 @@ HELPER = (
     ROOT
     / "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py"
 )
-SPEC = importlib.util.spec_from_file_location("poll_orchestrator", HELPER)
-assert SPEC is not None and SPEC.loader is not None
-poller = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(poller)
+# The plugin payload is identified BY ITS BYTES: validate_plugins.py walks this
+# directory and compares file_count / total_bytes / payload_sha256 against
+# scripts/plugin_release_ledger.json. A .pyc written beside
+# poll_orchestrator.py is a new file in that payload, so importing it
+# carelessly here makes a different gate fail -- 6 errors, in a run that had
+# nothing to do with this suite. CI was green only because it happens to run
+# validate_plugins.py before this suite.
+_BYTECODE = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    SPEC = importlib.util.spec_from_file_location("poll_orchestrator", HELPER)
+    assert SPEC is not None and SPEC.loader is not None
+    poller = importlib.util.module_from_spec(SPEC)
+    SPEC.loader.exec_module(poller)
+finally:
+    sys.dont_write_bytecode = _BYTECODE
 
 
 class InjectedCrash(RuntimeError):

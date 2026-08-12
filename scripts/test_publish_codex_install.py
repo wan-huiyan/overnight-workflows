@@ -417,6 +417,68 @@ class PublisherHarness:
             **arguments
         )
 
+    def register_pending_source_review(
+        self,
+        operation: str,
+        manifest_path: Path,
+        *,
+        prepared_generation_id: object | None = None,
+        prepare_receipt_sha256: str | None = None,
+        review_id: str = "source-review",
+    ) -> None:
+        """Register one prepublication source review over the prepared candidate.
+
+        Nothing judges it, so this is the state the live controller manifest is
+        actually in: a review dispatched and still pending.
+        """
+        _, state = publisher._load_state(self.state, operation)
+        finalization.append_finalization_record(
+            manifest_path,
+            record_type="source_review_input_registered",
+            writer_controller_id=f"controller-{operation}",
+            payload={
+                "review_id": review_id,
+                "panel_id": f"panel-{operation}",
+                "review_boundary": "prepublication-source-and-staged-snapshot",
+                "repository_heads": {
+                    "installed_source": {
+                        "repository_key": "package-source",
+                        "head_sha": self.commit,
+                    }
+                },
+                "prepared_generation_id": (
+                    state["generation_id"]
+                    if prepared_generation_id is None
+                    else prepared_generation_id
+                ),
+                "prepare_receipt_sha256": (
+                    state["prepare_receipt"]["sha256"]
+                    if prepare_receipt_sha256 is None
+                    else prepare_receipt_sha256
+                ),
+                "panel_input_path": str(self.root / "panel-input.jsonl"),
+                "panel_input_sha256": "a" * 64,
+                "raw_input_inventory_path": str(self.root / "raw-input.inventory"),
+                "raw_input_inventory_sha256": "7" * 64,
+                "raw_input_seal_path": str(self.root / "raw-input-seal.json"),
+                "raw_input_seal_sha256": "b" * 64,
+                "raw_input_max_files": 200,
+                "raw_input_max_total_bytes": 10000000,
+                "raw_input_actual_files": 1,
+                "raw_input_actual_total_bytes": 1,
+                "expected_reports": 1,
+                "received_reports": 0,
+                "expected_challenge_responses": 1,
+                "received_challenge_responses": 0,
+                "expected_judges": 1,
+                "received_judges": 0,
+                "live_installation_status": "UNCHANGED_PREDECESSOR",
+                "source_guidance_status": "NOT_REVIEWED",
+                "state": "SOURCE_REVIEW_REGISTERED",
+                "next_action": "dispatch reviewers",
+            },
+        )
+
     def finalization_manifest(self, operation: str) -> Path:
         path = self.root / f"controller/{operation}-finalization.jsonl"
         path.parent.mkdir(exist_ok=True)
@@ -5451,6 +5513,58 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(prepare_before, prepare_path.read_bytes())
         self.assertEqual(manifest_before, manifest.read_bytes())
         self.assertFalse(paths["reservation"].exists())
+
+    def test_pending_source_review_blocks_reserve_and_publish(self) -> None:
+        """A dispatch-only source review reserves nothing, at the publisher layer.
+
+        Two mutations, each on its own prepared operation.  The first is the
+        state the live controller manifest is actually in: a source review
+        registered over this prepared candidate with nothing judging it.  The
+        second wires another candidate's review onto this one by half its join.
+        """
+        temporary, harness = self.make_harness()
+        self.addCleanup(temporary.cleanup)
+        operation = "pending-source-review"
+        harness.prepare(operation)
+        manifest = harness.finalization_manifest(operation)
+        harness.register_pending_source_review(operation, manifest)
+        paths, _ = publisher._load_state(harness.state, operation)
+
+        with self.assertRaisesRegex(
+            publisher.PublicationError, "accepted source-review judgment"
+        ):
+            harness.reserve(operation, finalization_manifest=manifest)
+
+        self.assertFalse(paths["reservation"].exists())
+        self.assertFalse(paths["reservation"].is_symlink())
+        _, state = publisher._load_state(harness.state, operation)
+        self.assertEqual("PREPARED", state["status"])
+        self.assertNotIn(
+            "installed_publication_reservation_intent",
+            {
+                json.loads(line)["record_type"]
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+            },
+        )
+        with self.assertRaisesRegex(publisher.PublicationError, "not RESERVED"):
+            publisher.publish_operation(
+                state_root=harness.state,
+                operation=operation,
+                exchanger=publisher.FakeAtomicExchanger(),
+                checker_runner=publisher._fake_checker,
+            )
+
+        crosswired = "crosswired-source-review"
+        harness.prepare(crosswired)
+        crosswired_manifest = harness.finalization_manifest(crosswired)
+        harness.register_pending_source_review(
+            crosswired, crosswired_manifest, prepare_receipt_sha256="c" * 64
+        )
+        with self.assertRaisesRegex(publisher.PublicationError, "partially matches"):
+            harness.reserve(crosswired, finalization_manifest=crosswired_manifest)
+        self.assertFalse(
+            publisher._operation_paths(harness.state, crosswired)["reservation"].exists()
+        )
 
     def test_malformed_lock_takeover_and_ambiguous_recovery_are_refused_without_deletion(self) -> None:
         temporary, harness = self.make_harness()

@@ -71,6 +71,74 @@ UTC_RE = re.compile(
 )
 
 
+class NonConformingJSON(ValueError):
+    """These bytes do not have one meaning, so no gate may act on them.
+
+    Four ways ``json.loads`` will hand back a confident answer where another
+    conforming parser would hand back a different one, or none:
+
+    * a repeated key -- RFC 8259 leaves the outcome undefined, Python keeps the
+      last, and an implementation that keeps the first reads the same bytes as
+      a different document;
+    * ``NaN`` / ``Infinity`` / ``-Infinity`` -- a Python extension, not JSON at
+      all, which a conforming parser rejects outright;
+    * a number too large for a float, such as ``1e400`` -- ordinary JSON number
+      syntax, which Python resolves to the same infinity as the line above and
+      then re-encodes as the literal ``Infinity`` this decoder refuses;
+    * an unpaired surrogate escape such as ``\\ud800`` -- Python keeps the lone
+      code point and Go's encoding/json substitutes U+FFFD, so one document
+      decodes to two different strings and a digest over them disagrees.
+
+    Every decode routed through ``_strict_json_loads`` feeds a gate, so all four
+    are refused rather than resolved.
+    """
+
+
+def _strict_json_loads(text):
+    """Decode one JSON document, refusing anything with two readings."""
+
+    def reject_duplicate_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NonConformingJSON(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    def reject_non_json_constant(constant: str):
+        raise NonConformingJSON(f"non-JSON constant {constant!r}")
+
+    def reject_non_finite_number(number: str):
+        # parse_float sees every number carrying a "." or an exponent, and
+        # parse_constant is NEVER called for ordinary number syntax -- which is
+        # why refusing the spelled-out Infinity alone still accepted 1e400 and
+        # then re-encoded it to the very literal it refuses. Integer tokens
+        # cannot overflow, Python's ints being arbitrary precision, so this is
+        # the whole of the surface.
+        value = float(number)
+        if value == float("inf") or value == float("-inf"):
+            raise NonConformingJSON(f"out-of-range JSON number {number!r}")
+        return value
+
+    value = json.loads(
+        text,
+        object_pairs_hook=reject_duplicate_keys,
+        parse_constant=reject_non_json_constant,
+        parse_float=reject_non_finite_number,
+    )
+    # The complete test for an unpaired surrogate anywhere in the document --
+    # in a key, in a value, or inside an array -- without walking it. Encoding
+    # refuses a lone surrogate and accepts the character a surrogate PAIR
+    # decodes to, so ordinary non-BMP text written as an escape pair still
+    # passes. Raw surrogate bytes cannot arrive at all: UTF-8 decoding rejects
+    # them before this function is reached.
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NonConformingJSON("unpaired surrogate in a JSON string") from exc
+    return value
+
+
 class AuthorityError(RuntimeError):
     """Authority evidence or the durable decision is unsafe or malformed."""
 
@@ -165,8 +233,8 @@ def _regular_bytes(path: Path, *, label: str) -> bytes:
 def _load_authority(path: Path, *, review_id: str) -> Dict[str, Any]:
     data = _regular_bytes(path, label="client-delivery authority receipt")
     try:
-        value = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+        value = _strict_json_loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, NonConformingJSON) as exc:
         raise AuthorityError("client-delivery authority receipt is invalid JSON") from exc
     if not isinstance(value, dict) or set(value) != AUTHORITY_FIELDS:
         raise AuthorityError("client-delivery authority receipt has schema drift")
@@ -252,7 +320,7 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> Dict[str, Any]:
         )
     except FileExistsError:
         existing = _validate_decision(
-            json.loads(_regular_bytes(path, label="client-delivery action decision"))
+            _strict_json_loads(_regular_bytes(path, label="client-delivery action decision"))
         )
         invariant = {key: value for key, value in value.items() if key != "recorded_at"}
         existing_invariant = {

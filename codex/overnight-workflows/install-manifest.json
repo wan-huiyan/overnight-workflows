@@ -4,7 +4,7 @@
   "layout": "per-workflow-package",
   "input_identity": {
     "format": "overnight-workflows-install-input-v1",
-    "digest": "b6ef6cfe44f0958d00619637c766b45d966b7b4b314b5bfb5b048771df97af74"
+    "digest": "257b0b1bf69b9035a6b6a8e9f5bc787023afef8cf8a97c6833717355eba066fd"
   },
   "evidence_inventory_format": "sha256-size-path-v1",
   "loader_contract": {
@@ -195,12 +195,12 @@
     {
       "canonical_source": "scripts/panel_input_fixtures.json",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/panel_input_fixtures.json",
-      "source_sha256": "b36485a0233c5a80188349d11c9d3b62d5355bb4a1f4454bdbb8363c0cba16ab"
+      "source_sha256": "04e362328c440ea33131db267b8f2a125a0aa72c4ab0e70245cf8734a0232cc7"
     },
     {
       "canonical_source": "scripts/validate_panel_inputs.py",
       "installed_path": "references/workflows/overnight-multi-issue-implementation/scripts/validate_panel_inputs.py",
-      "source_sha256": "16aeb03d5b909eb6e237531ca7a6df4882584cac339cc13fe8b13d610bc51016"
+      "source_sha256": "761d9522a04e81d7344c69c84fcee01d434e4db244c68f74c5a293ebcc53940c"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/SKILL.md",
@@ -211,12 +211,12 @@
     {
       "canonical_source": "plugins/overnight-review-client-delivery/scripts/action_authority.py",
       "installed_path": "references/workflows/overnight-review-client-delivery/scripts/action_authority.py",
-      "source_sha256": "b9ec134926fb7419eefacc754c9155d3d8d5797fbea554b138ac6acabfd0bea5"
+      "source_sha256": "3c33ad191608a609e560f8c0bb9b647d599734a463dc2b5916d1fe88ac47bec9"
     },
     {
       "canonical_source": "plugins/overnight-review-client-delivery/scripts/final_byte_review.py",
       "installed_path": "references/workflows/overnight-review-client-delivery/scripts/final_byte_review.py",
-      "source_sha256": "c530f83a8673c372e3aa8160a33bd3667027aae309db6d333e343db9117aec6d"
+      "source_sha256": "f7a33128f40c95ede4a586a0453b0b5b85a8e275ab7ee467ff339ad0f7729105"
     },
     {
       "canonical_source": "plugins/overnight-review-panel-blocked-reviewer-reads-as-clean/SKILL.md",
@@ -233,7 +233,7 @@
     {
       "canonical_source": "plugins/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
       "installed_path": "references/workflows/schedule-poll-orchestrator-pattern/scripts/poll_orchestrator.py",
-      "source_sha256": "19fd51983144afedf50eb1caaeb24b8cd1987b48c5d76bf441e84f04cb047f4c"
+      "source_sha256": "d8a88a5bd98bca88ea2c834e44ae05f24ec5dcc225982437d53c081176386d0a"
     },
     {
       "canonical_source": "plugins/subagent-review-tier-calibration-for-overnight-pr-chains/SKILL.md",
