@@ -1,0 +1,20 @@
+{
+  "name": "plant-the-failure-before-you-trust-the-check",
+  "description": "A check that has only ever passed has never been shown to work. Before trusting a guard, a test, an agent's \"finding closed\", or a cost fix, make the failure it exists to catch actually happen and confirm the check turns RED — and plant it in the production path, not the fixture (a fixture that already carries the field the code was meant to fetch keeps the test green after the fetch is deleted). Covers verifying a closed finding by running the negative case rather than grepping for the mechanism, measuring every factor of a cost before declaring it fixed, and putting a canary on the surface the leak actually uses. Companion safety pattern; adjacent to verifier-rederive-from-raw-not-the-checked-artifact, which hardens where a check gets its expected values, where this one asks whether the check can fail at all.",
+  "version": "1.0.0",
+  "author": {
+    "name": "wan-huiyan"
+  },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "verification",
+    "adversarial-testing",
+    "mutation-testing",
+    "audit-closure",
+    "overnight",
+    "review-integrity"
+  ]
+}

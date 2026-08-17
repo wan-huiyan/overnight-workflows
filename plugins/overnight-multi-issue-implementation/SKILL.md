@@ -16,7 +16,7 @@ description: |
   work (use plain `subagent-driven-development`), polishing an existing deliverable (use
   `overnight-review-client-delivery`), or generating insights from data (use `overnight-insight-discovery`).
 author: wan-huiyan + Claude Code
-version: 1.5.0
+version: 1.6.0
 date: 2026-05-29
 ---
 
@@ -212,6 +212,37 @@ looked wrong.
 Same family as a green suite that executed zero tests: the machinery reports success over an empty
 set. See sister skill `overnight-review-panel-blocked-reviewer-reads-as-clean` — that one is a
 reviewer that could not see; this one is a reviewer that saw and could not be heard.
+
+### Ask what each component does when it REFUSES — and whether anyone would notice
+
+A red failure is a gift: it stops the run and names itself. **A silent refusal is worse**, because
+the run continues around it and every surface stays green.
+
+Observed: a promoter — the step that takes a finished round and opens its pull request —
+**regenerated its input data before opening the PR**. A bad input made that regeneration throw
+*inside* the run, the exception was caught, and the caught path returned **REFUSED**. So: no pull
+request, no failing check, no alert, nothing to look at. And because the promoter was the single
+exit every round had to pass through, its refusal did not just lose one round — **it stranded every
+other round's finished work behind it.** At one point **84 finished items** sat stalled that way,
+with every component reporting normally.
+
+**Three rules, and the first one is the whole skill:**
+
+- **For every component in the chain, write down what it does when it refuses, what artifact the
+  refusal produces, and who reads that artifact.** A refusal that produces no artifact is invisible
+  by construction, and no amount of monitoring the happy path will find it. Do this at plan time —
+  it is a five-minute table.
+- **Make a refusal as loud as a failure.** A caught exception that returns a "declined" status must
+  also write a failure record the morning summary reads — a status field, a file, a filed issue —
+  and an empty output where an artifact was expected must be an error condition, not a valid state.
+  Prefer letting it go red where nothing downstream depends on it yet.
+- **Keep work that can throw out of the promotion path.** Regenerating data, refetching a source or
+  recomputing a figure belongs *before* the point of no return, so a bad input fails while it costs
+  one round rather than the whole queue. Where a single component is the shared exit for many
+  rounds, give it its own alarm — its refusal is everyone's stall.
+
+Verify it the only way that works: **plant the bad input, run it, and confirm somebody would have
+seen the refusal.** See `plant-the-failure-before-you-trust-the-check`.
 
 ### Tier 1 — Full two-stage (strict `subagent-driven-development`)
 
@@ -600,6 +631,28 @@ report "no result" — inconclusive is an outcome of something that *happened*, 
 claims a measurement that does not exist. The observed run got this right unprompted and it is
 worth making explicit.
 
+**And its mirror image: a null result IS a complete result — put that sentence in every brief.**
+The rule above stops a never-run unit being dressed up as a measurement. This one stops the
+opposite loss: **an agent sent to find something will find something.** Absent an explicit
+permission to come back empty, a dispatched agent treats "nothing here" as its own failure and
+reaches for the weakest candidate it can defend, and you get a finding you then have to spend a
+review round retiring. The line to include, in the brief, in these words:
+
+> **A null result is a complete result.** If the honest answer is that there is nothing here,
+> that nothing works, or that this is not worth doing, say so and show the measurement that
+> proves it. That is a successful assignment, not a failed one.
+
+**It paid twice on this run.** One agent concluded that a whole family of approaches was dead and
+returned the measurement to prove it — which retired the family instead of leaving it to be
+re-attempted next session. Another measured its own assignment, found it was not worth doing, and
+said so rather than producing a thin version of it. Neither would have come back that way without
+the sentence; both saved more than they cost.
+
+Two things make the permission real rather than decorative: **require the measurement** (a null
+asserted without one is just a shrug, and see the flagship analysis protocol's rule that
+under-extraction manufactures nulls), and **say plainly that a null does not reduce the agent's
+tier or budget** — otherwise a well-briefed agent still hedges toward a finding.
+
 **Production changes: the reverting direction only, and only on unanimous authorisation.** If the
 run can change a live system, bound it two ways. First, direction: it may return production to the
 behaviour that ran before, never enable something new — a revert is cheap to undo and its failure
@@ -791,6 +844,16 @@ By morning the user should have:
   cost far more than the afternoon of triage that prevents them.
 - **Don't** call a chain "zero-regression" on a matching pass/fail *count* —
   diff the failing *set* (a new break can hide a flaky new pass).
+- **Don't** relay an agent's "finding closed" on the strength of having read
+  the source and seen the mechanism. Run the input the guard is supposed to
+  reject. Eleven findings were relayed as closed that way in one run and eight
+  were still open — see `plant-the-failure-before-you-trust-the-check`.
+- **Don't** ship a guard or test that has only ever been green. Break the code
+  path on purpose first and watch it go red; a fixture that already carries the
+  data the code was meant to fetch will keep a dead guard passing.
+- **Don't** let a component swallow its own refusal. A caught exception that
+  returns "declined" with no artifact is invisible, and if that component is a
+  shared exit it stalls everyone else's finished work too.
 
 ## References / sister skills
 
@@ -825,6 +888,14 @@ By morning the user should have:
   closes a multi-part issue prematurely).
 - `stale-base-pr-silently-reverts-upstream-content` — why same-file sequential
   PRs need `git reset --hard origin/main` between merges.
+- `plant-the-failure-before-you-trust-the-check` — the companion plugin behind
+  the two verification anti-patterns above: break it on purpose in the
+  production path, and verify a closed finding by running the negative case
+  rather than grepping for the mechanism.
+- `cross-lane-audit-quote-verbatim-and-pin-the-commit` — companion plugin for
+  running a second lane against this one: quote the other lane's wording
+  verbatim, and pin any commit under audit with `git update-ref refs/audit/...`
+  so an amend cannot move it out from under the audit.
 
 ## Worked example — 2026-05-08 chatbox session
 

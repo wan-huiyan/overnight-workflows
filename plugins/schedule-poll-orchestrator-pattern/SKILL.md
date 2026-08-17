@@ -14,9 +14,13 @@ description: |
   cheap re-schedule loop that exits to consolidation at the first poll where
   all tracks report `phase: complete`. Distinct from `successor-handoff`
   (in-session parent polling a subagent) — this is for scheduled-trigger
-  orchestrators that need to survive session ends.
+  orchestrators that need to survive session ends. Also covers the standing
+  prompt itself going stale: a loop prompt is written once and re-read on every
+  wake, and it asserts in the present tense whatever was true when it was
+  written, so re-verify its own factual claims (what is authorised, what is
+  capped, what is blocked) at the top of each wake before dispatching anything.
 author: Claude Code
-version: 1.0.1
+version: 1.1.0
 date: 2026-08-06
 ---
 
@@ -153,6 +157,43 @@ Skill(schedule) with:
                                  poll protocol above; may re-schedule self)
 ```
 
+### Re-verify the standing prompt's own claims on every wake
+
+The poll loop above is idempotent by design — every wake runs the same code. The **prompt**
+that wake reads is idempotent too, and that is the problem. It was written once, at
+dispatch, and it asserts in the present tense whatever was true then: what is authorised,
+what is capped, what is blocked, what the owner has not answered yet. Nothing expires it and
+nothing timestamps it, so hours later the loop is still relaying yesterday's world to every
+agent it dispatches, with full confidence and no visible staleness.
+
+**This is not hypothetical and it is not rare.** In one run the standing prompt was wrong
+three times: it told agents a deploy was **unauthorised after the owner had authorised it**,
+and it told them **not to raise a cap the owner had asked to have raised**. Each agent read
+the prompt, believed it, and behaved correctly given a false premise. Nothing failed, so
+nothing surfaced.
+
+So make re-verification the first step of every wake, before any dispatch:
+
+1. **Enumerate the prompt's factual claims** when you write it — permissions, caps, blockers,
+   "the owner has not yet decided X", any number. Keep them in one clearly-marked block
+   rather than scattered through the instructions, so the next wake knows what to re-check.
+2. **Re-check each claim against live state at the top of the wake** — the current
+   authorisation record, the current cap, the current issue or PR state — and correct the
+   working copy before dispatching. A claim you cannot re-check cheaply should not be in a
+   standing prompt at all.
+3. **Keep the claims in a dated addendum file the loop reads, not in the trigger's prompt
+   text.** Editing the trigger changes every future call signature and can force a rebuild;
+   an appended, dated addendum reaches later agents without disturbing running ones. Same
+   mechanism as `overnight-multi-issue-implementation`'s "amend a running orchestration
+   through a file on disk, not the script", applied to the loop's own instructions.
+4. **Log the re-verification result in the poll log** alongside the phase snapshot, so a
+   morning reader can see which wake was still operating on a stale premise.
+
+The wider rule, worth stating in the prompt itself: **an instruction not to do something is a
+statement about a moment, and it goes stale in the permissive direction as often as the
+restrictive one.** A loop that keeps refusing a thing the owner has since approved looks
+exactly like a loop that is behaving.
+
 ## Verification
 
 The pattern is working correctly when:
@@ -218,6 +259,22 @@ v5 the client ah-ha insight run (2026-04-21):
 
 ## Version history
 
+- **v1.1.0** (2026-08-17) — Adds **"Re-verify the standing prompt's own claims on every
+  wake"**. The poll protocol was already idempotent; the *prompt* each wake reads is
+  idempotent too, and that is the defect — it was written once at dispatch and asserts in
+  the present tense whatever was true then, with no timestamp and nothing to expire it. On
+  one run the standing prompt was wrong three times: it told agents a deploy was
+  unauthorised **after the owner had authorised it**, and told them not to raise a cap the
+  owner **had asked to have raised**. Every agent read it, believed it, and behaved
+  correctly on a false premise, so nothing failed and nothing surfaced. The new section
+  requires the prompt's factual claims to be enumerated in one marked block when it is
+  written, re-checked against live state at the top of each wake before any dispatch, kept
+  in a dated addendum file rather than in the trigger's own text (the loop-level form of
+  `overnight-multi-issue-implementation`'s "amend through a file on disk, not the script"),
+  and the re-verification result logged next to the phase snapshot. The line worth carrying
+  out of it: **a restriction goes stale in the permissive direction as often as the
+  restrictive one**, and a loop still refusing something the owner has since approved looks
+  exactly like a loop that is behaving.
 - **v1.0.1** (2026-08-06) — The three References entries above were markdown
   links to `~/.claude/skills/<name>/SKILL.md`. That path only exists when a
   skill was copied in by hand; a plugin install puts it under

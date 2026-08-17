@@ -1,0 +1,20 @@
+{
+  "name": "cross-lane-audit-quote-verbatim-and-pin-the-commit",
+  "description": "Run two independent lanes that audit each other, hand each lane the other's words verbatim rather than your summary, and pin any commit under audit with `git update-ref refs/audit/<name> <sha>` so an amend or rebase cannot move it out from under the audit. Prevents the drift where the other lane specified something precisely and it was carried forward approximately — a blanket clock where an upper bound was granted, a path prefix where the rule named exact files, \"before commit\" where they wrote \"before edit\". No self-check catches these: the lane's own checks were built from its own restatement. Twenty-six such findings surfaced in one run, none by either lane's own checks. Companion safety pattern; sister to overnight-review-panel-blocked-reviewer-reads-as-clean and plant-the-failure-before-you-trust-the-check.",
+  "version": "1.0.0",
+  "author": {
+    "name": "wan-huiyan"
+  },
+  "repository": "https://github.com/wan-huiyan/overnight-workflows",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "claude-code-skill",
+    "cross-review",
+    "audit",
+    "verification",
+    "git-refs",
+    "overnight",
+    "review-integrity"
+  ]
+}
