@@ -16,7 +16,7 @@ description: |
   verify a finding before it reaches a stakeholder. The deep-dive skills in this bundle
   each generalize one step — load the matching one when a step gets hard.
 author: wan-huiyan + Claude Code
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Observational analysis rigor — the validity gate
@@ -139,6 +139,7 @@ gave 40, agreeing on only 19 — and both returned the same headline (17% and 18
 | "We should get them to do X so they advance" | Associational → marker; needs an A/B to be a lever (step 5). |
 | "X turned out NOT to predict Y" (a clean null) | Did your extraction drop exposed rows? Assert parsed counts against the raw source, and re-probe with an over-inclusive construction. |
 | A raw effect is negative/null but "should" be positive | Simpson — control the axis, it may flip (steps 3–4). |
+| "The tuned model clears the target on the held-out set" | Was the cut chosen after someone saw held-out outcomes? That is a fit, not a measurement — ask for the honestly-chosen value beside it, and for how many looks the held-out set has already had. |
 | "I fixed the number" (edited the text) | Did the baked chart / twin doc / cached payload update too? A caption edit doesn't regenerate the chart (step 9). |
 
 ## How to apply
@@ -177,7 +178,10 @@ Each step generalizes into a focused skill in this bundle; load the matching one
   `frozen-cohort-rebucket-newer-model-contemporaneity-leak`,
   `cohort-broadening-event-source-scope-leak`
 - **Step 5 — marker vs lever:** `differentiator-scoping-by-provenance-not-signal`,
-  `funnel-stage-lift-needs-downstream-capacity-check`
+  `funnel-stage-lift-needs-downstream-capacity-check`,
+  `held-out-cut-tuned-on-its-own-errors-manufactures-the-lift`
+  (the holdout this step sends you to is itself consumable — a cut chosen after seeing
+  held-out outcomes is a fit, and every look degrades the set)
 - **Step 6 — coverage-limited joins:** `coverage-limited-join-validate-unbiased-before-trusting`
 - **Step 7 — triple-probe / re-derive:** `verifier-rederive-from-raw-not-the-checked-artifact`,
   `finding-verification-live-bq-triple-probe`,
